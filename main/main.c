@@ -1,9 +1,11 @@
 /**
  * @file main.c
- * @brief 应用入口与 ML307C 模块基础测试流程。
+ * @brief 应用入口与外设基础测试流程。
  */
 
+#include "bsp_i2c.h"
 #include "bsp_ml307c.h"
+#include "bsp_pca9557.h"
 #include "bsp_uart.h"
 #include "esp_log.h"
 #include "osal_task.h"
@@ -11,9 +13,9 @@
 #include <stdio.h>
 
 /**
- * @brief ML307C 测试日志标签。
+ * @brief 应用测试日志标签。
  */
-static const char *TAG = "ml307c_test";
+static const char *TAG = "app_test";
 
 /**
  * @brief 打印通用测试步骤结果。
@@ -79,10 +81,77 @@ static void ml307c_basic_test(ml307c_handle_t dev)
 }
 
 /**
+ * @brief 执行 PCA9557 基础功能测试。
+ */
+static void pca9557_basic_test(void)
+{
+    ESP_LOGI(TAG, "开始 PCA9557 基础测试");
+
+    if (log_step_result("I2C init", bsp_i2c_init()) != 0) {
+        return;
+    }
+
+    pca9557_interface_t itf = {
+        .write_reg = pca9557_i2c_write_reg_impl,
+        .read_reg = pca9557_i2c_read_reg_impl,
+    };
+
+    pca9557_config_t cfg = {
+        .output_init = 0x00,
+        .polarity_init = 0x00,
+        .direction_init = 0xFE,  /* P0 输出，P1-P7 输入 */
+    };
+
+    pca9557_handle_t pca9557 = pca9557_init(&cfg, &itf);
+    if (pca9557 == NULL) {
+        ESP_LOGE(TAG, "PCA9557 初始化失败");
+        return;
+    }
+
+    uint8_t input_value = 0;
+    uint8_t output_value = 0;
+    pca9557_level_t pin_level = PCA9557_LEVEL_LOW;
+
+    log_step_result("PCA9557 set P0 output",
+                    pca9557_set_pin_mode(pca9557, PCA9557_PIN_0, PCA9557_IO_OUTPUT));
+
+    for (int i = 0; i < 4; i++) {
+        pca9557_level_t level = (i % 2 == 0) ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW;
+        if (pca9557_set_pin_level(pca9557, PCA9557_PIN_0, level) == 0) {
+            ESP_LOGI(TAG, "PCA9557 P0 输出: %s",
+                     level == PCA9557_LEVEL_HIGH ? "HIGH" : "LOW");
+        } else {
+            ESP_LOGE(TAG, "PCA9557 P0 输出设置失败");
+        }
+        osal_delay_ms(500);
+    }
+
+    if (pca9557_read_output(pca9557, &output_value) == 0) {
+        ESP_LOGI(TAG, "PCA9557 输出寄存器缓存: 0x%02X", output_value);
+    }
+
+    if (pca9557_read_input(pca9557, &input_value) == 0) {
+        ESP_LOGI(TAG, "PCA9557 输入寄存器: 0x%02X", input_value);
+    } else {
+        ESP_LOGW(TAG, "PCA9557 输入寄存器读取失败");
+    }
+
+    if (pca9557_get_pin_level(pca9557, PCA9557_PIN_0, &pin_level) == 0) {
+        ESP_LOGI(TAG, "PCA9557 P0 当前输入读数: %s",
+                 pin_level == PCA9557_LEVEL_HIGH ? "HIGH" : "LOW");
+    }
+
+    pca9557_deinit(pca9557);
+    ESP_LOGI(TAG, "PCA9557 基础测试完成");
+}
+
+/**
  * @brief ESP-IDF 应用入口。
  */
 void app_main(void)
 {
+    pca9557_basic_test();
+
     ESP_LOGI(TAG, "开始 ML307C 基础测试");
 
     if (bsp_uart_init() != 0) {
