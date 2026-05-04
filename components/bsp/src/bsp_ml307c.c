@@ -4,6 +4,9 @@
  */
 
 #include "bsp_ml307c.h"
+
+#include "bsp_common.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,6 +20,11 @@
 #define CMD_ICCID     "+ICCID:"
 #define CMD_SMOK      "SMS OK"
 #define LINE_MAX_LEN  256
+
+/**
+ * @brief ML307C 日志标签。
+ */
+static const char *TAG = "bsp_ml307c";
 
 /* ==================== 内部结构体 ==================== */
 struct ml307c_dev {
@@ -114,15 +122,18 @@ static void ml307c_append_rx(ml307c_handle_t dev, uint8_t *data, int len);
 ml307c_handle_t ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
 {
     if (cfg == NULL || itf == NULL) {
+        BSP_LOGE(TAG, "ML307C 初始化失败: 配置或接口为空");
         return NULL;
     }
     if (itf->uart_write == NULL || itf->uart_read == NULL ||
         itf->delay_ms == NULL || itf->get_tick == NULL) {
+        BSP_LOGE(TAG, "ML307C 初始化失败: 必要接口函数为空");
         return NULL;
     }
 
     ml307c_handle_t dev = (ml307c_handle_t)calloc(1, sizeof(struct ml307c_dev));
     if (dev == NULL) {
+        BSP_LOGE(TAG, "ML307C 初始化失败: 设备对象内存分配失败");
         return NULL;
     }
 
@@ -134,12 +145,16 @@ ml307c_handle_t ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
     dev->rx_rb.buf  = (uint8_t *)calloc(1, 1024);
     if (dev->rx_rb.buf == NULL) {
         free(dev);
+        BSP_LOGE(TAG, "ML307C 初始化失败: 接收缓冲区内存分配失败");
         return NULL;
     }
     dev->rx_rb.size = 1024;
     dev->rx_rb.head = 0;
     dev->rx_rb.tail = 0;
 
+    BSP_LOGI(TAG, "ML307C 驱动初始化成功, timeout=%u, rx_buf=%u",
+             (unsigned int)dev->config.timeout_ms,
+             (unsigned int)dev->rx_rb.size);
     return dev;
 }
 
@@ -155,6 +170,7 @@ void ml307c_deinit(ml307c_handle_t dev)
     }
 
     free(dev);
+    BSP_LOGI(TAG, "ML307C 驱动已释放");
 }
 
 int ml307c_check_alive(ml307c_handle_t dev)
@@ -452,15 +468,24 @@ static int ml307c_send_cmd(
     uint32_t timeout)
 {
     if (dev == NULL || cmd == NULL) {
+        BSP_LOGE(TAG, "ML307C 发送命令参数无效, dev=%p, cmd=%p", dev, cmd);
         return -1;
     }
 
     ml307c_clear_buffer(dev);
 
     uint16_t len = (uint16_t)strlen(cmd);
-    dev->itf->uart_write((uint8_t *)cmd, len);
+    BSP_LOGI(TAG, "ML307C 发送 AT 命令, len=%u, expect=%s",
+             (unsigned int)len,
+             (expect != NULL && expect[0] != '\0') ? expect : "none");
+    int write_len = dev->itf->uart_write((uint8_t *)cmd, len);
+    if (write_len < 0) {
+        BSP_LOGE(TAG, "ML307C AT 命令发送失败, ret=%d", write_len);
+        return write_len;
+    }
 
     if (expect == NULL || expect[0] == '\0') {
+        BSP_LOGI(TAG, "ML307C AT 命令无需等待响应");
         return 0;
     }
 
@@ -570,6 +595,7 @@ static int ml307c_wait_response(
     uint32_t timeout)
 {
     if (dev == NULL || expect == NULL) {
+        BSP_LOGE(TAG, "ML307C 等待响应参数无效, dev=%p, expect=%p", dev, expect);
         return -1;
     }
 
@@ -584,12 +610,14 @@ static int ml307c_wait_response(
 
         /* 在缓冲区中搜索期望字符串 */
         if (ml307c_search_in_buffer(dev, expect) == 0) {
+            BSP_LOGI(TAG, "ML307C 收到期望响应: %s", expect);
             return 0;  /* 找到期望字符串 */
         }
 
         dev->itf->delay_ms(10);
     }
 
+    BSP_LOGW(TAG, "ML307C 等待响应超时: %s", expect);
     return -1;  /* 超时 */
 }
 

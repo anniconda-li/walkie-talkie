@@ -4,6 +4,10 @@
  */
 
 #include "bsp_i2c.h"
+#include "bsp.h"
+#include "bsp_i2s.h"
+#include "bsp_inmp441.h"
+#include "bsp_max98357a.h"
 #include "bsp_ml307c.h"
 #include "bsp_pca9557.h"
 #include "bsp_uart.h"
@@ -16,6 +20,26 @@
  * @brief 应用测试日志标签。
  */
 static const char *TAG = "app_test";
+
+/**
+ * @brief 应用持有的 PCA9557 句柄。
+ */
+static pca9557_handle_t s_pca9557 = NULL;
+
+/**
+ * @brief 应用持有的 ML307C 句柄。
+ */
+static ml307c_handle_t s_ml307c = NULL;
+
+/**
+ * @brief 应用持有的 INMP441 句柄。
+ */
+static inmp441_handle_t s_inmp441 = NULL;
+
+/**
+ * @brief 应用持有的 MAX98357A 句柄。
+ */
+static max98357a_handle_t s_max98357a = NULL;
 
 /**
  * @brief 打印通用测试步骤结果。
@@ -33,6 +57,78 @@ static int log_step_result(const char *name, int ret)
     }
 
     return ret;
+}
+
+/**
+ * @brief 初始化应用启动阶段需要长期持有的轻量外设对象。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+static int app_peripheral_init(void)
+{
+    if (log_step_result("BSP init", bsp_init()) != 0) {
+        return -1;
+    }
+
+    pca9557_interface_t pca9557_itf = {
+        .write_reg = pca9557_i2c_write_reg_impl,
+        .read_reg = pca9557_i2c_read_reg_impl,
+    };
+
+    pca9557_config_t pca9557_cfg = {
+        .output_init = 0x00,
+        .polarity_init = 0x00,
+        .direction_init = 0xFE,  /* P0 输出，P1-P7 输入 */
+    };
+
+    s_pca9557 = pca9557_init(&pca9557_cfg, &pca9557_itf);
+    if (s_pca9557 == NULL) {
+        ESP_LOGE(TAG, "PCA9557 初始化失败");
+        return -2;
+    }
+    ESP_LOGI(TAG, "PCA9557 初始化完成");
+
+    ml307c_config_t ml307c_cfg = {
+        .timeout_ms = 3000,
+    };
+
+    ml307c_interface_t ml307c_itf = {
+        .uart_write = ml307c_uart_write_impl,
+        .uart_read = ml307c_uart_read_impl,
+        .delay_ms = osal_delay_ms,
+        .get_tick = osal_get_tick_ms,
+    };
+
+    s_ml307c = ml307c_init(&ml307c_cfg, &ml307c_itf);
+    if (s_ml307c == NULL) {
+        ESP_LOGE(TAG, "ML307C 初始化失败");
+        return -3;
+    }
+    ESP_LOGI(TAG, "ML307C 初始化完成");
+
+    inmp441_interface_t inmp441_itf = {
+        .read = inmp441_i2s_read_impl,
+    };
+
+    s_inmp441 = inmp441_init(&inmp441_itf);
+    if (s_inmp441 == NULL) {
+        ESP_LOGE(TAG, "INMP441 初始化失败");
+        return -4;
+    }
+    ESP_LOGI(TAG, "INMP441 初始化完成");
+
+    max98357a_interface_t max98357a_itf = {
+        .write = max98357a_i2s_write_impl,
+    };
+
+    s_max98357a = max98357a_init(&max98357a_itf);
+    if (s_max98357a == NULL) {
+        ESP_LOGE(TAG, "MAX98357A 初始化失败");
+        return -5;
+    }
+    ESP_LOGI(TAG, "MAX98357A 初始化完成");
+
+    return 0;
 }
 
 /**
@@ -83,28 +179,12 @@ static void ml307c_basic_test(ml307c_handle_t dev)
 /**
  * @brief 执行 PCA9557 基础功能测试。
  */
-static void pca9557_basic_test(void)
+static void pca9557_basic_test(pca9557_handle_t pca9557)
 {
     ESP_LOGI(TAG, "开始 PCA9557 基础测试");
 
-    if (log_step_result("I2C init", bsp_i2c_init()) != 0) {
-        return;
-    }
-
-    pca9557_interface_t itf = {
-        .write_reg = pca9557_i2c_write_reg_impl,
-        .read_reg = pca9557_i2c_read_reg_impl,
-    };
-
-    pca9557_config_t cfg = {
-        .output_init = 0x00,
-        .polarity_init = 0x00,
-        .direction_init = 0xFE,  /* P0 输出，P1-P7 输入 */
-    };
-
-    pca9557_handle_t pca9557 = pca9557_init(&cfg, &itf);
     if (pca9557 == NULL) {
-        ESP_LOGE(TAG, "PCA9557 初始化失败");
+        ESP_LOGE(TAG, "PCA9557 句柄为空");
         return;
     }
 
@@ -141,7 +221,6 @@ static void pca9557_basic_test(void)
                  pin_level == PCA9557_LEVEL_HIGH ? "HIGH" : "LOW");
     }
 
-    pca9557_deinit(pca9557);
     ESP_LOGI(TAG, "PCA9557 基础测试完成");
 }
 
@@ -150,34 +229,15 @@ static void pca9557_basic_test(void)
  */
 void app_main(void)
 {
-    pca9557_basic_test();
+    if (log_step_result("Peripheral init", app_peripheral_init()) != 0) {
+        return;
+    }
+
+    pca9557_basic_test(s_pca9557);
 
     ESP_LOGI(TAG, "开始 ML307C 基础测试");
 
-    if (bsp_uart_init() != 0) {
-        ESP_LOGE(TAG, "UART 初始化失败");
-        return;
-    }
-
-    ml307c_config_t cfg = {
-        .timeout_ms = 3000,
-    };
-
-    ml307c_interface_t itf = {
-        .uart_write = ml307c_uart_write_impl,
-        .uart_read = ml307c_uart_read_impl,
-        .delay_ms = osal_delay_ms,
-        .get_tick = osal_get_tick_ms,
-    };
-
-    ml307c_handle_t ml307c = ml307c_init(&cfg, &itf);
-    if (ml307c == NULL) {
-        ESP_LOGE(TAG, "ML307C 初始化失败");
-        return;
-    }
-
-    ml307c_basic_test(ml307c);
-    ml307c_deinit(ml307c);
+    ml307c_basic_test(s_ml307c);
 
     ESP_LOGI(TAG, "ML307C 基础测试完成");
 }

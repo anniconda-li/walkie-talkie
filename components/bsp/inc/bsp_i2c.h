@@ -10,6 +10,8 @@
 
 #include <stdint.h>
 
+#include "bsp_common.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,7 +29,7 @@ extern "C" {
  * 如实际硬件不同，可在包含本头文件前或编译选项中重定义该宏。
  */
 #ifndef BSP_I2C_SDA_IO
-#define BSP_I2C_SDA_IO 8
+#define BSP_I2C_SDA_IO GPIO_NUM_1
 #endif
 
 /**
@@ -36,7 +38,7 @@ extern "C" {
  * 如实际硬件不同，可在包含本头文件前或编译选项中重定义该宏。
  */
 #ifndef BSP_I2C_SCL_IO
-#define BSP_I2C_SCL_IO 9
+#define BSP_I2C_SCL_IO GPIO_NUM_2
 #endif
 
 /**
@@ -88,6 +90,14 @@ int bsp_i2c_init(void);
  * @return 成功返回 0；失败返回负值。
  */
 int bsp_i2c_deinit(void);
+
+/**
+ * @brief 获取 BSP I2C 总线句柄。
+ *
+ * @return 已初始化的 I2C 总线句柄；未初始化时返回 NULL。
+ * @note 该接口只供 BSP 内部适配 ESP-IDF 组件使用，设备驱动不应直接依赖该句柄。
+ */
+void *bsp_i2c_get_bus_handle(void);
 
 /**
  * @brief PCA9557 I2C 寄存器写适配函数。

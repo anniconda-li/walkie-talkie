@@ -4,6 +4,7 @@
  */
 #include "bsp_uart.h"
 
+#include "bsp_common.h"
 #include "driver/uart.h"
 #include "osal_queue.h"
 #include "freertos/FreeRTOS.h"
@@ -14,12 +15,27 @@
 static osal_queue_t uart_queue;
 
 /**
+ * @brief UART 是否已经初始化。
+ */
+static int s_uart_inited = 0;
+
+/**
+ * @brief UART 日志标签。
+ */
+static const char *TAG = "bsp_uart";
+
+/**
  * @brief 初始化 UART1 并安装 ESP-IDF UART 驱动。
  *
  * @return 成功返回 0；ESP-IDF API 失败时由 ESP_ERROR_CHECK 处理。
  */
 int bsp_uart_init(void)
 {
+    if (s_uart_inited) {
+        BSP_LOGI(TAG, "ML307C UART 已初始化");
+        return 0;
+    }
+
     uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -35,6 +51,8 @@ int bsp_uart_init(void)
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT_ML307C, 1024, 1024, 10,
                                        (QueueHandle_t *)uart_queue, 0));
 
+    s_uart_inited = 1;
+    BSP_LOGI(TAG, "ML307C UART 初始化成功, port=%d, baud=%d", UART_PORT_ML307C, 115200);
     return 0;
 }
 
@@ -47,7 +65,15 @@ int bsp_uart_init(void)
  */
 int ml307c_uart_write_impl(uint8_t *data, uint16_t len)
 {
-    return uart_write_bytes(UART_PORT_ML307C, (const char *)data, len);
+    int ret = uart_write_bytes(UART_PORT_ML307C, (const char *)data, len);
+    if (ret >= 0) {
+        BSP_LOGI(TAG, "ML307C UART 发送完成, request=%u, written=%d",
+                 (unsigned int)len, ret);
+    } else {
+        BSP_LOGE(TAG, "ML307C UART 发送失败, ret=%d", ret);
+    }
+
+    return ret;
 }
 
 /**
@@ -61,5 +87,12 @@ int ml307c_uart_write_impl(uint8_t *data, uint16_t len)
 int ml307c_uart_read_impl(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     int read_len = uart_read_bytes(UART_PORT_ML307C, buf, len, pdMS_TO_TICKS(timeout_ms));
-    return (read_len >= 0) ? read_len : 0;
+    if (read_len >= 0) {
+        BSP_LOGI(TAG, "ML307C UART 接收完成, request=%u, read=%d",
+                 (unsigned int)len, read_len);
+        return read_len;
+    }
+
+    BSP_LOGE(TAG, "ML307C UART 接收失败, ret=%d", read_len);
+    return 0;
 }
