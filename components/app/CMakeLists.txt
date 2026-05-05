@@ -5,7 +5,11 @@ idf_component_register(
                     
     INCLUDE_DIRS 
         "inc"
+        "inc/ui"
 
     REQUIRES 
+        service
+        lvgl__lvgl
+        osal
 
     )

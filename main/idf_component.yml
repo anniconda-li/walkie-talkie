@@ -18,3 +18,4 @@ dependencies:
   espressif/esp32-camera: ^2.1.6
   espressif/esp_lvgl_port: ^2.7.2
   lvgl/lvgl: ==9.4.0
+  espressif/esp_audio_codec: ^2.5.0

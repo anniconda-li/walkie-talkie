@@ -119,10 +119,12 @@ int bsp_lcd_display_init(void)
         ret = bsp_lcd_err_to_int(esp_lcd_panel_invert_color(s_lcd_panel, false));
     }
     if (ret == 0) {
-        ret = bsp_lcd_err_to_int(esp_lcd_panel_swap_xy(s_lcd_panel, false));
+        ret = bsp_lcd_err_to_int(esp_lcd_panel_swap_xy(s_lcd_panel, BSP_LCD_SWAP_XY != 0));
     }
     if (ret == 0) {
-        ret = bsp_lcd_err_to_int(esp_lcd_panel_mirror(s_lcd_panel, false, false));
+        ret = bsp_lcd_err_to_int(esp_lcd_panel_mirror(s_lcd_panel,
+                                                      BSP_LCD_MIRROR_X != 0,
+                                                      BSP_LCD_MIRROR_Y != 0));
     }
     if (ret == 0) {
         ret = bsp_lcd_err_to_int(esp_lcd_panel_set_gap(s_lcd_panel, 0, 0));
@@ -181,9 +183,9 @@ int bsp_lcd_touch_init(void)
             .interrupt = 0,
         },
         .flags = {
-            .swap_xy = false,
-            .mirror_x = false,
-            .mirror_y = false,
+            .swap_xy = BSP_LCD_SWAP_XY != 0,
+            .mirror_x = BSP_LCD_MIRROR_X != 0,
+            .mirror_y = BSP_LCD_MIRROR_Y != 0,
         },
         .process_coordinates = NULL,
         .interrupt_callback = NULL,
@@ -387,4 +389,19 @@ int bsp_lcd_read_touch(bsp_lcd_touch_point_t *points,
     }
 
     return 0;
+}
+
+esp_lcd_panel_io_handle_t bsp_lcd_get_panel_io_handle(void)
+{
+    return s_lcd_panel_io;
+}
+
+esp_lcd_panel_handle_t bsp_lcd_get_panel_handle(void)
+{
+    return s_lcd_panel;
+}
+
+esp_lcd_touch_handle_t bsp_lcd_get_touch_handle(void)
+{
+    return s_lcd_touch;
 }

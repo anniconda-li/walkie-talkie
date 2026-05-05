@@ -7,5 +7,10 @@ idf_component_register(
         "inc"
 
     REQUIRES 
+        bsp
+        espressif__esp_lvgl_port
+        espressif__esp_lcd_touch
+        lvgl__lvgl
+        osal
 
     )

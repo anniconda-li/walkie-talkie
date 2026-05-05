@@ -7,6 +7,7 @@ idf_component_register(
         "inc"
 
     REQUIRES 
+        log
         
 
     )

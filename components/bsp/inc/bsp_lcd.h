@@ -10,6 +10,10 @@
 
 #include <stdint.h>
 
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_touch.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -17,12 +21,21 @@ extern "C" {
 /**
  * @brief LCD 水平分辨率。
  */
-#define BSP_LCD_H_RES 320u
+#define BSP_LCD_H_RES 240u
 
 /**
  * @brief LCD 垂直分辨率。
  */
-#define BSP_LCD_V_RES 240u
+#define BSP_LCD_V_RES 320u
+
+/**
+ * @brief LCD 竖屏方向配置。
+ *
+ * @note 如果实物触摸或显示方向相反，只调整这一组方向宏。
+ */
+#define BSP_LCD_SWAP_XY  0
+#define BSP_LCD_MIRROR_X 0
+#define BSP_LCD_MIRROR_Y 0
 
 /**
  * @brief 触摸控制器最大触点数。
@@ -110,6 +123,27 @@ int bsp_lcd_fill_screen(uint16_t color);
 int bsp_lcd_read_touch(bsp_lcd_touch_point_t *points,
                        uint8_t max_points,
                        uint8_t *point_num);
+
+/**
+ * @brief 获取 LCD 显示 panel IO 句柄。
+ *
+ * @return 已初始化时返回 panel IO 句柄，否则返回 NULL。
+ */
+esp_lcd_panel_io_handle_t bsp_lcd_get_panel_io_handle(void);
+
+/**
+ * @brief 获取 LCD 显示 panel 句柄。
+ *
+ * @return 已初始化时返回 panel 句柄，否则返回 NULL。
+ */
+esp_lcd_panel_handle_t bsp_lcd_get_panel_handle(void);
+
+/**
+ * @brief 获取 LCD 触摸句柄。
+ *
+ * @return 已初始化时返回触摸句柄，否则返回 NULL。
+ */
+esp_lcd_touch_handle_t bsp_lcd_get_touch_handle(void);
 
 #ifdef __cplusplus
 }

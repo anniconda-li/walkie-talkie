@@ -7,8 +7,8 @@
 #ifndef BSP_COMMON_H
 #define BSP_COMMON_H
 
-#include "esp_log.h"
 #include "hal/gpio_types.h"
+#include "osal_log.h"
 
 /**
  * @brief BSP 调试模式开关。
@@ -21,17 +21,17 @@
 /**
  * @brief BSP 信息日志宏。
  */
-#define BSP_LOGI(tag, fmt, ...) ESP_LOGI(tag, fmt, ##__VA_ARGS__)
+#define BSP_LOGI(tag, fmt, ...) OSAL_LOGI(tag, fmt, ##__VA_ARGS__)
 
 /**
  * @brief BSP 警告日志宏。
  */
-#define BSP_LOGW(tag, fmt, ...) ESP_LOGW(tag, fmt, ##__VA_ARGS__)
+#define BSP_LOGW(tag, fmt, ...) OSAL_LOGW(tag, fmt, ##__VA_ARGS__)
 
 /**
  * @brief BSP 错误日志宏。
  */
-#define BSP_LOGE(tag, fmt, ...) ESP_LOGE(tag, fmt, ##__VA_ARGS__)
+#define BSP_LOGE(tag, fmt, ...) OSAL_LOGE(tag, fmt, ##__VA_ARGS__)
 #else
 #define BSP_LOGI(tag, fmt, ...) do { (void)(tag); } while (0)
 #define BSP_LOGW(tag, fmt, ...) do { (void)(tag); } while (0)

@@ -12,5 +12,7 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\17377\\Desktop\\interphone\\walkie-talkiev1\\build"
-  ]
+  ],
+  "idf.portWin": "COM6",
+  "idf.flashType": "UART"
 }

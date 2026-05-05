@@ -7,6 +7,7 @@
 #ifndef OSAL_H
 #define OSAL_H
 
+#include "osal_log.h"
 #include "osal_queue.h"
 #include "osal_task.h"
 

@@ -1,45 +1,38 @@
 /**
  * @file main.c
- * @brief 应用入口与外设基础测试流程。
+ * @brief LVGL 显示与触摸基础测试入口。
  */
 
+#include "app_ui.h"
 #include "bsp_i2c.h"
-#include "bsp.h"
-#include "bsp_i2s.h"
-#include "bsp_inmp441.h"
-#include "bsp_max98357a.h"
-#include "bsp_ml307c.h"
 #include "bsp_pca9557.h"
-#include "bsp_uart.h"
-#include "esp_log.h"
+#include "osal_log.h"
 #include "osal_task.h"
-
-#include <stdio.h>
+#include "service_lvgl.h"
 
 /**
- * @brief 应用测试日志标签。
+ * @brief LVGL 测试日志标签。
  */
-static const char *TAG = "app_test";
+static const char *TAG = "lvgl_test";
 
 /**
- * @brief 应用持有的 PCA9557 句柄。
+ * @brief LCD 背光与摄像头电源控制输出值。
+ *
+ * bit5 为 LCD_BL，输出 1 打开背光；bit1 为 OV-PWDN，输出 0 唤醒摄像头。
+ */
+#define LVGL_TEST_PCA9557_OUTPUT_INIT 0x20u
+
+/**
+ * @brief LVGL 测试使用的 PCA9557 方向值。
+ *
+ * PCA9557 方向寄存器 1 表示输入，0 表示输出；此处 IO1 和 IO5 为输出，其余为输入。
+ */
+#define LVGL_TEST_PCA9557_DIRECTION_INIT 0xDDu
+
+/**
+ * @brief LVGL 测试持有的 PCA9557 句柄。
  */
 static pca9557_handle_t s_pca9557 = NULL;
-
-/**
- * @brief 应用持有的 ML307C 句柄。
- */
-static ml307c_handle_t s_ml307c = NULL;
-
-/**
- * @brief 应用持有的 INMP441 句柄。
- */
-static inmp441_handle_t s_inmp441 = NULL;
-
-/**
- * @brief 应用持有的 MAX98357A 句柄。
- */
-static max98357a_handle_t s_max98357a = NULL;
 
 /**
  * @brief 打印通用测试步骤结果。
@@ -51,22 +44,22 @@ static max98357a_handle_t s_max98357a = NULL;
 static int log_step_result(const char *name, int ret)
 {
     if (ret == 0) {
-        ESP_LOGI(TAG, "%s: 成功", name);
+        OSAL_LOGI(TAG, "%s: 成功", name);
     } else {
-        ESP_LOGE(TAG, "%s: 失败, ret=%d", name, ret);
+        OSAL_LOGE(TAG, "%s: 失败, ret=%d", name, ret);
     }
 
     return ret;
 }
 
 /**
- * @brief 初始化应用启动阶段需要长期持有的轻量外设对象。
+ * @brief 准备 LVGL 测试需要的板级 IO 状态。
  *
  * @return 成功返回 0；失败返回负值。
  */
-static int app_peripheral_init(void)
+static int board_io_prepare_for_lvgl(void)
 {
-    if (log_step_result("BSP init", bsp_init()) != 0) {
+    if (log_step_result("I2C init", bsp_i2c_init()) != 0) {
         return -1;
     }
 
@@ -76,152 +69,40 @@ static int app_peripheral_init(void)
     };
 
     pca9557_config_t pca9557_cfg = {
-        .output_init = 0x00,
+        .output_init = LVGL_TEST_PCA9557_OUTPUT_INIT,
         .polarity_init = 0x00,
-        .direction_init = 0xFE,  /* P0 输出，P1-P7 输入 */
+        .direction_init = LVGL_TEST_PCA9557_DIRECTION_INIT,
     };
 
     s_pca9557 = pca9557_init(&pca9557_cfg, &pca9557_itf);
     if (s_pca9557 == NULL) {
-        ESP_LOGE(TAG, "PCA9557 初始化失败");
+        OSAL_LOGE(TAG, "PCA9557 初始化失败");
         return -2;
     }
-    ESP_LOGI(TAG, "PCA9557 初始化完成");
 
-    ml307c_config_t ml307c_cfg = {
-        .timeout_ms = 3000,
-    };
-
-    ml307c_interface_t ml307c_itf = {
-        .uart_write = ml307c_uart_write_impl,
-        .uart_read = ml307c_uart_read_impl,
-        .delay_ms = osal_delay_ms,
-        .get_tick = osal_get_tick_ms,
-    };
-
-    s_ml307c = ml307c_init(&ml307c_cfg, &ml307c_itf);
-    if (s_ml307c == NULL) {
-        ESP_LOGE(TAG, "ML307C 初始化失败");
-        return -3;
-    }
-    ESP_LOGI(TAG, "ML307C 初始化完成");
-
-    inmp441_interface_t inmp441_itf = {
-        .read = inmp441_i2s_read_impl,
-    };
-
-    s_inmp441 = inmp441_init(&inmp441_itf);
-    if (s_inmp441 == NULL) {
-        ESP_LOGE(TAG, "INMP441 初始化失败");
-        return -4;
-    }
-    ESP_LOGI(TAG, "INMP441 初始化完成");
-
-    max98357a_interface_t max98357a_itf = {
-        .write = max98357a_i2s_write_impl,
-    };
-
-    s_max98357a = max98357a_init(&max98357a_itf);
-    if (s_max98357a == NULL) {
-        ESP_LOGE(TAG, "MAX98357A 初始化失败");
-        return -5;
-    }
-    ESP_LOGI(TAG, "MAX98357A 初始化完成");
-
+    OSAL_LOGI(TAG,
+              "PCA9557 已配置: output=0x%02X, direction=0x%02X, LCD_BL=1, OV-PWDN=0",
+              (unsigned int)LVGL_TEST_PCA9557_OUTPUT_INIT,
+              (unsigned int)LVGL_TEST_PCA9557_DIRECTION_INIT);
     return 0;
 }
 
 /**
- * @brief 执行 ML307C 模块基础功能测试。
- *
- * @param[in] dev ML307C 模块句柄。
+ * @brief 循环更新 UI 状态，验证 LVGL 刷新。
  */
-static void ml307c_basic_test(ml307c_handle_t dev)
+static void lvgl_ui_state_test_loop(void)
 {
-    char imei[16] = {0};
-    char iccid[21] = {0};
-    char operator_name[17] = {0};
-    int rssi = 99;
+    int state = 0;
 
-    if (log_step_result("AT check", ml307c_check_alive(dev)) != 0) {
-        return;
+    while (1) {
+        app_ui_set_network_state(state % 4);
+        app_ui_set_intercom_state((state / 2) % 2);
+        app_ui_set_record_state((state / 3) % 2);
+
+        OSAL_LOGI(TAG, "LVGL UI 状态更新, state=%d", state);
+        state++;
+        osal_delay_ms(1000);
     }
-
-    log_step_result("SIM check", ml307c_check_sim(dev));
-
-    if (ml307c_get_imei(dev, imei) == 0) {
-        ESP_LOGI(TAG, "IMEI: %s", imei);
-    } else {
-        ESP_LOGW(TAG, "读取IMEI失败");
-    }
-
-    if (ml307c_get_iccid(dev, iccid) == 0) {
-        ESP_LOGI(TAG, "ICCID: %s", iccid);
-    } else {
-        ESP_LOGW(TAG, "读取ICCID失败");
-    }
-
-    if (ml307c_get_signal(dev, &rssi) == 0) {
-        ESP_LOGI(TAG, "信号强度: %d", rssi);
-    } else {
-        ESP_LOGW(TAG, "读取信号强度失败");
-    }
-
-    if (ml307c_get_operator(dev, operator_name) == 0) {
-        ESP_LOGI(TAG, "运营商: %s", operator_name);
-    } else {
-        ESP_LOGW(TAG, "读取运营商失败");
-    }
-
-    log_step_result("Network register check", ml307c_check_network(dev));
-}
-
-/**
- * @brief 执行 PCA9557 基础功能测试。
- */
-static void pca9557_basic_test(pca9557_handle_t pca9557)
-{
-    ESP_LOGI(TAG, "开始 PCA9557 基础测试");
-
-    if (pca9557 == NULL) {
-        ESP_LOGE(TAG, "PCA9557 句柄为空");
-        return;
-    }
-
-    uint8_t input_value = 0;
-    uint8_t output_value = 0;
-    pca9557_level_t pin_level = PCA9557_LEVEL_LOW;
-
-    log_step_result("PCA9557 set P0 output",
-                    pca9557_set_pin_mode(pca9557, PCA9557_PIN_0, PCA9557_IO_OUTPUT));
-
-    for (int i = 0; i < 4; i++) {
-        pca9557_level_t level = (i % 2 == 0) ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW;
-        if (pca9557_set_pin_level(pca9557, PCA9557_PIN_0, level) == 0) {
-            ESP_LOGI(TAG, "PCA9557 P0 输出: %s",
-                     level == PCA9557_LEVEL_HIGH ? "HIGH" : "LOW");
-        } else {
-            ESP_LOGE(TAG, "PCA9557 P0 输出设置失败");
-        }
-        osal_delay_ms(500);
-    }
-
-    if (pca9557_read_output(pca9557, &output_value) == 0) {
-        ESP_LOGI(TAG, "PCA9557 输出寄存器缓存: 0x%02X", output_value);
-    }
-
-    if (pca9557_read_input(pca9557, &input_value) == 0) {
-        ESP_LOGI(TAG, "PCA9557 输入寄存器: 0x%02X", input_value);
-    } else {
-        ESP_LOGW(TAG, "PCA9557 输入寄存器读取失败");
-    }
-
-    if (pca9557_get_pin_level(pca9557, PCA9557_PIN_0, &pin_level) == 0) {
-        ESP_LOGI(TAG, "PCA9557 P0 当前输入读数: %s",
-                 pin_level == PCA9557_LEVEL_HIGH ? "HIGH" : "LOW");
-    }
-
-    ESP_LOGI(TAG, "PCA9557 基础测试完成");
 }
 
 /**
@@ -229,15 +110,23 @@ static void pca9557_basic_test(pca9557_handle_t pca9557)
  */
 void app_main(void)
 {
-    if (log_step_result("Peripheral init", app_peripheral_init()) != 0) {
+    OSAL_LOGI(TAG, "开始 LVGL 测试");
+
+    if (log_step_result("Board IO prepare", board_io_prepare_for_lvgl()) != 0) {
         return;
     }
 
-    pca9557_basic_test(s_pca9557);
+    if (log_step_result("LVGL service init", service_lvgl_init()) != 0) {
+        return;
+    }
 
-    ESP_LOGI(TAG, "开始 ML307C 基础测试");
+    if (log_step_result("App UI create", app_ui_create()) != 0) {
+        return;
+    }
 
-    ml307c_basic_test(s_ml307c);
+    OSAL_LOGI(TAG, "LVGL 测试界面已创建，等待启动动画完成");
+    osal_delay_ms(1200);
 
-    ESP_LOGI(TAG, "ML307C 基础测试完成");
+    OSAL_LOGI(TAG, "开始循环更新 LVGL 测试状态");
+    lvgl_ui_state_test_loop();
 }

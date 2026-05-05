@@ -1,0 +1,713 @@
+#include "ui_shell.h"
+#include "ui.h"
+#include "ui_app_ai.h"
+#include "ui_app_camera.h"
+#include "ui_app_intercom.h"
+#include "ui_app_settings.h"
+#include "ui_font.h"
+#include "ui_i18n.h"
+#include "lvgl.h"
+#include <stdbool.h>
+#include <limits.h>
+#include <stdint.h>
+
+#define COLOR_BG               lv_color_hex(0x000000)
+#define COLOR_STATUS           lv_color_make(0x22, 0x22, 0x22)
+#define COLOR_PANEL            lv_color_make(0x78, 0x78, 0x78)
+#define COLOR_BORDER           lv_color_make(0xD0, 0xD0, 0xD0)
+#define COLOR_ARROW            lv_color_make(0xF4, 0xF4, 0xF4)
+#define COLOR_ICON_INTERCOM    lv_color_make(0xFF, 0x66, 0x00)
+#define COLOR_ICON_SETTINGS    lv_color_make(0x88, 0x88, 0x88)
+#define COLOR_ICON_AI          lv_color_make(0x10, 0x10, 0x10)
+#define COLOR_ICON_CAMERA      lv_color_make(0x2E, 0x86, 0xDE)
+
+#define STATUS_BAR_H           30
+#define STATUS_BAR_Y           0
+#define APP_NAME_Y             48
+
+#define MENU_TOGGLE_W          34
+#define MENU_TOGGLE_H          40
+#define MENU_BAR_W             50
+#define MENU_BAR_H             96
+
+#define MENU_BAR_Y             ((UI_SCREEN_HEIGHT - MENU_BAR_H) / 2)
+#define MENU_TOGGLE_Y          ((UI_SCREEN_HEIGHT - MENU_TOGGLE_H) / 2)
+#define MENU_BAR_OPEN_X        (UI_SCREEN_WIDTH - 3 - MENU_BAR_W)
+#define MENU_BAR_HIDDEN_X      UI_SCREEN_WIDTH
+#define MENU_TOGGLE_OVERLAP_W  10
+#define MENU_TOGGLE_OFFSET_X   (MENU_TOGGLE_OVERLAP_W - MENU_TOGGLE_W)
+
+#define MENU_ICON_LARGE_SIZE   40
+#define MENU_ICON_SMALL_SIZE   30
+#define MENU_ICON_STEP         40
+#define MENU_DRAG_SNAP_LIMIT   (MENU_ICON_STEP / 2)
+
+#define ENTRY_FROM_TOP(y)      ((y) - STATUS_BAR_H - 10)
+#define ENTRY_FROM_RIGHT(x)    (UI_SCREEN_WIDTH + 10)
+
+typedef struct {
+    lv_obj_t * box;
+    lv_obj_t * label;
+} menu_icon_t;
+
+static lv_obj_t *g_bg;
+static lv_obj_t *g_status_bar;
+static lv_obj_t *g_app_name_label;
+static lv_obj_t *g_signal_bars[4];
+static lv_obj_t *g_battery_level;
+static lv_obj_t *g_battery_label;
+static uint8_t g_battery_percent = 60;
+static uint8_t g_signal_level = 3;
+static lv_obj_t *g_app_content_root;
+static lv_obj_t *g_current_app_root;
+static lv_obj_t *g_menu_toggle;
+static lv_obj_t *g_menu_bar;
+static lv_obj_t *g_menu_clip;
+static lv_obj_t *g_menu_toggle_arrow;
+static menu_icon_t g_menu_icons[UI_APP_ID_COUNT];
+
+static ui_app_id_t g_current_app = UI_APP_ID_INTERCOM;
+static ui_app_id_t g_center_app = UI_APP_ID_INTERCOM;
+static int32_t g_menu_drag_offset;
+static bool g_menu_expanded;
+static bool g_menu_dragging;
+static bool g_switch_requested;
+static int32_t g_last_drag_dir;
+
+static const ui_text_id_t g_app_text_ids[UI_APP_ID_COUNT] = {
+    UI_TEXT_APP_INTERCOM,
+    UI_TEXT_APP_CAMERA,
+    UI_TEXT_APP_AI,
+    UI_TEXT_APP_SETTINGS
+};
+
+static void update_menu_icons(void);
+
+static lv_color_t get_app_icon_color(ui_app_id_t app)
+{
+    switch(app) {
+        case UI_APP_ID_INTERCOM:
+            return COLOR_ICON_INTERCOM;
+        case UI_APP_ID_CAMERA:
+            return COLOR_ICON_CAMERA;
+        case UI_APP_ID_AI:
+            return COLOR_ICON_AI;
+        case UI_APP_ID_SETTINGS:
+            return COLOR_ICON_SETTINGS;
+        default:
+            return COLOR_PANEL;
+    }
+}
+
+static void refresh_menu_toggle_arrow(void)
+{
+    if(g_menu_toggle_arrow == NULL) {
+        return;
+    }
+
+    lv_label_set_text(g_menu_toggle_arrow, g_menu_expanded ? ">" : "<");
+    lv_obj_center(g_menu_toggle_arrow);
+}
+
+static void apply_menu_icon_visual(lv_obj_t *target_box,
+                                   lv_obj_t *target_label,
+                                   ui_app_id_t app,
+                                   int32_t size,
+                                   int32_t x,
+                                   int32_t y,
+                                   bool highlighted)
+{
+    lv_obj_remove_flag(target_box, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(target_box, size, size);
+    lv_obj_set_pos(target_box, x, y);
+    lv_obj_set_style_radius(target_box, highlighted ? 8 : 6, 0);
+    lv_obj_set_style_bg_color(target_box, get_app_icon_color(app), 0);
+    lv_obj_set_style_bg_opa(target_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(target_box, 0, 0);
+    (void)app;
+    lv_label_set_text(target_label, "");
+}
+
+static lv_obj_t *create_base_rect(lv_obj_t *parent, int32_t w, int32_t h)
+{
+    lv_obj_t *obj = lv_obj_create(parent);
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(obj, w, h);
+    lv_obj_set_style_bg_color(obj, COLOR_PANEL, 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(obj, COLOR_BORDER, 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+    return obj;
+}
+
+static void anim_set_x(void *obj, int32_t x)
+{
+    lv_obj_set_x((lv_obj_t *)obj, x);
+}
+
+static void anim_set_y(void *obj, int32_t y)
+{
+    lv_obj_set_y((lv_obj_t *)obj, y);
+}
+
+static void anim_set_menu_offset(void *obj, int32_t value)
+{
+    (void)obj;
+    g_menu_drag_offset = value;
+    update_menu_icons();
+}
+
+static ui_app_id_t app_prev(ui_app_id_t app)
+{
+    return (ui_app_id_t)((app + UI_APP_ID_COUNT - 1) % UI_APP_ID_COUNT);
+}
+
+static ui_app_id_t app_next(ui_app_id_t app)
+{
+    return (ui_app_id_t)((app + 1) % UI_APP_ID_COUNT);
+}
+
+static ui_app_id_t app_from_slot(ui_app_id_t center_app, int32_t slot)
+{
+    int32_t index = ((int32_t)center_app + slot + UI_APP_ID_COUNT) % UI_APP_ID_COUNT;
+    return (ui_app_id_t)index;
+}
+
+static int32_t get_app_relative_slot(ui_app_id_t center_app, ui_app_id_t app)
+{
+    int32_t diff = ((int32_t)app - (int32_t)center_app + UI_APP_ID_COUNT) % UI_APP_ID_COUNT;
+    int32_t half = UI_APP_ID_COUNT / 2;
+
+    if(diff == 0) {
+        return 0;
+    }
+
+    if(diff < half) {
+        return diff;
+    }
+
+    if(diff > half) {
+        return diff - UI_APP_ID_COUNT;
+    }
+
+    /* 对于 4 个应用时正对面的那个图标，静止时默认放到上方隐藏区；
+     * 拖动时根据最近一次拖动方向决定它从哪一侧进入。 */
+    if(g_menu_drag_offset < 0 || g_last_drag_dir < 0) {
+        return half;
+    }
+
+    return -half;
+}
+
+static void refresh_app_title(ui_app_id_t app)
+{
+    lv_label_set_text(g_app_name_label, ui_i18n_text(g_app_text_ids[app]));
+}
+
+static void create_status_signal(lv_obj_t *parent)
+{
+    const int32_t base_y = 23;
+
+    for(int32_t i = 0; i < 4; i++) {
+        int32_t h = 6 + i * 3;
+
+        g_signal_bars[i] = lv_obj_create(parent);
+        lv_obj_remove_flag(g_signal_bars[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(g_signal_bars[i], 4, h);
+        lv_obj_set_pos(g_signal_bars[i], 9 + i * 6, base_y - h);
+        lv_obj_set_style_radius(g_signal_bars[i], 1, 0);
+        lv_obj_set_style_bg_color(g_signal_bars[i], COLOR_ARROW, 0);
+        lv_obj_set_style_bg_opa(g_signal_bars[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(g_signal_bars[i], 0, 0);
+        lv_obj_set_style_pad_all(g_signal_bars[i], 0, 0);
+    }
+}
+
+static void refresh_signal_level(void)
+{
+    for(int32_t i = 0; i < 4; i++) {
+        if(g_signal_bars[i] == NULL) {
+            continue;
+        }
+
+        lv_obj_set_style_bg_opa(g_signal_bars[i],
+                                i < g_signal_level ? LV_OPA_COVER : LV_OPA_30,
+                                0);
+    }
+}
+
+static void create_status_battery(lv_obj_t *parent)
+{
+    lv_obj_t *body = lv_obj_create(parent);
+    lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(body, 26, 16);
+    lv_obj_set_pos(body, UI_SCREEN_WIDTH - 68, 7);
+    lv_obj_set_style_radius(body, 4, 0);
+    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(body, COLOR_ARROW, 0);
+    lv_obj_set_style_border_width(body, 2, 0);
+    lv_obj_set_style_pad_all(body, 1, 0);
+
+    g_battery_level = lv_obj_create(body);
+    lv_obj_remove_flag(g_battery_level, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_battery_level, 20, 10);
+    lv_obj_set_pos(g_battery_level, 1, 0);
+    lv_obj_set_style_radius(g_battery_level, 1, 0);
+    lv_obj_set_style_bg_color(g_battery_level, lv_color_make(0x41, 0xD1, 0x78), 0);
+    lv_obj_set_style_bg_opa(g_battery_level, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g_battery_level, 0, 0);
+    lv_obj_set_style_pad_all(g_battery_level, 0, 0);
+
+    lv_obj_t *cap = lv_obj_create(parent);
+    lv_obj_remove_flag(cap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(cap, 4, 9);
+    lv_obj_set_pos(cap, UI_SCREEN_WIDTH - 42, 10);
+    lv_obj_set_style_radius(cap, 1, 0);
+    lv_obj_set_style_bg_color(cap, COLOR_ARROW, 0);
+    lv_obj_set_style_bg_opa(cap, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(cap, 0, 0);
+    lv_obj_set_style_pad_all(cap, 0, 0);
+
+    g_battery_label = lv_label_create(parent);
+    lv_obj_set_size(g_battery_label, 34, 16);
+    lv_obj_set_pos(g_battery_label, UI_SCREEN_WIDTH - 36, 5);
+    lv_obj_set_style_text_color(g_battery_label, COLOR_ARROW, 0);
+    lv_obj_set_style_text_font(g_battery_label, ui_font_small(), 0);
+    lv_obj_set_style_text_align(g_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
+}
+
+static void refresh_battery_level(void)
+{
+    int32_t width;
+    char text[8];
+
+    if(g_battery_level == NULL) {
+        return;
+    }
+
+    width = (20 * (int32_t)g_battery_percent) / 100;
+    if(width < 1) {
+        width = 1;
+    }
+
+    lv_obj_set_width(g_battery_level, width);
+
+    if(g_battery_label != NULL) {
+        lv_snprintf(text, sizeof(text), "%u%%", (unsigned int)g_battery_percent);
+        lv_label_set_text(g_battery_label, text);
+    }
+}
+
+static void update_menu_icons(void)
+{
+    const int32_t center_y = MENU_BAR_H / 2;
+    int32_t min_distance = INT32_MAX;
+    ui_app_id_t nearest_app = g_center_app;
+
+    for(int32_t i = 0; i < UI_APP_ID_COUNT; i++) {
+        ui_app_id_t app = (ui_app_id_t)i;
+        int32_t slot = get_app_relative_slot(g_center_app, app);
+        int32_t rel = slot * MENU_ICON_STEP + g_menu_drag_offset;
+        int32_t distance = LV_ABS(rel);
+        int32_t limited = LV_MIN(distance, MENU_ICON_STEP);
+        int32_t size = MENU_ICON_LARGE_SIZE -
+                       ((MENU_ICON_LARGE_SIZE - MENU_ICON_SMALL_SIZE) * limited) / MENU_ICON_STEP;
+        int32_t y = center_y + rel - size / 2;
+        int32_t x = (MENU_BAR_W - size) / 2;
+        bool highlighted = distance < MENU_ICON_STEP / 2;
+
+        /* 这里改成 4 个真实图标对象循环排布，不再用“补位副本”。
+         * 这样图标在静止和拖动时都只有一份实体，不会再出现互相压住、
+         * 或者另一侧多露出一截的显示错误。 */
+        apply_menu_icon_visual(g_menu_icons[i].box, g_menu_icons[i].label,
+                               app, size, x, y, highlighted);
+
+        if(distance < min_distance) {
+            min_distance = distance;
+            nearest_app = app;
+        }
+
+        if(highlighted) {
+            lv_obj_move_foreground(g_menu_icons[i].box);
+        }
+    }
+
+    /* 标题实时跟随当前最近中心的图标，
+     * 这样拖动时屏幕也会告诉用户当前对准的是哪个应用。 */
+    refresh_app_title(nearest_app);
+}
+
+static lv_obj_t *create_app_root(ui_app_id_t app)
+{
+    switch(app) {
+        case UI_APP_ID_INTERCOM:
+            return ui_app_intercom_create(g_app_content_root);
+        case UI_APP_ID_CAMERA:
+            return ui_app_camera_create(g_app_content_root);
+        case UI_APP_ID_AI:
+            return ui_app_ai_create(g_app_content_root);
+        case UI_APP_ID_SETTINGS:
+            return ui_app_settings_create(g_app_content_root);
+        default:
+            return NULL;
+    }
+}
+
+static void enter_app(ui_app_id_t app, lv_obj_t * root)
+{
+    switch(app) {
+        case UI_APP_ID_INTERCOM:
+            ui_app_intercom_enter(root);
+            break;
+        case UI_APP_ID_CAMERA:
+            ui_app_camera_enter(root);
+            break;
+        case UI_APP_ID_AI:
+            ui_app_ai_enter(root);
+            break;
+        case UI_APP_ID_SETTINGS:
+            ui_app_settings_enter(root);
+            break;
+        default:
+            break;
+    }
+}
+
+static void app_switch_done_cb(lv_anim_t *a)
+{
+    (void)a;
+
+    /* 旧页面退场并删除后，再创建并播放新页面入场。
+     * 这样严格符合“先反向退场，再播放新页面入场”的切换要求。 */
+    g_current_app_root = create_app_root(g_center_app);
+    g_current_app = g_center_app;
+    g_switch_requested = false;
+
+    if(g_current_app_root) {
+        enter_app(g_current_app, g_current_app_root);
+    }
+}
+
+static void request_app_switch_if_needed(void)
+{
+    if(g_switch_requested || g_current_app == g_center_app) {
+        return;
+    }
+
+    g_switch_requested = true;
+
+    switch(g_current_app) {
+        case UI_APP_ID_INTERCOM:
+            ui_app_intercom_exit(g_current_app_root, app_switch_done_cb);
+            break;
+        case UI_APP_ID_CAMERA:
+            ui_app_camera_exit(g_current_app_root, app_switch_done_cb);
+            break;
+        case UI_APP_ID_AI:
+            ui_app_ai_exit(g_current_app_root, app_switch_done_cb);
+            break;
+        case UI_APP_ID_SETTINGS:
+            ui_app_settings_exit(g_current_app_root, app_switch_done_cb);
+            break;
+        default:
+            break;
+    }
+}
+
+static void menu_snap_done_cb(lv_anim_t *a)
+{
+    (void)a;
+    update_menu_icons();
+    request_app_switch_if_needed();
+}
+
+static void start_menu_snap_animation(void)
+{
+    lv_anim_t anim;
+
+    lv_anim_del(NULL, anim_set_menu_offset);
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, NULL);
+    lv_anim_set_exec_cb(&anim, anim_set_menu_offset);
+    lv_anim_set_values(&anim, g_menu_drag_offset, 0);
+    lv_anim_set_duration(&anim, 180);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, menu_snap_done_cb);
+    lv_anim_start(&anim);
+}
+
+static void normalize_drag_offset(void)
+{
+    /* 这里是无限循环的关键：
+     * 拖动累计跨过一个槽位后，立即把中心应用索引切到上一个/下一个，
+     * 同时把偏移回卷回来，于是视觉上就会形成从另一侧补位的效果。 */
+    while(g_menu_drag_offset >= MENU_ICON_STEP) {
+        g_menu_drag_offset -= MENU_ICON_STEP;
+        g_center_app = app_prev(g_center_app);
+    }
+
+    while(g_menu_drag_offset <= -MENU_ICON_STEP) {
+        g_menu_drag_offset += MENU_ICON_STEP;
+        g_center_app = app_next(g_center_app);
+    }
+}
+
+static void menu_drag_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+
+    if(!g_menu_expanded || g_switch_requested) {
+        return;
+    }
+
+    if(code == LV_EVENT_PRESSED) {
+        g_menu_dragging = true;
+        lv_anim_del(NULL, anim_set_menu_offset);
+        return;
+    }
+
+    if(code == LV_EVENT_PRESSING && g_menu_dragging) {
+        lv_indev_t * indev = lv_indev_active();
+        lv_point_t vect;
+
+        if(indev == NULL) {
+            return;
+        }
+
+        lv_indev_get_vect(indev, &vect);
+        g_menu_drag_offset += vect.y;
+        if(vect.y != 0) {
+            g_last_drag_dir = vect.y;
+        }
+        normalize_drag_offset();
+        update_menu_icons();
+        return;
+    }
+
+    if((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) && g_menu_dragging) {
+        g_menu_dragging = false;
+
+        if(g_menu_drag_offset > MENU_DRAG_SNAP_LIMIT) {
+            g_menu_drag_offset -= MENU_ICON_STEP;
+            g_center_app = app_prev(g_center_app);
+        }
+        else if(g_menu_drag_offset < -MENU_DRAG_SNAP_LIMIT) {
+            g_menu_drag_offset += MENU_ICON_STEP;
+            g_center_app = app_next(g_center_app);
+        }
+
+        start_menu_snap_animation();
+    }
+}
+
+static void start_menu_motion(int32_t menu_x)
+{
+    int32_t toggle_x = menu_x + MENU_TOGGLE_OFFSET_X;
+
+    lv_anim_del(g_menu_toggle, anim_set_x);
+    lv_anim_del(g_menu_bar, anim_set_x);
+
+    lv_anim_t toggle_anim;
+    lv_anim_init(&toggle_anim);
+    lv_anim_set_var(&toggle_anim, g_menu_toggle);
+    lv_anim_set_exec_cb(&toggle_anim, anim_set_x);
+    lv_anim_set_values(&toggle_anim, lv_obj_get_x(g_menu_toggle), toggle_x);
+    lv_anim_set_duration(&toggle_anim, 180);
+    lv_anim_set_path_cb(&toggle_anim, lv_anim_path_ease_out);
+    lv_anim_start(&toggle_anim);
+
+    lv_anim_t menu_anim;
+    lv_anim_init(&menu_anim);
+    lv_anim_set_var(&menu_anim, g_menu_bar);
+    lv_anim_set_exec_cb(&menu_anim, anim_set_x);
+    lv_anim_set_values(&menu_anim, lv_obj_get_x(g_menu_bar), menu_x);
+    lv_anim_set_duration(&menu_anim, 180);
+    lv_anim_set_path_cb(&menu_anim, lv_anim_path_ease_out);
+    lv_anim_start(&menu_anim);
+}
+
+static void menu_toggle_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || g_switch_requested) {
+        return;
+    }
+
+    g_menu_expanded = !g_menu_expanded;
+    refresh_menu_toggle_arrow();
+    start_menu_motion(g_menu_expanded ? MENU_BAR_OPEN_X : MENU_BAR_HIDDEN_X);
+}
+
+static void menu_entry_done_cb(lv_anim_t *a)
+{
+    (void)a;
+    start_menu_motion(MENU_BAR_HIDDEN_X);
+}
+
+static void status_entry_done_cb(lv_anim_t *a)
+{
+    (void)a;
+
+    lv_anim_t toggle_anim;
+    lv_anim_init(&toggle_anim);
+    lv_anim_set_var(&toggle_anim, g_menu_toggle);
+    lv_anim_set_exec_cb(&toggle_anim, anim_set_x);
+    lv_anim_set_values(&toggle_anim,
+                       ENTRY_FROM_RIGHT(MENU_BAR_HIDDEN_X + MENU_TOGGLE_OFFSET_X),
+                       MENU_BAR_HIDDEN_X + MENU_TOGGLE_OFFSET_X);
+    lv_anim_set_duration(&toggle_anim, 180);
+    lv_anim_set_path_cb(&toggle_anim, lv_anim_path_ease_out);
+    lv_anim_start(&toggle_anim);
+
+    lv_anim_t menu_anim;
+    lv_anim_init(&menu_anim);
+    lv_anim_set_var(&menu_anim, g_menu_bar);
+    lv_anim_set_exec_cb(&menu_anim, anim_set_x);
+    lv_anim_set_values(&menu_anim, ENTRY_FROM_RIGHT(MENU_BAR_HIDDEN_X), MENU_BAR_HIDDEN_X);
+    lv_anim_set_duration(&menu_anim, 180);
+    lv_anim_set_path_cb(&menu_anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&menu_anim, menu_entry_done_cb);
+    lv_anim_start(&menu_anim);
+}
+
+static void start_entry_animation(void)
+{
+    lv_anim_t anim;
+
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, g_status_bar);
+    lv_anim_set_exec_cb(&anim, anim_set_y);
+    lv_anim_set_values(&anim, ENTRY_FROM_TOP(STATUS_BAR_Y), STATUS_BAR_Y);
+    lv_anim_set_duration(&anim, 260);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, status_entry_done_cb);
+    lv_anim_start(&anim);
+}
+
+static void create_menu_icons(void)
+{
+    for(int32_t i = 0; i < UI_APP_ID_COUNT; i++) {
+        g_menu_icons[i].box = lv_obj_create(g_menu_clip);
+        lv_obj_remove_flag(g_menu_icons[i].box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(g_menu_icons[i].box, 0, 0);
+        lv_obj_set_style_pad_all(g_menu_icons[i].box, 0, 0);
+        lv_obj_add_flag(g_menu_icons[i].box, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_event_cb(g_menu_icons[i].box, menu_drag_event_cb, LV_EVENT_ALL, NULL);
+
+        g_menu_icons[i].label = lv_label_create(g_menu_icons[i].box);
+    }
+}
+
+void ui_shell_init(void)
+{
+    g_bg = lv_screen_active();
+    lv_obj_set_size(g_bg, UI_SCREEN_WIDTH, UI_SCREEN_HEIGHT);
+    lv_obj_set_style_bg_color(g_bg, COLOR_BG, 0);
+    lv_obj_remove_flag(g_bg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(g_bg, LV_SCROLLBAR_MODE_OFF);
+
+    g_status_bar = lv_obj_create(g_bg);
+    lv_obj_remove_flag(g_status_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_status_bar, UI_SCREEN_WIDTH, STATUS_BAR_H);
+    lv_obj_set_pos(g_status_bar, 0, ENTRY_FROM_TOP(STATUS_BAR_Y));
+    lv_obj_set_style_bg_color(g_status_bar, COLOR_STATUS, 0);
+    lv_obj_set_style_border_width(g_status_bar, 0, 0);
+    lv_obj_set_style_radius(g_status_bar, 0, 0);
+    lv_obj_set_style_pad_all(g_status_bar, 0, 0);
+
+    create_status_signal(g_status_bar);
+    create_status_battery(g_status_bar);
+    refresh_signal_level();
+    refresh_battery_level();
+
+    g_app_name_label = lv_label_create(g_status_bar);
+    lv_obj_set_size(g_app_name_label, 112, 18);
+    lv_obj_set_pos(g_app_name_label, 64, 6);
+    lv_obj_set_style_text_align(g_app_name_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(g_app_name_label, COLOR_ARROW, 0);
+    lv_obj_set_style_text_font(g_app_name_label, ui_font_small(), 0);
+    refresh_app_title(UI_APP_ID_INTERCOM);
+
+    g_app_content_root = lv_obj_create(g_bg);
+    lv_obj_remove_flag(g_app_content_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_app_content_root, UI_SCREEN_WIDTH, UI_SCREEN_HEIGHT);
+    lv_obj_set_style_bg_opa(g_app_content_root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_app_content_root, 0, 0);
+    lv_obj_set_style_radius(g_app_content_root, 0, 0);
+    lv_obj_set_style_pad_all(g_app_content_root, 0, 0);
+
+    g_menu_toggle = create_base_rect(g_bg, MENU_TOGGLE_W, MENU_TOGGLE_H);
+    lv_obj_set_style_radius(g_menu_toggle, 5, 0);
+    lv_obj_set_style_bg_opa(g_menu_toggle, LV_OPA_70, 0);
+    lv_obj_set_pos(g_menu_toggle, ENTRY_FROM_RIGHT(MENU_BAR_HIDDEN_X + MENU_TOGGLE_OFFSET_X), MENU_TOGGLE_Y);
+    lv_obj_add_flag(g_menu_toggle, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(g_menu_toggle, menu_toggle_event_cb, LV_EVENT_CLICKED, NULL);
+    g_menu_toggle_arrow = lv_label_create(g_menu_toggle);
+    lv_obj_set_style_text_color(g_menu_toggle_arrow, COLOR_ARROW, 0);
+    lv_obj_center(g_menu_toggle_arrow);
+
+    g_menu_bar = create_base_rect(g_bg, MENU_BAR_W, MENU_BAR_H);
+    lv_obj_set_style_radius(g_menu_bar, 5, 0);
+    lv_obj_set_pos(g_menu_bar, ENTRY_FROM_RIGHT(MENU_BAR_HIDDEN_X), MENU_BAR_Y);
+    lv_obj_set_style_pad_all(g_menu_bar, 0, 0);
+
+    g_menu_clip = lv_obj_create(g_menu_bar);
+    lv_obj_remove_flag(g_menu_clip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_menu_clip, MENU_BAR_W, MENU_BAR_H);
+    lv_obj_set_pos(g_menu_clip, 0, 0);
+    lv_obj_set_style_bg_opa(g_menu_clip, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_menu_clip, 0, 0);
+    lv_obj_set_style_pad_all(g_menu_clip, 0, 0);
+    lv_obj_set_style_radius(g_menu_clip, 20, 0);
+    lv_obj_add_event_cb(g_menu_clip, menu_drag_event_cb, LV_EVENT_ALL, NULL);
+
+    create_menu_icons();
+
+    g_current_app = UI_APP_ID_INTERCOM;
+    g_center_app = UI_APP_ID_INTERCOM;
+    g_current_app_root = create_app_root(g_current_app);
+    if(g_current_app_root) {
+        enter_app(g_current_app, g_current_app_root);
+    }
+
+    g_menu_drag_offset = 0;
+    g_menu_expanded = false;
+    g_menu_dragging = false;
+    g_switch_requested = false;
+    g_last_drag_dir = 0;
+
+    refresh_menu_toggle_arrow();
+    update_menu_icons();
+    lv_obj_move_foreground(g_status_bar);
+    lv_obj_move_foreground(g_menu_toggle);
+    lv_obj_move_foreground(g_menu_bar);
+    start_entry_animation();
+}
+
+void ui_shell_refresh_language(void)
+{
+    refresh_app_title(g_center_app);
+}
+
+void ui_shell_set_battery_level(uint8_t percent)
+{
+    if(percent < 1) {
+        percent = 1;
+    }
+    else if(percent > 100) {
+        percent = 100;
+    }
+
+    g_battery_percent = percent;
+    refresh_battery_level();
+}
+
+void ui_shell_set_signal_level(uint8_t level)
+{
+    if(level > 4) {
+        level = 4;
+    }
+
+    g_signal_level = level;
+    refresh_signal_level();
+}

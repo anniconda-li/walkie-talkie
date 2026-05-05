@@ -59,7 +59,7 @@ extern "C" {
  * @brief PCA9557 使用的 I2C 地址。
  */
 #ifndef I2C_ADDR_PCA9557
-#define I2C_ADDR_PCA9557 0x18u
+#define I2C_ADDR_PCA9557 0x19u
 #endif
 
 /**

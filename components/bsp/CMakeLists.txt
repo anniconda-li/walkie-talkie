@@ -16,6 +16,5 @@ idf_component_register(
         espressif__esp32-camera
         espressif__esp_lcd_touch
         espressif__esp_lcd_touch_ft5x06
-        log
         osal
     )
