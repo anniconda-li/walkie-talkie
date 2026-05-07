@@ -96,6 +96,14 @@ int ml307c_check_sim(ml307c_handle_t dev);
 int ml307c_check_network(ml307c_handle_t dev);
 
 /**
+ * @brief       获取网络注册状态原始值
+ * @param[in]   dev      模块句柄
+ * @param[out]  state    CEREG 状态值：0未注册，1本地已注册，2搜索中，3拒绝，4未知，5漫游已注册
+ * @return      0成功，负值失败
+ */
+int ml307c_get_network_state(ml307c_handle_t dev, int *state);
+
+/**
  * @brief       获取信号强度
  * @param[in]   dev      模块句柄
  * @param[out]  rssi     信号强度输出（0-31，99=未知）
@@ -119,6 +127,14 @@ int ml307c_get_operator(ml307c_handle_t dev, char *buf);
  * @note        RTU 固件使用 AT+ISLINK 查询联网状态，本接口不主动拨号。
  */
 int ml307c_open_net(ml307c_handle_t dev);
+
+/**
+ * @brief       获取蜂窝数据网络连接状态
+ * @param[in]   dev      模块句柄
+ * @param[out]  link     ISLINK 状态值：0未连接，1已连接
+ * @return      0成功，负值失败
+ */
+int ml307c_get_link_state(ml307c_handle_t dev, int *link);
 
 /**
  * @brief       关闭当前 DTU socket 任务

@@ -23,6 +23,12 @@ static const char *TAG = "bsp_ml307c";
 #define ML307C_LINE_MAX_LEN         256u
 #define ML307C_DEFAULT_SOCKET_ID    1u
 #define ML307C_SOCKET_MAX_ID        4u
+#define ML307C_RESET_WAIT_MS        8000u
+#define ML307C_REBOOT_READY_MS      30000u
+#define ML307C_NET_READY_MS         120000u
+#define ML307C_NET_POLL_MS          3000u
+#define ML307C_SOCKET_READY_MS      120000u
+#define ML307C_SOCKET_POLL_MS       3000u
 
 struct ml307c_dev {
     ml307c_config_t config;
@@ -31,6 +37,9 @@ struct ml307c_dev {
     uint8_t is_ready;
     uint8_t is_network_ok;
 };
+
+static void ml307c_log_response(const char *title, const char *resp);
+static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value);
 
 static uint8_t ml307c_get_socket_id(ml307c_handle_t dev)
 {
@@ -69,6 +78,9 @@ static void ml307c_drain_uart(ml307c_handle_t dev)
         if (rlen <= 0) {
             break;
         }
+
+        tmp[rlen < (int)sizeof(tmp) ? rlen : ((int)sizeof(tmp) - 1)] = '\0';
+        ml307c_log_response("ML307C 主动上报", (const char *)tmp);
     }
 }
 
@@ -166,6 +178,8 @@ static int ml307c_send_cmd_capture(ml307c_handle_t dev,
         return -2;
     }
 
+    BSP_LOGI(TAG, "ML307C 发送命令: %s", cmd);
+
     return ml307c_wait_response(dev,
                                 expect != NULL ? expect : ML307C_OK,
                                 timeout_ms,
@@ -179,6 +193,87 @@ static int ml307c_send_cmd(ml307c_handle_t dev,
                            uint32_t timeout_ms)
 {
     return ml307c_send_cmd_capture(dev, cmd, expect, timeout_ms, NULL, 0);
+}
+
+static void ml307c_log_response(const char *title, const char *resp)
+{
+    if (title == NULL || resp == NULL) {
+        return;
+    }
+
+    char line[ML307C_LINE_MAX_LEN];
+    uint16_t pos = 0;
+
+    for (uint16_t i = 0; resp[i] != '\0' && pos < (sizeof(line) - 1u); i++) {
+        if (resp[i] == '\r') {
+            continue;
+        }
+        line[pos++] = resp[i] == '\n' ? '|' : resp[i];
+    }
+
+    line[pos] = '\0';
+    BSP_LOGI(TAG, "%s: %s", title, line);
+}
+
+static int ml307c_wait_alive(ml307c_handle_t dev, uint32_t timeout_ms)
+{
+    if (dev == NULL) {
+        return -1;
+    }
+
+    uint32_t start = dev->itf.get_tick();
+    while ((dev->itf.get_tick() - start) < timeout_ms) {
+        if (ml307c_check_alive(dev) == 0) {
+            return 0;
+        }
+
+        dev->itf.delay_ms(1000u);
+    }
+
+    return -2;
+}
+
+static int ml307c_wait_network_link(ml307c_handle_t dev, uint32_t timeout_ms)
+{
+    if (dev == NULL) {
+        return -1;
+    }
+
+    uint32_t start = dev->itf.get_tick();
+    while ((dev->itf.get_tick() - start) < timeout_ms) {
+        char resp[ML307C_LINE_MAX_LEN];
+        int ret = ml307c_send_cmd_capture(dev,
+                                          "AT+CEREG?" ML307C_CRLF,
+                                          "+CEREG",
+                                          ml307c_get_timeout(dev),
+                                          resp,
+                                          sizeof(resp));
+        if (ret == 0) {
+            ml307c_log_response("ML307C CEREG 响应", resp);
+        }
+
+        ret = ml307c_send_cmd_capture(dev,
+                                      "AT+ISLINK?" ML307C_CRLF,
+                                      "+ISLINK",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
+        if (ret == 0) {
+            int link = 0;
+            ml307c_log_response("ML307C ISLINK 响应", resp);
+            if (ml307c_parse_first_int_after(resp, "+ISLINK", &link) == 0 && link == 1) {
+                dev->is_network_ok = 1u;
+                BSP_LOGI(TAG, "ML307C 蜂窝数据网络已连接");
+                return 0;
+            }
+        }
+
+        dev->itf.delay_ms(ML307C_NET_POLL_MS);
+    }
+
+    dev->is_network_ok = 0u;
+    BSP_LOGW(TAG, "ML307C 等待蜂窝数据网络连接超时");
+    return -2;
 }
 
 static const char *ml307c_find_response_prefix(const char *resp, const char *prefix)
@@ -283,7 +378,29 @@ static int ml307c_parse_digits_after(const char *resp,
 
 static int ml307c_parse_cereg_state(const char *resp, int *state)
 {
-    return ml307c_parse_first_int_after(resp, "+CEREG", state);
+    if (resp == NULL || state == NULL) {
+        return -1;
+    }
+
+    const char *p = ml307c_find_response_prefix(resp, "+CEREG");
+    if (p == NULL) {
+        return -2;
+    }
+
+    p += strlen("+CEREG");
+    while (*p == ' ' || *p == ':' || *p == '=') {
+        p++;
+    }
+
+    int first = atoi(p);
+    const char *comma = strchr(p, ',');
+    if (comma != NULL) {
+        *state = atoi(comma + 1);
+    } else {
+        *state = first;
+    }
+
+    return 0;
 }
 
 static int ml307c_parse_dtustate(const char *resp, uint8_t socket_id, int *state)
@@ -396,24 +513,10 @@ int ml307c_check_sim(ml307c_handle_t dev)
 
 int ml307c_check_network(ml307c_handle_t dev)
 {
-    if (dev == NULL) {
-        return -1;
-    }
-
-    char resp[ML307C_LINE_MAX_LEN];
-    int ret = ml307c_send_cmd_capture(dev,
-                                      "AT+CEREG" ML307C_CRLF,
-                                      "+CEREG",
-                                      ml307c_get_timeout(dev),
-                                      resp,
-                                      sizeof(resp));
+    int state = 0;
+    int ret = ml307c_get_network_state(dev, &state);
     if (ret != 0) {
         return ret;
-    }
-
-    int state = 0;
-    if (ml307c_parse_cereg_state(resp, &state) != 0) {
-        return -2;
     }
 
     if (state == 1 || state == 5) {
@@ -423,6 +526,27 @@ int ml307c_check_network(ml307c_handle_t dev)
 
     dev->is_network_ok = 0u;
     return 1;
+}
+
+int ml307c_get_network_state(ml307c_handle_t dev, int *state)
+{
+    if (dev == NULL || state == NULL) {
+        return -1;
+    }
+
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+CEREG?" ML307C_CRLF,
+                                      "+CEREG",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
+    if (ret != 0) {
+        return ret;
+    }
+
+    ml307c_log_response("ML307C CEREG 响应", resp);
+    return ml307c_parse_cereg_state(resp, state);
 }
 
 int ml307c_get_signal(ml307c_handle_t dev, int *rssi)
@@ -467,13 +591,30 @@ int ml307c_get_operator(ml307c_handle_t dev, char *buf)
 
 int ml307c_open_net(ml307c_handle_t dev)
 {
-    if (dev == NULL) {
+    int link = 0;
+    int ret = ml307c_get_link_state(dev, &link);
+    if (ret != 0) {
+        return ret;
+    }
+
+    if (link != 1) {
+        dev->is_network_ok = 0u;
+        return -2;
+    }
+
+    dev->is_network_ok = 1u;
+    return 0;
+}
+
+int ml307c_get_link_state(ml307c_handle_t dev, int *link)
+{
+    if (dev == NULL || link == NULL) {
         return -1;
     }
 
     char resp[ML307C_LINE_MAX_LEN];
     int ret = ml307c_send_cmd_capture(dev,
-                                      "AT+ISLINK" ML307C_CRLF,
+                                      "AT+ISLINK?" ML307C_CRLF,
                                       "+ISLINK",
                                       ml307c_get_timeout(dev),
                                       resp,
@@ -482,14 +623,8 @@ int ml307c_open_net(ml307c_handle_t dev)
         return ret;
     }
 
-    int link = 0;
-    if (ml307c_parse_first_int_after(resp, "+ISLINK", &link) != 0 || link != 1) {
-        dev->is_network_ok = 0u;
-        return -2;
-    }
-
-    dev->is_network_ok = 1u;
-    return 0;
+    ml307c_log_response("ML307C ISLINK 响应", resp);
+    return ml307c_parse_first_int_after(resp, "+ISLINK", link);
 }
 
 int ml307c_close_net(ml307c_handle_t dev)
@@ -507,22 +642,51 @@ int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
     char cmd[128];
 
     snprintf(cmd, sizeof(cmd), "AT+DTUTASK=%u,1,\"SOCK\"" ML307C_CRLF, (unsigned int)socket_id);
-    int ret = ml307c_send_cmd(dev, cmd, "+DTUTASK", ml307c_get_timeout(dev));
+    int ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
     if (ret != 0) {
         return ret;
     }
 
     snprintf(cmd, sizeof(cmd), "AT+SOCK=%u,\"%s\",%d,0" ML307C_CRLF,
              (unsigned int)socket_id, ip, port);
-    ret = ml307c_send_cmd(dev, cmd, "+SOCK", ml307c_get_timeout(dev));
+    ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
+
+    snprintf(cmd, sizeof(cmd), "AT+DTUPSUP=1,\"%u\"" ML307C_CRLF, (unsigned int)socket_id);
+    ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
+
+    snprintf(cmd, sizeof(cmd), "AT+DTUPSDN=%u,\"6[1]\"" ML307C_CRLF, (unsigned int)socket_id);
+    ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
+
+    ret = ml307c_send_cmd(dev, "AT+RESET" ML307C_CRLF, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        BSP_LOGW(TAG, "ML307C 复位命令未收到 OK，继续等待模块重启, ret=%d", ret);
+    }
+
+    dev->itf.delay_ms(ML307C_RESET_WAIT_MS);
+    ret = ml307c_wait_alive(dev, ML307C_REBOOT_READY_MS);
+    if (ret != 0) {
+        BSP_LOGW(TAG, "ML307C 重启后 AT 未恢复, ret=%d", ret);
+        return ret;
+    }
+
+    ret = ml307c_wait_network_link(dev, ML307C_NET_READY_MS);
     if (ret != 0) {
         return ret;
     }
 
     uint32_t start = dev->itf.get_tick();
     uint32_t timeout = ml307c_get_timeout(dev) * 10u;
-    if (timeout < 30000u) {
-        timeout = 30000u;
+    if (timeout < ML307C_SOCKET_READY_MS) {
+        timeout = ML307C_SOCKET_READY_MS;
     }
 
     while ((dev->itf.get_tick() - start) < timeout) {
@@ -536,14 +700,21 @@ int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
                                       sizeof(resp));
         if (ret == 0) {
             int state = 0;
-            if (ml307c_parse_dtustate(resp, socket_id, &state) == 0 && state == 1) {
-                BSP_LOGI(TAG, "ML307C socket 通道已连接, id=%u",
-                         (unsigned int)socket_id);
-                return 0;
+            ml307c_log_response("ML307C DTUSTATE 响应", resp);
+            if (ml307c_parse_dtustate(resp, socket_id, &state) == 0) {
+                BSP_LOGI(TAG, "ML307C socket 通道状态, id=%u, state=%d",
+                         (unsigned int)socket_id, state);
+                if (state == 1) {
+                    BSP_LOGI(TAG, "ML307C socket 通道已连接, id=%u",
+                             (unsigned int)socket_id);
+                    return 0;
+                }
+            } else {
+                BSP_LOGW(TAG, "ML307C DTUSTATE 响应解析失败");
             }
         }
 
-        dev->itf.delay_ms(1000u);
+        dev->itf.delay_ms(ML307C_SOCKET_POLL_MS);
     }
 
     BSP_LOGW(TAG, "ML307C socket 通道连接超时, id=%u", (unsigned int)socket_id);
@@ -560,7 +731,7 @@ int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
     char prefix[32];
     int prefix_len = snprintf(prefix,
                               sizeof(prefix),
-                              "AT+SENDR=\"%u[1]\",",
+                              "AT+SENDR=\"%u\",",
                               (unsigned int)socket_id);
     if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) {
         return -2;
