@@ -39,18 +39,27 @@
 #endif
 
 /**
- * @brief INMP441 麦克风 I2S 引脚定义。
+ * @brief ES7210/ES8311 共用音频 I2S 引脚定义。
  */
-#define BSP_INMP441_BCLK_IO GPIO_NUM_14 /**< BCLK/SCK。 */
-#define BSP_INMP441_WS_IO   GPIO_NUM_47 /**< WS/LRCLK。 */
-#define BSP_INMP441_DIN_IO  GPIO_NUM_21 /**< 串行数据输入。 */
+#define BSP_AUDIO_CODEC_ENABLE_IO GPIO_NUM_16 /**< 音频 codec 板使能脚，高电平使能。 */
+#define BSP_AUDIO_MCLK_IO GPIO_NUM_38 /**< MCLK。 */
+#define BSP_AUDIO_BCLK_IO GPIO_NUM_14 /**< SCLK/BCLK。 */
+#define BSP_AUDIO_LRCK_IO GPIO_NUM_47 /**< LRCK/WS。 */
+#define BSP_AUDIO_DOUT_IO GPIO_NUM_48 /**< ESP 输出到 ES8311 DSDIN。 */
+#define BSP_AUDIO_DIN_IO  GPIO_NUM_21 /**< ES7210 SDOUT1 输入到 ESP。 */
 
 /**
- * @brief MAX98357A 功放 I2S 引脚定义。
+ * @brief ES7210/ES8311 音频引脚别名。
  */
-#define BSP_MAX98357A_BCLK_IO GPIO_NUM_45 /**< BCLK。 */
-#define BSP_MAX98357A_WS_IO   GPIO_NUM_38 /**< WS/LRCLK。 */
-#define BSP_MAX98357A_DOUT_IO GPIO_NUM_48 /**< 串行数据输出。 */
+#define BSP_ES7210_MCLK_IO BSP_AUDIO_MCLK_IO /**< ES7210 MCLK。 */
+#define BSP_ES7210_BCLK_IO BSP_AUDIO_BCLK_IO /**< ES7210 SCLK/BCLK。 */
+#define BSP_ES7210_WS_IO   BSP_AUDIO_LRCK_IO /**< ES7210 LRCK/WS。 */
+#define BSP_ES7210_DIN_IO  BSP_AUDIO_DIN_IO  /**< ES7210 SDOUT 接入 ESP。 */
+#define BSP_ES8311_MCLK_IO BSP_AUDIO_MCLK_IO /**< ES8311 MCLK。 */
+#define BSP_ES8311_BCLK_IO BSP_AUDIO_BCLK_IO /**< ES8311 SCLK/BCLK。 */
+#define BSP_ES8311_WS_IO   BSP_AUDIO_LRCK_IO /**< ES8311 LRCK/WS。 */
+#define BSP_ES8311_DOUT_IO BSP_AUDIO_DOUT_IO /**< ES8311 DSDIN 由 ESP 输出。 */
+#define BSP_ES8311_ASDOUT_IO GPIO_NUM_NC /**< ADC 输出未使用。 */
 
 /**
  * @brief ST7789 LCD SPI 引脚定义。

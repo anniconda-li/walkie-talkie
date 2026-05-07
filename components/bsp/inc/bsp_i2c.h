@@ -70,6 +70,37 @@ extern "C" {
 #endif
 
 /**
+ * @brief ES7210 使用的 I2C 地址。
+ */
+#ifndef I2C_ADDR_ES7210
+#define I2C_ADDR_ES7210 0x40u
+#endif
+
+/**
+ * @brief ES7210 兼容 I2C 地址。
+ *
+ * 部分资料会把 0x40 写成 8-bit 写地址，对新版 ESP-IDF I2C master 来说
+ * 对应的 7-bit 地址是 0x20。默认先使用 I2C_ADDR_ES7210，首次 NACK 时再尝试该地址。
+ */
+#ifndef I2C_ADDR_ES7210_ALT
+#define I2C_ADDR_ES7210_ALT 0x20u
+#endif
+
+/**
+ * @brief ES8311 使用的 I2C 地址。
+ */
+#ifndef I2C_ADDR_ES8311
+#define I2C_ADDR_ES8311 0x18u
+#endif
+
+/**
+ * @brief ES7210/ES8311 使用的 I2C SCL 频率。
+ */
+#ifndef I2C_AUDIO_CODEC_SCL_SPEED_HZ
+#define I2C_AUDIO_CODEC_SCL_SPEED_HZ BSP_I2C_SCL_SPEED_HZ
+#endif
+
+/**
  * @brief 默认 I2C 传输超时时间。
  */
 #ifndef BSP_I2C_XFER_TIMEOUT_MS
@@ -122,6 +153,34 @@ int pca9557_i2c_write_reg_impl(uint8_t reg,
 int pca9557_i2c_read_reg_impl(uint8_t reg,
                               uint8_t *data,
                               uint16_t len);
+
+/**
+ * @brief ES7210 I2C 寄存器写适配函数。
+ */
+int es7210_i2c_write_reg_impl(uint8_t reg,
+                              const uint8_t *data,
+                              uint16_t len);
+
+/**
+ * @brief ES7210 I2C 寄存器读适配函数。
+ */
+int es7210_i2c_read_reg_impl(uint8_t reg,
+                             uint8_t *data,
+                             uint16_t len);
+
+/**
+ * @brief ES8311 I2C 寄存器写适配函数。
+ */
+int es8311_i2c_write_reg_impl(uint8_t reg,
+                              const uint8_t *data,
+                              uint16_t len);
+
+/**
+ * @brief ES8311 I2C 寄存器读适配函数。
+ */
+int es8311_i2c_read_reg_impl(uint8_t reg,
+                             uint8_t *data,
+                             uint16_t len);
 
 #ifdef __cplusplus
 }

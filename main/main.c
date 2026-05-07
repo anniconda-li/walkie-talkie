@@ -1,132 +1,159 @@
 /**
  * @file main.c
- * @brief LVGL 显示与触摸基础测试入口。
+ * @brief 音频服务测试入口。
  */
 
-#include "app_ui.h"
-#include "bsp_i2c.h"
-#include "bsp_pca9557.h"
 #include "osal_log.h"
 #include "osal_task.h"
-#include "service_lvgl.h"
+#include "service_audio.h"
 
-/**
- * @brief LVGL 测试日志标签。
- */
-static const char *TAG = "lvgl_test";
+#include <stdint.h>
 
-/**
- * @brief LCD 背光与摄像头电源控制输出值。
- *
- * bit5 为 LCD_BL，输出 1 打开背光；bit1 为 OV-PWDN，输出 0 唤醒摄像头。
- */
-#define LVGL_TEST_PCA9557_OUTPUT_INIT 0x20u
+static const char *TAG = "audio_test";
 
-/**
- * @brief LVGL 测试使用的 PCA9557 方向值。
- *
- * PCA9557 方向寄存器 1 表示输入，0 表示输出；此处 IO1 和 IO5 为输出，其余为输入。
- */
-#define LVGL_TEST_PCA9557_DIRECTION_INIT 0xDDu
+#define AUDIO_TEST_MODE_PASSTHROUGH    0
+#define AUDIO_TEST_MODE_READ_ONLY      1
+#define AUDIO_TEST_MODE_PLAY_ONLY      2
 
-/**
- * @brief LVGL 测试持有的 PCA9557 句柄。
- */
-static pca9557_handle_t s_pca9557 = NULL;
+/* 修改这里切换测试模式。默认本地说话直接播放。 */
+#define AUDIO_TEST_MODE                AUDIO_TEST_MODE_PASSTHROUGH
 
-/**
- * @brief 打印通用测试步骤结果。
- *
- * @param[in] name 测试步骤名称。
- * @param[in] ret 测试步骤返回值。
- * @return 原样返回 ret，便于调用方继续判断。
- */
-static int log_step_result(const char *name, int ret)
+#define AUDIO_TEST_FRAME_SAMPLES       256u
+#define AUDIO_TEST_PLAY_AMPLITUDE      16000
+#define AUDIO_TEST_PASSTHROUGH_GAIN    2u
+#define AUDIO_TEST_LOG_INTERVAL        100u
+
+static int16_t s_mono_buffer[AUDIO_TEST_FRAME_SAMPLES];
+static int16_t s_tone_buffer[AUDIO_TEST_FRAME_SAMPLES];
+
+static int32_t audio_test_calc_peak(const int16_t *data, uint32_t samples)
 {
-    if (ret == 0) {
-        OSAL_LOGI(TAG, "%s: 成功", name);
-    } else {
-        OSAL_LOGE(TAG, "%s: 失败, ret=%d", name, ret);
+    int32_t peak = 0;
+
+    for (uint32_t i = 0; i < samples; i++) {
+        int32_t value = data[i];
+        value = value < 0 ? -value : value;
+        if (value > peak) {
+            peak = value;
+        }
     }
 
-    return ret;
+    return peak;
 }
 
-/**
- * @brief 准备 LVGL 测试需要的板级 IO 状态。
- *
- * @return 成功返回 0；失败返回负值。
- */
-static int board_io_prepare_for_lvgl(void)
+static void audio_test_make_tone(void)
 {
-    if (log_step_result("I2C init", bsp_i2c_init()) != 0) {
-        return -1;
+    for (uint32_t i = 0; i < AUDIO_TEST_FRAME_SAMPLES; i++) {
+        s_tone_buffer[i] = ((i / 8u) % 2u) ? AUDIO_TEST_PLAY_AMPLITUDE : -AUDIO_TEST_PLAY_AMPLITUDE;
     }
+}
 
-    pca9557_interface_t pca9557_itf = {
-        .write_reg = pca9557_i2c_write_reg_impl,
-        .read_reg = pca9557_i2c_read_reg_impl,
+static int audio_test_init(void)
+{
+    service_audio_config_t cfg = {
+        .volume = 100u,
+        .passthrough_gain = AUDIO_TEST_PASSTHROUGH_GAIN,
+        .input = SERVICE_AUDIO_INPUT_MIX_AVG,
     };
 
-    pca9557_config_t pca9557_cfg = {
-        .output_init = LVGL_TEST_PCA9557_OUTPUT_INIT,
-        .polarity_init = 0x00,
-        .direction_init = LVGL_TEST_PCA9557_DIRECTION_INIT,
-    };
-
-    s_pca9557 = pca9557_init(&pca9557_cfg, &pca9557_itf);
-    if (s_pca9557 == NULL) {
-        OSAL_LOGE(TAG, "PCA9557 初始化失败");
-        return -2;
+    int ret = service_audio_init(&cfg);
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "音频服务初始化失败, ret=%d", ret);
+        return ret;
     }
 
-    OSAL_LOGI(TAG,
-              "PCA9557 已配置: output=0x%02X, direction=0x%02X, LCD_BL=1, OV-PWDN=0",
-              (unsigned int)LVGL_TEST_PCA9557_OUTPUT_INIT,
-              (unsigned int)LVGL_TEST_PCA9557_DIRECTION_INIT);
+    OSAL_LOGI(TAG, "音频服务测试初始化完成, input=MIX_AVG");
     return 0;
 }
 
-/**
- * @brief 循环更新 UI 状态，验证 LVGL 刷新。
- */
-static void lvgl_ui_state_test_loop(void)
+static void audio_test_read_only(void)
 {
-    int state = 0;
+    uint32_t loop = 0;
+
+    OSAL_LOGI(TAG, "开始 service_audio_read 单声道读取测试");
 
     while (1) {
-        app_ui_set_network_state(state % 4);
-        app_ui_set_intercom_state((state / 2) % 2);
-        app_ui_set_record_state((state / 3) % 2);
+        int ret = service_audio_read(s_mono_buffer, AUDIO_TEST_FRAME_SAMPLES, 1000u);
+        if (ret > 0 && (loop % AUDIO_TEST_LOG_INTERVAL) == 0u) {
+            int32_t peak = audio_test_calc_peak(s_mono_buffer, (uint32_t)ret);
+            OSAL_LOGI(TAG,
+                      "读取 mono PCM, loop=%u, samples=%d, peak=%ld",
+                      (unsigned int)loop,
+                      ret,
+                      (long)peak);
+        } else if (ret <= 0) {
+            OSAL_LOGE(TAG, "service_audio_read 失败, ret=%d", ret);
+        }
 
-        OSAL_LOGI(TAG, "LVGL UI 状态更新, state=%d", state);
-        state++;
-        osal_delay_ms(1000);
+        loop++;
+        osal_delay_ms(5u);
     }
 }
 
-/**
- * @brief ESP-IDF 应用入口。
- */
+static void audio_test_play_only(void)
+{
+    uint32_t loop = 0;
+
+    audio_test_make_tone();
+    OSAL_LOGI(TAG, "开始 service_audio_play 单声道播放测试");
+
+    while (1) {
+        int ret = service_audio_play(s_tone_buffer, AUDIO_TEST_FRAME_SAMPLES, 1000u);
+        if (ret > 0 && (loop % AUDIO_TEST_LOG_INTERVAL) == 0u) {
+            OSAL_LOGI(TAG, "播放 mono PCM, loop=%u, samples=%d", (unsigned int)loop, ret);
+        } else if (ret <= 0) {
+            OSAL_LOGE(TAG, "service_audio_play 失败, ret=%d", ret);
+        }
+
+        loop++;
+        osal_delay_ms(1u);
+    }
+}
+
+static void audio_test_passthrough(void)
+{
+    uint32_t loop = 0;
+
+    OSAL_LOGI(TAG, "开始 service_audio 单声道本地直通测试");
+
+    while (1) {
+        int ret = service_audio_passthrough_once(s_mono_buffer, AUDIO_TEST_FRAME_SAMPLES, 1000u);
+        if (ret <= 0) {
+            OSAL_LOGE(TAG, "本地直通失败, ret=%d", ret);
+        }
+
+        if ((loop % AUDIO_TEST_LOG_INTERVAL) == 0u) {
+            int32_t peak = audio_test_calc_peak(s_mono_buffer, AUDIO_TEST_FRAME_SAMPLES);
+            OSAL_LOGI(TAG,
+                      "本地直通, loop=%u, samples=%d, peak=%ld",
+                      (unsigned int)loop,
+                      ret,
+                      (long)peak);
+        }
+
+        loop++;
+        osal_delay_ms(1u);
+    }
+}
+
 void app_main(void)
 {
-    OSAL_LOGI(TAG, "开始 LVGL 测试");
+    OSAL_LOGI(TAG, "开始音频服务测试");
 
-    if (log_step_result("Board IO prepare", board_io_prepare_for_lvgl()) != 0) {
+    if (audio_test_init() != 0) {
         return;
     }
 
-    if (log_step_result("LVGL service init", service_lvgl_init()) != 0) {
-        return;
+    switch (AUDIO_TEST_MODE) {
+    case AUDIO_TEST_MODE_READ_ONLY:
+        audio_test_read_only();
+        break;
+    case AUDIO_TEST_MODE_PLAY_ONLY:
+        audio_test_play_only();
+        break;
+    case AUDIO_TEST_MODE_PASSTHROUGH:
+    default:
+        audio_test_passthrough();
+        break;
     }
-
-    if (log_step_result("App UI create", app_ui_create()) != 0) {
-        return;
-    }
-
-    OSAL_LOGI(TAG, "LVGL 测试界面已创建，等待启动动画完成");
-    osal_delay_ms(1200);
-
-    OSAL_LOGI(TAG, "开始循环更新 LVGL 测试状态");
-    lvgl_ui_state_test_loop();
 }

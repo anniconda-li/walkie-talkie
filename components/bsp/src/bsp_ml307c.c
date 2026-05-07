@@ -1,123 +1,317 @@
 /**
  * @file bsp_ml307c.c
- * @brief ML307C 4G 模块驱动实现。
+ * @brief ML307C-RTU/DTU 4G 模块驱动实现。
  */
 
 #include "bsp_ml307c.h"
 
 #include "bsp_common.h"
 
+#include <ctype.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
-/* ==================== 常量定义 ==================== */
-#define CRLF          "\r\n"
-#define CMD_OK        "OK"
-#define CMD_ERROR     "ERROR"
-#define CMD_CREG      "+CREG:"
-#define CMD_CSQ       "+CSQ:"
-#define CMD_ICCID     "+ICCID:"
-#define CMD_SMOK      "SMS OK"
-#define LINE_MAX_LEN  256
-
-/**
- * @brief ML307C 日志标签。
- */
 static const char *TAG = "bsp_ml307c";
 
-/* ==================== 内部结构体 ==================== */
+#define ML307C_CRLF                 "\r\n"
+#define ML307C_OK                   "OK"
+#define ML307C_ERROR                "ERROR"
+#define ML307C_CME_ERROR            "+CME ERROR:"
+#define ML307C_DEFAULT_TIMEOUT_MS   3000u
+#define ML307C_RX_BUFFER_SIZE       2048u
+#define ML307C_LINE_MAX_LEN         256u
+#define ML307C_DEFAULT_SOCKET_ID    1u
+#define ML307C_SOCKET_MAX_ID        4u
+
 struct ml307c_dev {
-    ml307c_config_t   config;        /**< 配置参数 */
-    ml307c_interface_t *itf;         /**< 接口函数指针 */
-    ring_buffer_t      rx_rb;         /**< 接收环形缓冲区 */
-    uint8_t           is_ready;      /**< 模块就绪标志 */
-    uint8_t           is_network_ok; /**< 网络就绪标志 */
+    ml307c_config_t config;
+    ml307c_interface_t itf;
+    ring_buffer_t rx_rb;
+    uint8_t is_ready;
+    uint8_t is_network_ok;
 };
 
-/* ==================== 内部函数声明 ==================== */
+static uint8_t ml307c_get_socket_id(ml307c_handle_t dev)
+{
+    if (dev->config.socket_id >= 1u && dev->config.socket_id <= ML307C_SOCKET_MAX_ID) {
+        return dev->config.socket_id;
+    }
 
-/**
- * @brief 发送 AT 命令并等待期望响应。
- *
- * @param[in] dev 模块句柄。
- * @param[in] cmd AT 命令字符串。
- * @param[in] expect 期望响应字符串，可为 NULL 或空字符串。
- * @param[in] timeout 超时时间，单位为毫秒。
- * @return 成功返回 0；失败返回负值。
- * @note 函数会在发送命令前清空接收缓冲区。
- */
-static int ml307c_send_cmd(
-    ml307c_handle_t dev,
-    const char *cmd,
-    const char *expect,
-    uint32_t timeout);
+    return ML307C_DEFAULT_SOCKET_ID;
+}
 
-/**
- * @brief 从 UART 接收流中读取一行数据。
- *
- * @param[in] dev 模块句柄。
- * @param[out] line 行数据输出缓冲区。
- * @param[in] line_size 行数据输出缓冲区大小。
- * @return 成功返回 0；无完整数据返回 -1。
- * @note 以 \r 或 \n 为行分隔符，并跳过空行。
- */
-static int ml307c_read_line(ml307c_handle_t dev, char *line, uint16_t line_size);
+static uint32_t ml307c_get_timeout(ml307c_handle_t dev)
+{
+    return dev->config.timeout_ms > 0u ? dev->config.timeout_ms : ML307C_DEFAULT_TIMEOUT_MS;
+}
 
-/**
- * @brief 在环形缓冲区中搜索子串。
- *
- * @param[in] dev 模块句柄。
- * @param[in] expect 要搜索的字符串。
- * @return 找到返回 0；未找到返回 -1。
- */
-static int ml307c_search_in_buffer(ml307c_handle_t dev, const char *expect);
+static void ml307c_clear_buffer(ml307c_handle_t dev)
+{
+    if (dev == NULL || dev->rx_rb.buf == NULL) {
+        return;
+    }
 
-/**
- * @brief       等待期望的响应字符串
- * @param[in]   dev      模块句柄
- * @param[in]   expect   期望的响应字符串
- * @param[in]   timeout  超时时间（毫秒）
- * @return      0成功，-1超时
- * @note        持续读取UART数据并存入环形缓冲区直到找到期望字符串或超时
- */
-static int ml307c_wait_response(
-    ml307c_handle_t dev,
-    const char *expect,
-    uint32_t timeout);
+    memset(dev->rx_rb.buf, 0, dev->rx_rb.size);
+    dev->rx_rb.head = 0;
+    dev->rx_rb.tail = 0;
+}
 
-/**
- * @brief       解析CSQ响应获取信号强度
- * @param[in]   buf      AT响应行，格式: +CSQ: <rssi>,<ber>
- * @param[out]  rssi     信号强度输出（0-31，99=未知）
- * @return      0成功，负值失败
- */
-static int ml307c_parse_csq(const char *buf, int *rssi);
+static void ml307c_drain_uart(ml307c_handle_t dev)
+{
+    if (dev == NULL) {
+        return;
+    }
 
-/**
- * @brief       解析CREG响应获取网络注册状态
- * @param[in]   buf      AT响应行，格式: +CREG: <n>,<stat>
- * @return      注册状态值（0-5），负值失败
- * @note        0=未注册，1=已注册本地，5=已注册漫游
- */
-static int ml307c_parse_creg(const char *buf);
+    uint8_t tmp[128];
+    for (uint8_t i = 0; i < 3u; i++) {
+        int rlen = dev->itf.uart_read(tmp, sizeof(tmp), 20u);
+        if (rlen <= 0) {
+            break;
+        }
+    }
+}
 
-/**
- * @brief       清空接收环形缓冲区
- * @param[in]   dev      模块句柄
- */
-static void ml307c_clear_buffer(ml307c_handle_t dev);
+static int ml307c_append_response(ml307c_handle_t dev, const uint8_t *data, int len)
+{
+    if (dev == NULL || data == NULL || len <= 0 || dev->rx_rb.buf == NULL) {
+        return -1;
+    }
 
-/**
- * @brief       向环形缓冲区追加数据
- * @param[in]   dev      模块句柄
- * @param[in]   data     数据指针
- * @param[in]   len      数据长度
- * @note        缓冲区满时自动覆盖旧数据
- */
-static void ml307c_append_rx(ml307c_handle_t dev, uint8_t *data, int len);
+    uint16_t remain = (uint16_t)(dev->rx_rb.size - dev->rx_rb.head - 1u);
+    uint16_t copy_len = (uint16_t)len;
 
-/* ==================== 公共函数实现 ==================== */
+    if (copy_len > remain) {
+        copy_len = remain;
+    }
+    if (copy_len == 0u) {
+        return 0;
+    }
+
+    memcpy(&dev->rx_rb.buf[dev->rx_rb.head], data, copy_len);
+    dev->rx_rb.head = (uint16_t)(dev->rx_rb.head + copy_len);
+    dev->rx_rb.buf[dev->rx_rb.head] = '\0';
+    return copy_len;
+}
+
+static int ml307c_wait_response(ml307c_handle_t dev,
+                                const char *expect,
+                                uint32_t timeout_ms,
+                                char *out,
+                                uint16_t out_size)
+{
+    if (dev == NULL) {
+        return -1;
+    }
+
+    uint32_t start = dev->itf.get_tick();
+    int expect_found = (expect == NULL || expect[0] == '\0') ? 1 : 0;
+
+    while ((dev->itf.get_tick() - start) < timeout_ms) {
+        uint8_t tmp[128];
+        int rlen = dev->itf.uart_read(tmp, sizeof(tmp), 100u);
+        if (rlen > 0) {
+            (void)ml307c_append_response(dev, tmp, rlen);
+
+            const char *resp = (const char *)dev->rx_rb.buf;
+            if (expect != NULL && expect[0] != '\0' && strstr(resp, expect) != NULL) {
+                expect_found = 1;
+            }
+            if (strstr(resp, ML307C_CME_ERROR) != NULL || strstr(resp, ML307C_ERROR) != NULL) {
+                if (out != NULL && out_size > 0u) {
+                    snprintf(out, out_size, "%s", resp);
+                }
+                return -2;
+            }
+            if (expect_found && strstr(resp, ML307C_OK) != NULL) {
+                if (out != NULL && out_size > 0u) {
+                    snprintf(out, out_size, "%s", resp);
+                }
+                return 0;
+            }
+        }
+
+        dev->itf.delay_ms(10u);
+    }
+
+    if (out != NULL && out_size > 0u && dev->rx_rb.buf != NULL) {
+        snprintf(out, out_size, "%s", (const char *)dev->rx_rb.buf);
+    }
+
+    BSP_LOGW(TAG, "ML307C 等待响应超时, expect=%s",
+             (expect != NULL && expect[0] != '\0') ? expect : ML307C_OK);
+    return -3;
+}
+
+static int ml307c_send_cmd_capture(ml307c_handle_t dev,
+                                   const char *cmd,
+                                   const char *expect,
+                                   uint32_t timeout_ms,
+                                   char *out,
+                                   uint16_t out_size)
+{
+    if (dev == NULL || cmd == NULL) {
+        BSP_LOGE(TAG, "ML307C 发送命令参数无效, dev=%p, cmd=%p", dev, cmd);
+        return -1;
+    }
+
+    ml307c_drain_uart(dev);
+    ml307c_clear_buffer(dev);
+
+    uint16_t len = (uint16_t)strlen(cmd);
+    int written = dev->itf.uart_write((uint8_t *)cmd, len);
+    if (written < 0 || written != len) {
+        BSP_LOGE(TAG, "ML307C 命令发送失败, written=%d, len=%u",
+                 written, (unsigned int)len);
+        return -2;
+    }
+
+    return ml307c_wait_response(dev,
+                                expect != NULL ? expect : ML307C_OK,
+                                timeout_ms,
+                                out,
+                                out_size);
+}
+
+static int ml307c_send_cmd(ml307c_handle_t dev,
+                           const char *cmd,
+                           const char *expect,
+                           uint32_t timeout_ms)
+{
+    return ml307c_send_cmd_capture(dev, cmd, expect, timeout_ms, NULL, 0);
+}
+
+static const char *ml307c_find_response_prefix(const char *resp, const char *prefix)
+{
+    if (resp == NULL || prefix == NULL) {
+        return NULL;
+    }
+
+    const char *p = resp;
+    while ((p = strstr(p, prefix)) != NULL) {
+        if (p == resp || p[-1] == '\r' || p[-1] == '\n') {
+            return p;
+        }
+        p++;
+    }
+
+    return NULL;
+}
+
+static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value)
+{
+    if (resp == NULL || prefix == NULL || value == NULL) {
+        return -1;
+    }
+
+    const char *p = ml307c_find_response_prefix(resp, prefix);
+    if (p == NULL) {
+        return -2;
+    }
+
+    p += strlen(prefix);
+    while (*p == ' ' || *p == ':' || *p == '=') {
+        p++;
+    }
+
+    *value = atoi(p);
+    return 0;
+}
+
+static int ml307c_parse_quoted_value(const char *resp,
+                                     const char *prefix,
+                                     char *out,
+                                     uint16_t out_size)
+{
+    if (resp == NULL || prefix == NULL || out == NULL || out_size == 0u) {
+        return -1;
+    }
+
+    const char *p = ml307c_find_response_prefix(resp, prefix);
+    if (p == NULL) {
+        return -2;
+    }
+
+    p = strchr(p, '"');
+    if (p == NULL) {
+        return -3;
+    }
+    p++;
+
+    const char *end = strchr(p, '"');
+    if (end == NULL || end <= p) {
+        return -4;
+    }
+
+    uint16_t len = (uint16_t)(end - p);
+    if (len >= out_size) {
+        len = (uint16_t)(out_size - 1u);
+    }
+
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return 0;
+}
+
+static int ml307c_parse_digits_after(const char *resp,
+                                     const char *prefix,
+                                     char *out,
+                                     uint16_t out_size)
+{
+    if (resp == NULL || prefix == NULL || out == NULL || out_size == 0u) {
+        return -1;
+    }
+
+    const char *p = ml307c_find_response_prefix(resp, prefix);
+    if (p == NULL) {
+        return -2;
+    }
+
+    p += strlen(prefix);
+    while (*p == ' ' || *p == ':' || *p == '"' || *p == '=') {
+        p++;
+    }
+
+    uint16_t i = 0;
+    while (isdigit((unsigned char)*p) && i < (out_size - 1u)) {
+        out[i++] = *p++;
+    }
+
+    out[i] = '\0';
+    return i > 0u ? 0 : -3;
+}
+
+static int ml307c_parse_cereg_state(const char *resp, int *state)
+{
+    return ml307c_parse_first_int_after(resp, "+CEREG", state);
+}
+
+static int ml307c_parse_dtustate(const char *resp, uint8_t socket_id, int *state)
+{
+    if (resp == NULL || state == NULL) {
+        return -1;
+    }
+
+    char prefix[24];
+    snprintf(prefix, sizeof(prefix), "+DTUSTATE: %u,", (unsigned int)socket_id);
+    const char *p = ml307c_find_response_prefix(resp, prefix);
+    if (p == NULL) {
+        snprintf(prefix, sizeof(prefix), "+DTUSTATE:%u,", (unsigned int)socket_id);
+        p = ml307c_find_response_prefix(resp, prefix);
+    }
+    if (p == NULL) {
+        return -2;
+    }
+
+    p = strchr(p, ',');
+    if (p == NULL) {
+        return -3;
+    }
+    p++;
+
+    *state = atoi(p);
+    return 0;
+}
 
 ml307c_handle_t ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
 {
@@ -138,23 +332,19 @@ ml307c_handle_t ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
     }
 
     dev->config = *cfg;
-    dev->itf    = itf;
-    dev->is_ready      = 0;
-    dev->is_network_ok = 0;
-
-    dev->rx_rb.buf  = (uint8_t *)calloc(1, 1024);
+    dev->itf = *itf;
+    dev->rx_rb.buf = (uint8_t *)calloc(1, ML307C_RX_BUFFER_SIZE);
     if (dev->rx_rb.buf == NULL) {
         free(dev);
         BSP_LOGE(TAG, "ML307C 初始化失败: 接收缓冲区内存分配失败");
         return NULL;
     }
-    dev->rx_rb.size = 1024;
-    dev->rx_rb.head = 0;
-    dev->rx_rb.tail = 0;
 
-    BSP_LOGI(TAG, "ML307C 驱动初始化成功, timeout=%u, rx_buf=%u",
-             (unsigned int)dev->config.timeout_ms,
-             (unsigned int)dev->rx_rb.size);
+    dev->rx_rb.size = ML307C_RX_BUFFER_SIZE;
+
+    BSP_LOGI(TAG, "ML307C RTU 驱动初始化成功, timeout=%u, socket_id=%u",
+             (unsigned int)ml307c_get_timeout(dev),
+             (unsigned int)ml307c_get_socket_id(dev));
     return dev;
 }
 
@@ -164,11 +354,7 @@ void ml307c_deinit(ml307c_handle_t dev)
         return;
     }
 
-    if (dev->rx_rb.buf != NULL) {
-        free(dev->rx_rb.buf);
-        dev->rx_rb.buf = NULL;
-    }
-
+    free(dev->rx_rb.buf);
     free(dev);
     BSP_LOGI(TAG, "ML307C 驱动已释放");
 }
@@ -178,7 +364,13 @@ int ml307c_check_alive(ml307c_handle_t dev)
     if (dev == NULL) {
         return -1;
     }
-    return ml307c_send_cmd(dev, "AT" CRLF, CMD_OK, dev->config.timeout_ms);
+
+    int ret = ml307c_send_cmd(dev, "AT" ML307C_CRLF, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret == 0) {
+        dev->is_ready = 1u;
+    }
+
+    return ret;
 }
 
 int ml307c_check_sim(ml307c_handle_t dev)
@@ -187,22 +379,19 @@ int ml307c_check_sim(ml307c_handle_t dev)
         return -1;
     }
 
-    int ret = ml307c_send_cmd(dev, "AT+CPIN?" CRLF, "+CPIN: READY", dev->config.timeout_ms);
-    if (ret == 0) {
-        return 0;
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+ICCID" ML307C_CRLF,
+                                      "+ICCID",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
+    if (ret != 0) {
+        return ret;
     }
 
-    ml307c_clear_buffer(dev);
-    ml307c_send_cmd(dev, "AT+CPIN?" CRLF, "", 100);
-    char line[LINE_MAX_LEN];
-    while (ml307c_read_line(dev, line, sizeof(line)) == 0) {
-        if (strstr(line, "SIM PIN") || strstr(line, "SIM PUK") ||
-            strstr(line, "NOT INSERTED")) {
-            return 1;
-        }
-    }
-
-    return ret;
+    char iccid[24];
+    return ml307c_parse_digits_after(resp, "+ICCID", iccid, sizeof(iccid)) == 0 ? 0 : 1;
 }
 
 int ml307c_check_network(ml307c_handle_t dev)
@@ -211,27 +400,29 @@ int ml307c_check_network(ml307c_handle_t dev)
         return -1;
     }
 
-    ml307c_clear_buffer(dev);
-    int ret = ml307c_send_cmd(dev, "AT+CREG?" CRLF, CMD_CREG, dev->config.timeout_ms);
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+CEREG" ML307C_CRLF,
+                                      "+CEREG",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
     if (ret != 0) {
         return ret;
     }
 
-    char line[LINE_MAX_LEN];
-    ml307c_clear_buffer(dev);
-    ml307c_send_cmd(dev, "AT+CREG?" CRLF, "", 100);
-    while (ml307c_read_line(dev, line, sizeof(line)) == 0) {
-        if (strstr(line, CMD_CREG)) {
-            int stat = ml307c_parse_creg(line);
-            if (stat == 1 || stat == 5) {
-                dev->is_network_ok = 1;
-                return 0;
-            }
-            return 1;
-        }
+    int state = 0;
+    if (ml307c_parse_cereg_state(resp, &state) != 0) {
+        return -2;
     }
 
-    return -2;
+    if (state == 1 || state == 5) {
+        dev->is_network_ok = 1u;
+        return 0;
+    }
+
+    dev->is_network_ok = 0u;
+    return 1;
 }
 
 int ml307c_get_signal(ml307c_handle_t dev, int *rssi)
@@ -240,22 +431,18 @@ int ml307c_get_signal(ml307c_handle_t dev, int *rssi)
         return -1;
     }
 
-    ml307c_clear_buffer(dev);
-    int ret = ml307c_send_cmd(dev, "AT+CSQ" CRLF, CMD_CSQ, dev->config.timeout_ms);
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+CSQ" ML307C_CRLF,
+                                      "+CSQ",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
     if (ret != 0) {
         return ret;
     }
 
-    char line[LINE_MAX_LEN];
-    ml307c_clear_buffer(dev);
-    ml307c_send_cmd(dev, "AT+CSQ" CRLF, "", 100);
-    while (ml307c_read_line(dev, line, sizeof(line)) == 0) {
-        if (strstr(line, CMD_CSQ)) {
-            return ml307c_parse_csq(line, rssi);
-        }
-    }
-
-    return -2;
+    return ml307c_parse_first_int_after(resp, "+CSQ", rssi);
 }
 
 int ml307c_get_operator(ml307c_handle_t dev, char *buf)
@@ -264,37 +451,18 @@ int ml307c_get_operator(ml307c_handle_t dev, char *buf)
         return -1;
     }
 
-    ml307c_clear_buffer(dev);
-    int ret = ml307c_send_cmd(dev, "AT+COPS?" CRLF, "+COPS:", dev->config.timeout_ms);
+    char resp[1024];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+SIMINFO" ML307C_CRLF,
+                                      "OK",
+                                      ml307c_get_timeout(dev) + 5000u,
+                                      resp,
+                                      sizeof(resp));
     if (ret != 0) {
-        ml307c_send_cmd(dev, "AT+COPS=0" CRLF, CMD_OK, dev->config.timeout_ms);
-        dev->itf->delay_ms(5000);
-        ret = ml307c_send_cmd(dev, "AT+COPS?" CRLF, "+COPS:", dev->config.timeout_ms);
-        if (ret != 0) {
-            return ret;
-        }
+        return ret;
     }
 
-    char line[LINE_MAX_LEN];
-    ml307c_clear_buffer(dev);
-    ml307c_send_cmd(dev, "AT+COPS?" CRLF, "", 100);
-    while (ml307c_read_line(dev, line, sizeof(line)) == 0) {
-        if (strstr(line, "+COPS:")) {
-            char *p = strchr(line, '"');
-            if (p) {
-                p++;
-                char *q = strchr(p, '"');
-                if (q) {
-                    int len = (q - p) < 16 ? (q - p) : 16;
-                    strncpy(buf, p, len);
-                    buf[len] = '\0';
-                    return 0;
-                }
-            }
-        }
-    }
-
-    return -2;
+    return ml307c_parse_quoted_value(resp, "carrier:", buf, 32u);
 }
 
 int ml307c_open_net(ml307c_handle_t dev)
@@ -303,58 +471,130 @@ int ml307c_open_net(ml307c_handle_t dev)
         return -1;
     }
 
-    int ret = ml307c_send_cmd(dev, "AT+CGREG=1" CRLF, CMD_OK, dev->config.timeout_ms);
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+ISLINK" ML307C_CRLF,
+                                      "+ISLINK",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
     if (ret != 0) {
         return ret;
     }
 
-    dev->itf->delay_ms(2000);
+    int link = 0;
+    if (ml307c_parse_first_int_after(resp, "+ISLINK", &link) != 0 || link != 1) {
+        dev->is_network_ok = 0u;
+        return -2;
+    }
 
+    dev->is_network_ok = 1u;
     return 0;
 }
 
 int ml307c_close_net(ml307c_handle_t dev)
 {
-    if (dev == NULL) {
-        return -1;
-    }
-
-    int ret = ml307c_send_cmd(dev, "AT+CGREG=0" CRLF, CMD_OK, dev->config.timeout_ms);
-    if (ret == 0) {
-        dev->is_network_ok = 0;
-    }
-    return ret;
+    return ml307c_tcp_close(dev);
 }
 
 int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
 {
-    if (dev == NULL || ip == NULL || port <= 0) {
+    if (dev == NULL || ip == NULL || port <= 0 || port > 65535) {
         return -1;
     }
 
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "AT+TCPCONN=%s,%d" CRLF, ip, port);
+    uint8_t socket_id = ml307c_get_socket_id(dev);
+    char cmd[128];
 
-    return ml307c_send_cmd(dev, cmd, "CONNECT OK", dev->config.timeout_ms * 2);
-}
-
-int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
-{
-    if (dev == NULL || data == NULL || len <= 0) {
-        return -1;
-    }
-
-    char cmd[32];
-    snprintf(cmd, sizeof(cmd), "AT+TCPSEND=%d" CRLF, len);
-
-    int ret = ml307c_send_cmd(dev, cmd, ">", dev->config.timeout_ms);
+    snprintf(cmd, sizeof(cmd), "AT+DTUTASK=%u,1,\"SOCK\"" ML307C_CRLF, (unsigned int)socket_id);
+    int ret = ml307c_send_cmd(dev, cmd, "+DTUTASK", ml307c_get_timeout(dev));
     if (ret != 0) {
         return ret;
     }
 
-    dev->itf->uart_write(data, len);
+    snprintf(cmd, sizeof(cmd), "AT+SOCK=%u,\"%s\",%d,0" ML307C_CRLF,
+             (unsigned int)socket_id, ip, port);
+    ret = ml307c_send_cmd(dev, cmd, "+SOCK", ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
 
-    return ml307c_wait_response(dev, "SEND OK", dev->config.timeout_ms);
+    uint32_t start = dev->itf.get_tick();
+    uint32_t timeout = ml307c_get_timeout(dev) * 10u;
+    if (timeout < 30000u) {
+        timeout = 30000u;
+    }
+
+    while ((dev->itf.get_tick() - start) < timeout) {
+        char resp[ML307C_LINE_MAX_LEN];
+        snprintf(cmd, sizeof(cmd), "AT+DTUSTATE=%u" ML307C_CRLF, (unsigned int)socket_id);
+        ret = ml307c_send_cmd_capture(dev,
+                                      cmd,
+                                      "+DTUSTATE",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
+        if (ret == 0) {
+            int state = 0;
+            if (ml307c_parse_dtustate(resp, socket_id, &state) == 0 && state == 1) {
+                BSP_LOGI(TAG, "ML307C socket 通道已连接, id=%u",
+                         (unsigned int)socket_id);
+                return 0;
+            }
+        }
+
+        dev->itf.delay_ms(1000u);
+    }
+
+    BSP_LOGW(TAG, "ML307C socket 通道连接超时, id=%u", (unsigned int)socket_id);
+    return -2;
+}
+
+int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
+{
+    if (dev == NULL || (data == NULL && len > 0) || len < 0 || len > 65535) {
+        return -1;
+    }
+
+    uint8_t socket_id = ml307c_get_socket_id(dev);
+    char prefix[32];
+    int prefix_len = snprintf(prefix,
+                              sizeof(prefix),
+                              "AT+SENDR=\"%u[1]\",",
+                              (unsigned int)socket_id);
+    if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) {
+        return -2;
+    }
+
+    ml307c_drain_uart(dev);
+    ml307c_clear_buffer(dev);
+
+    if (dev->itf.uart_write((uint8_t *)prefix, (uint16_t)prefix_len) != prefix_len) {
+        return -3;
+    }
+    if (len > 0 && dev->itf.uart_write(data, (uint16_t)len) != len) {
+        return -4;
+    }
+    if (dev->itf.uart_write((uint8_t *)ML307C_CRLF, 2u) != 2) {
+        return -5;
+    }
+
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_wait_response(dev,
+                                   "+SENDR",
+                                   ml307c_get_timeout(dev),
+                                   resp,
+                                   sizeof(resp));
+    if (ret != 0) {
+        return ret;
+    }
+
+    int send_ret = -1;
+    if (ml307c_parse_first_int_after(resp, "+SENDR", &send_ret) != 0) {
+        return -6;
+    }
+
+    return send_ret == 0 ? 0 : -7;
 }
 
 int ml307c_tcp_close(ml307c_handle_t dev)
@@ -363,35 +603,19 @@ int ml307c_tcp_close(ml307c_handle_t dev)
         return -1;
     }
 
-    return ml307c_send_cmd(dev, "AT+TCPCLOSE" CRLF, CMD_OK, dev->config.timeout_ms);
+    uint8_t socket_id = ml307c_get_socket_id(dev);
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "AT+DTUTASK=%u,0,\"SOCK\"" ML307C_CRLF, (unsigned int)socket_id);
+    return ml307c_send_cmd(dev, cmd, "+DTUTASK", ml307c_get_timeout(dev));
 }
 
 int ml307c_send_sms(ml307c_handle_t dev, const char *num, const char *msg)
 {
-    if (dev == NULL || num == NULL || msg == NULL) {
-        return -1;
-    }
-
-    int ret = ml307c_send_cmd(dev, "AT+CMGF=1" CRLF, CMD_OK, dev->config.timeout_ms);
-    if (ret != 0) {
-        return ret;
-    }
-
-    char cmd[32];
-    snprintf(cmd, sizeof(cmd), "AT+CMGS=\"%s\"" CRLF, num);
-
-    ret = ml307c_send_cmd(dev, cmd, ">", dev->config.timeout_ms);
-    if (ret != 0) {
-        return ret;
-    }
-
-    uint8_t buf[256];
-    int len = snprintf((char *)buf, sizeof(buf), "%s", msg);
-    buf[len++] = 0x1A;  /* Ctrl+Z */
-
-    dev->itf->uart_write(buf, len);
-
-    return ml307c_wait_response(dev, CMD_SMOK, dev->config.timeout_ms * 2);
+    (void)dev;
+    (void)num;
+    (void)msg;
+    BSP_LOGW(TAG, "当前 ML307C RTU 文档未提供 SMS 指令，本接口暂不支持");
+    return -1;
 }
 
 int ml307c_get_imei(ml307c_handle_t dev, char *buf)
@@ -400,29 +624,18 @@ int ml307c_get_imei(ml307c_handle_t dev, char *buf)
         return -1;
     }
 
-    ml307c_clear_buffer(dev);
-    int ret = ml307c_send_cmd(dev, "AT+GSN" CRLF, CMD_OK, dev->config.timeout_ms);
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+IMEI" ML307C_CRLF,
+                                      "+IMEI",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
     if (ret != 0) {
         return ret;
     }
 
-    char line[LINE_MAX_LEN];
-    ml307c_clear_buffer(dev);
-    ml307c_send_cmd(dev, "AT+GSN" CRLF, "", 100);
-    while (ml307c_read_line(dev, line, sizeof(line)) == 0) {
-        if (strlen(line) >= 15) {
-            int i;
-            for (i = 0; i < 15 && line[i] >= '0' && line[i] <= '9'; i++) {
-                buf[i] = line[i];
-            }
-            if (i == 15) {
-                buf[15] = '\0';
-                return 0;
-            }
-        }
-    }
-
-    return -2;
+    return ml307c_parse_quoted_value(resp, "+IMEI", buf, 16u);
 }
 
 int ml307c_get_iccid(ml307c_handle_t dev, char *buf)
@@ -431,270 +644,16 @@ int ml307c_get_iccid(ml307c_handle_t dev, char *buf)
         return -1;
     }
 
-    ml307c_clear_buffer(dev);
-    int ret = ml307c_send_cmd(dev, "AT+ICCID" CRLF, CMD_ICCID, dev->config.timeout_ms);
+    char resp[ML307C_LINE_MAX_LEN];
+    int ret = ml307c_send_cmd_capture(dev,
+                                      "AT+ICCID" ML307C_CRLF,
+                                      "+ICCID",
+                                      ml307c_get_timeout(dev),
+                                      resp,
+                                      sizeof(resp));
     if (ret != 0) {
         return ret;
     }
 
-    char line[LINE_MAX_LEN];
-    ml307c_clear_buffer(dev);
-    ml307c_send_cmd(dev, "AT+ICCID" CRLF, "", 100);
-    while (ml307c_read_line(dev, line, sizeof(line)) == 0) {
-        if (strstr(line, CMD_ICCID)) {
-            char *p = strchr(line, ':');
-            if (p) {
-                p++;
-                while (*p == ' ' || *p == '\t') p++;
-                int i = 0;
-                while (*p >= '0' && *p <= '9' && i < 20) {
-                    buf[i++] = *p++;
-                }
-                buf[i] = '\0';
-                return 0;
-            }
-        }
-    }
-
-    return -2;
-}
-
-/* ==================== 内部函数实现 ==================== */
-
-static int ml307c_send_cmd(
-    ml307c_handle_t dev,
-    const char *cmd,
-    const char *expect,
-    uint32_t timeout)
-{
-    if (dev == NULL || cmd == NULL) {
-        BSP_LOGE(TAG, "ML307C 发送命令参数无效, dev=%p, cmd=%p", dev, cmd);
-        return -1;
-    }
-
-    ml307c_clear_buffer(dev);
-
-    uint16_t len = (uint16_t)strlen(cmd);
-    BSP_LOGI(TAG, "ML307C 发送 AT 命令, len=%u, expect=%s",
-             (unsigned int)len,
-             (expect != NULL && expect[0] != '\0') ? expect : "none");
-    int write_len = dev->itf->uart_write((uint8_t *)cmd, len);
-    if (write_len < 0) {
-        BSP_LOGE(TAG, "ML307C AT 命令发送失败, ret=%d", write_len);
-        return write_len;
-    }
-
-    if (expect == NULL || expect[0] == '\0') {
-        BSP_LOGI(TAG, "ML307C AT 命令无需等待响应");
-        return 0;
-    }
-
-    return ml307c_wait_response(dev, expect, timeout);
-}
-
-static int ml307c_read_line(ml307c_handle_t dev, char *line, uint16_t line_size)
-{
-    if (dev == NULL || line == NULL || line_size == 0) {
-        return -1;
-    }
-
-    int idx = 0;
-    line[0] = '\0';
-
-    ring_buffer_t *rb = &dev->rx_rb;
-
-    while (idx < line_size - 1) {
-        if (rb->head == rb->tail) {
-            uint8_t tmp[64];
-            int rlen = dev->itf->uart_read(tmp, sizeof(tmp), 100);
-            if (rlen > 0) {
-                ml307c_append_rx(dev, tmp, rlen);
-            } else {
-                break;
-            }
-        }
-
-        uint8_t c = rb->buf[rb->tail];
-        rb->tail = (rb->tail + 1) % rb->size;
-
-        if (c == '\r' || c == '\n') {
-            if (idx > 0) {
-                break;
-            }
-            continue;
-        }
-
-        line[idx++] = (char)c;
-    }
-
-    line[idx] = '\0';
-
-    if (idx > 0) {
-        return 0;
-    }
-
-    return -1;
-}
-/**
- * @brief       在环形缓冲区中搜索子串（将环形缓冲区复制为线性数组）
- * @param[in]   dev      模块句柄
- * @param[in]   expect   要搜索的字符串
- * @return      0找到，-1未找到
- */
-static int ml307c_search_in_buffer(ml307c_handle_t dev, const char *expect)
-{
-    ring_buffer_t *rb = &dev->rx_rb;
-    int expect_len = strlen(expect);
-
-    /* 计算缓冲区中实际数据长度 */
-    int data_len;
-    if (rb->head >= rb->tail) {
-        data_len = rb->head - rb->tail;
-    } else {
-        data_len = (rb->size - rb->tail) + rb->head;
-    }
-
-    if (data_len < expect_len) {
-        return -1;
-    }
-
-    /* 复制到临时线性缓冲区 */
-    static char linear_buf[512];
-    int idx = 0;
-
-    if (rb->head >= rb->tail) {
-        memcpy(linear_buf, &rb->buf[rb->tail], rb->head - rb->tail);
-        idx = rb->head - rb->tail;
-    } else {
-        int len1 = rb->size - rb->tail;
-        memcpy(linear_buf, &rb->buf[rb->tail], len1);
-        memcpy(linear_buf + len1, rb->buf, rb->head);
-        idx = len1 + rb->head;
-    }
-    linear_buf[idx] = '\0';
-
-    /* 在线性缓冲区中搜索 */
-    if (strstr(linear_buf, expect) != NULL) {
-        return 0;
-    }
-
-    return -1;
-}
-
-/**
- * @brief       等待期望的响应字符串
- * @param[in]   dev      模块句柄
- * @param[in]   expect   期望的响应字符串
- * @param[in]   timeout  超时时间（毫秒）
- * @return      0成功，-1超时
- * @note        持续读取UART数据并存入环形缓冲区直到找到期望字符串或超时
- */
-static int ml307c_wait_response(
-    ml307c_handle_t dev,
-    const char *expect,
-    uint32_t timeout)
-{
-    if (dev == NULL || expect == NULL) {
-        BSP_LOGE(TAG, "ML307C 等待响应参数无效, dev=%p, expect=%p", dev, expect);
-        return -1;
-    }
-
-    uint32_t start = dev->itf->get_tick();
-
-    while ((dev->itf->get_tick() - start) < timeout) {
-        uint8_t tmp[64];
-        int rlen = dev->itf->uart_read(tmp, sizeof(tmp), 100);
-        if (rlen > 0) {
-            ml307c_append_rx(dev, tmp, rlen);
-        }
-
-        /* 在缓冲区中搜索期望字符串 */
-        if (ml307c_search_in_buffer(dev, expect) == 0) {
-            BSP_LOGI(TAG, "ML307C 收到期望响应: %s", expect);
-            return 0;  /* 找到期望字符串 */
-        }
-
-        dev->itf->delay_ms(10);
-    }
-
-    BSP_LOGW(TAG, "ML307C 等待响应超时: %s", expect);
-    return -1;  /* 超时 */
-}
-
-static int ml307c_parse_csq(const char *buf, int *rssi)
-{
-    if (buf == NULL || rssi == NULL) {
-        return -1;
-    }
-
-    const char *p = strchr(buf, ':');
-    if (p == NULL) {
-        return -2;
-    }
-    p++;
-
-    while (*p == ' ' || *p == '\t') p++;
-
-    int val = atoi(p);
-    if (val < 0 || val > 31) {
-        *rssi = 99;
-    } else {
-        *rssi = val;
-    }
-
-    return 0;
-}
-
-static int ml307c_parse_creg(const char *buf)
-{
-    if (buf == NULL) {
-        return -1;
-    }
-
-    const char *p = strchr(buf, ':');
-    if (p == NULL) {
-        return -2;
-    }
-    p++;
-
-    p = strchr(p, ',');
-    if (p == NULL) {
-        return -3;
-    }
-    p++;
-
-    return atoi(p);
-}
-
-static void ml307c_clear_buffer(ml307c_handle_t dev)
-{
-    if (dev == NULL) {
-        return;
-    }
-
-    ring_buffer_t *rb = &dev->rx_rb;
-    rb->head = 0;
-    rb->tail = 0;
-
-    if (rb->buf) {
-        memset(rb->buf, 0, rb->size);
-    }
-}
-
-static void ml307c_append_rx(ml307c_handle_t dev, uint8_t *data, int len)
-{
-    if (dev == NULL || data == NULL || len <= 0) {
-        return;
-    }
-
-    ring_buffer_t *rb = &dev->rx_rb;
-
-    for (int i = 0; i < len; i++) {
-        rb->buf[rb->head] = data[i];
-        rb->head = (rb->head + 1) % rb->size;
-
-        if (rb->head == rb->tail) {
-            rb->tail = (rb->tail + 1) % rb->size;
-        }
-    }
+    return ml307c_parse_digits_after(resp, "+ICCID", buf, 21u);
 }

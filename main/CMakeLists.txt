@@ -6,8 +6,6 @@ idf_component_register(
         "."
 
     REQUIRES
-        app
-        bsp
         osal
         service
 )

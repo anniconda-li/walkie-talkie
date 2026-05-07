@@ -32,6 +32,7 @@ typedef struct {
  */
 typedef struct {
     uint32_t timeout_ms;   /**< AT 命令默认超时时间，单位为毫秒。 */
+    uint8_t socket_id;     /**< DTU socket 通道号，范围 1 到 4；填 0 时默认使用 1。 */
 } ml307c_config_t;
 
 /**
@@ -112,41 +113,42 @@ int ml307c_get_signal(ml307c_handle_t dev, int *rssi);
 int ml307c_get_operator(ml307c_handle_t dev, char *buf);
 
 /**
- * @brief       打开数据网络
+ * @brief       检查数据网络是否已连接
  * @param[in]   dev      模块句柄
  * @return      0成功，负值失败
- * @note        在进行TCP/UDP通信前需要先调用此函数
+ * @note        RTU 固件使用 AT+ISLINK 查询联网状态，本接口不主动拨号。
  */
 int ml307c_open_net(ml307c_handle_t dev);
 
 /**
- * @brief       关闭数据网络
+ * @brief       关闭当前 DTU socket 任务
  * @param[in]   dev      模块句柄
  * @return      0成功，负值失败
  */
 int ml307c_close_net(ml307c_handle_t dev);
 
 /**
- * @brief       建立TCP连接
+ * @brief       配置并等待 DTU socket TCP 通道连接
  * @param[in]   dev      模块句柄
  * @param[in]   ip       目标IP地址或域名
  * @param[in]   port     目标端口号
  * @return      0成功，负值失败
- * @note        连接超时时间约为配置超时时间的2倍
+ * @note        基于 RTU 文档中的 AT+DTUTASK、AT+SOCK、AT+DTUSTATE 实现。
  */
 int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port);
 
 /**
- * @brief       通过已建立的TCP连接发送数据
+ * @brief       通过已建立的 DTU socket 通道发送数据
  * @param[in]   dev      模块句柄
  * @param[in]   data     数据缓冲区
  * @param[in]   len      数据长度
  * @return      0成功，负值失败
+ * @note        使用 AT+SENDR="x[1]",data 发送，返回 0 只表示推送到模块发送区成功。
  */
 int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len);
 
 /**
- * @brief       关闭TCP连接
+ * @brief       关闭当前 DTU socket TCP 通道
  * @param[in]   dev      模块句柄
  * @return      0成功，负值失败
  */

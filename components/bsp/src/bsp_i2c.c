@@ -26,6 +26,21 @@ static i2c_master_bus_handle_t s_i2c_bus = NULL;
 static i2c_master_dev_handle_t s_pca9557_i2c_dev = NULL;
 
 /**
+ * @brief ES7210 的 I2C 设备句柄。
+ */
+static i2c_master_dev_handle_t s_es7210_i2c_dev = NULL;
+
+/**
+ * @brief 当前 ES7210 使用的 I2C 地址。
+ */
+static uint16_t s_es7210_i2c_addr = I2C_ADDR_ES7210;
+
+/**
+ * @brief ES8311 的 I2C 设备句柄。
+ */
+static i2c_master_dev_handle_t s_es8311_i2c_dev = NULL;
+
+/**
  * @brief 将底层驱动错误码转换为 BSP 通用 int 返回值。
  *
  * @param[in] ret 底层驱动错误码。
@@ -218,6 +233,33 @@ int bsp_i2c_init(void)
         return ret;
     }
 
+    ret = bsp_i2c_add_device(I2C_ADDR_ES7210,
+                             I2C_AUDIO_CODEC_SCL_SPEED_HZ,
+                             &s_es7210_i2c_dev);
+    if (ret != 0) {
+        bsp_i2c_remove_device(s_pca9557_i2c_dev);
+        s_pca9557_i2c_dev = NULL;
+        i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
+        BSP_LOGE(TAG, "ES7210 I2C 设备初始化失败, ret=%d", ret);
+        return ret;
+    }
+    s_es7210_i2c_addr = I2C_ADDR_ES7210;
+
+    ret = bsp_i2c_add_device(I2C_ADDR_ES8311,
+                             I2C_AUDIO_CODEC_SCL_SPEED_HZ,
+                             &s_es8311_i2c_dev);
+    if (ret != 0) {
+        bsp_i2c_remove_device(s_es7210_i2c_dev);
+        s_es7210_i2c_dev = NULL;
+        bsp_i2c_remove_device(s_pca9557_i2c_dev);
+        s_pca9557_i2c_dev = NULL;
+        i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
+        BSP_LOGE(TAG, "ES8311 I2C 设备初始化失败, ret=%d", ret);
+        return ret;
+    }
+
     BSP_LOGI(TAG, "BSP I2C 初始化完成");
     return 0;
 }
@@ -232,6 +274,17 @@ int bsp_i2c_deinit(void)
     if (s_pca9557_i2c_dev != NULL) {
         bsp_i2c_remove_device(s_pca9557_i2c_dev);
         s_pca9557_i2c_dev = NULL;
+    }
+
+    if (s_es7210_i2c_dev != NULL) {
+        bsp_i2c_remove_device(s_es7210_i2c_dev);
+        s_es7210_i2c_dev = NULL;
+    }
+    s_es7210_i2c_addr = I2C_ADDR_ES7210;
+
+    if (s_es8311_i2c_dev != NULL) {
+        bsp_i2c_remove_device(s_es8311_i2c_dev);
+        s_es8311_i2c_dev = NULL;
     }
 
     int ret = i2c_del_master_bus(s_i2c_bus);
@@ -272,4 +325,83 @@ int pca9557_i2c_read_reg_impl(uint8_t reg,
     }
 
     return bsp_i2c_read_reg(s_pca9557_i2c_dev, reg, data, len);
+}
+
+int es7210_i2c_write_reg_impl(uint8_t reg,
+                              const uint8_t *data,
+                              uint16_t len)
+{
+    if (s_es7210_i2c_dev == NULL) {
+        BSP_LOGE(TAG, "ES7210 I2C 写失败: 设备未初始化");
+        return -1;
+    }
+
+    int ret = bsp_i2c_write_reg(s_es7210_i2c_dev, reg, data, len);
+    if (ret == 0 || reg != 0x00u || s_es7210_i2c_addr == I2C_ADDR_ES7210_ALT) {
+        return ret;
+    }
+
+    BSP_LOGW(TAG,
+             "ES7210 addr=0x%02X 首次写入 NACK，尝试兼容地址 0x%02X",
+             (unsigned int)s_es7210_i2c_addr,
+             (unsigned int)I2C_ADDR_ES7210_ALT);
+
+    (void)bsp_i2c_remove_device(s_es7210_i2c_dev);
+    s_es7210_i2c_dev = NULL;
+
+    int add_ret = bsp_i2c_add_device(I2C_ADDR_ES7210_ALT,
+                                     I2C_AUDIO_CODEC_SCL_SPEED_HZ,
+                                     &s_es7210_i2c_dev);
+    if (add_ret != 0) {
+        s_es7210_i2c_addr = I2C_ADDR_ES7210;
+        (void)bsp_i2c_add_device(I2C_ADDR_ES7210,
+                                 I2C_AUDIO_CODEC_SCL_SPEED_HZ,
+                                 &s_es7210_i2c_dev);
+        return ret;
+    }
+
+    s_es7210_i2c_addr = I2C_ADDR_ES7210_ALT;
+    ret = bsp_i2c_write_reg(s_es7210_i2c_dev, reg, data, len);
+    if (ret == 0) {
+        BSP_LOGI(TAG, "ES7210 使用兼容地址 0x%02X 通信成功",
+                 (unsigned int)s_es7210_i2c_addr);
+    }
+
+    return ret;
+}
+
+int es7210_i2c_read_reg_impl(uint8_t reg,
+                             uint8_t *data,
+                             uint16_t len)
+{
+    if (s_es7210_i2c_dev == NULL) {
+        BSP_LOGE(TAG, "ES7210 I2C 读失败: 设备未初始化");
+        return -1;
+    }
+
+    return bsp_i2c_read_reg(s_es7210_i2c_dev, reg, data, len);
+}
+
+int es8311_i2c_write_reg_impl(uint8_t reg,
+                              const uint8_t *data,
+                              uint16_t len)
+{
+    if (s_es8311_i2c_dev == NULL) {
+        BSP_LOGE(TAG, "ES8311 I2C 写失败: 设备未初始化");
+        return -1;
+    }
+
+    return bsp_i2c_write_reg(s_es8311_i2c_dev, reg, data, len);
+}
+
+int es8311_i2c_read_reg_impl(uint8_t reg,
+                             uint8_t *data,
+                             uint16_t len)
+{
+    if (s_es8311_i2c_dev == NULL) {
+        BSP_LOGE(TAG, "ES8311 I2C 读失败: 设备未初始化");
+        return -1;
+    }
+
+    return bsp_i2c_read_reg(s_es8311_i2c_dev, reg, data, len);
 }
