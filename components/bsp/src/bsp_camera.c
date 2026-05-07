@@ -35,10 +35,9 @@ static int bsp_camera_err_to_int(int ret)
 
 int bsp_camera_init(void)
 {
-    int ret = bsp_i2c_init();
-    if (ret != 0) {
-        BSP_LOGE(TAG, "摄像头初始化失败: I2C 初始化失败, ret=%d", ret);
-        return ret;
+    if (bsp_i2c_get_bus_handle() == NULL) {
+        BSP_LOGE(TAG, "摄像头初始化失败: I2C 未初始化");
+        return -1;
     }
 
     camera_config_t camera_config = {
@@ -70,7 +69,7 @@ int bsp_camera_init(void)
         .sccb_i2c_port = BSP_I2C_PORT,
     };
 
-    ret = bsp_camera_err_to_int(esp_camera_init(&camera_config));
+    int ret = bsp_camera_err_to_int(esp_camera_init(&camera_config));
     if (ret != 0) {
         BSP_LOGE(TAG, "摄像头初始化失败, ret=%d", ret);
         return ret;

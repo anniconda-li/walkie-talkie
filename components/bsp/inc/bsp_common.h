@@ -70,7 +70,7 @@
 #define BSP_LCD_DC_IO    GPIO_NUM_18 /**< 数据/命令选择。 */
 #define BSP_LCD_CS_IO    GPIO_NUM_8  /**< SPI 片选。 */
 #define BSP_LCD_RST_IO   GPIO_NUM_NC /**< 复位脚未接。 */
-#define BSP_LCD_BL_IO    GPIO_NUM_NC /**< 背光脚未接。 */
+#define BSP_LCD_BL_IO    GPIO_NUM_NC /**< 背光由 PCA9557 IO5 控制。 */
 
 /**
  * @brief FT6336/FT5x06 触摸引脚定义。

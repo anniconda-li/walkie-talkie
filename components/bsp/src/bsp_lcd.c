@@ -6,6 +6,7 @@
 
 #include "bsp_common.h"
 #include "bsp_i2c.h"
+#include "bsp_pca9557.h"
 #include "bsp_spi.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_io_i2c.h"
@@ -54,6 +55,19 @@ static esp_lcd_panel_io_handle_t s_lcd_touch_io = NULL;
 static esp_lcd_touch_handle_t s_lcd_touch = NULL;
 
 /**
+ * @brief LCD 背光使用的 PCA9557 句柄。
+ */
+static pca9557_handle_t s_lcd_pca9557 = NULL;
+
+/**
+ * @brief LCD 板级 PCA9557 I2C 访问接口。
+ */
+static pca9557_interface_t s_lcd_pca9557_itf = {
+    .write_reg = pca9557_i2c_write_reg_impl,
+    .read_reg = pca9557_i2c_read_reg_impl,
+};
+
+/**
  * @brief 将底层驱动错误码转换为 BSP 通用 int 返回值。
  *
  * @param[in] ret 底层驱动错误码。
@@ -64,6 +78,42 @@ static int bsp_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
+/**
+ * @brief 通过 PCA9557 准备 LCD 背光和板级相关 IO。
+ *
+ * 当前硬件中 PCA9557 IO5 连接 LCD 背光，高电平点亮；IO1 连接 OV-PWDN，
+ * 输出低电平保持摄像头唤醒。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+static int bsp_lcd_board_io_init(void)
+{
+    if (s_lcd_pca9557 != NULL) {
+        BSP_LOGI(TAG, "LCD 板级 IO 已初始化");
+        return 0;
+    }
+
+    if (bsp_i2c_get_bus_handle() == NULL) {
+        BSP_LOGE(TAG, "LCD 板级 IO 初始化失败: I2C 未初始化");
+        return -1;
+    }
+
+    pca9557_config_t config = {
+        .output_init = (uint8_t)(1u << PCA9557_PIN_5),
+        .polarity_init = 0x00u,
+        .direction_init = (uint8_t)~((1u << PCA9557_PIN_1) | (1u << PCA9557_PIN_5)),
+    };
+
+    s_lcd_pca9557 = pca9557_init(&config, &s_lcd_pca9557_itf);
+    if (s_lcd_pca9557 == NULL) {
+        BSP_LOGE(TAG, "LCD 板级 IO 初始化失败: PCA9557 初始化失败");
+        return -2;
+    }
+
+    BSP_LOGI(TAG, "LCD 背光已打开, pca_io=5");
+    return 0;
+}
+
 int bsp_lcd_display_init(void)
 {
     if (s_lcd_panel != NULL) {
@@ -71,9 +121,8 @@ int bsp_lcd_display_init(void)
         return 0;
     }
 
-    int ret = bsp_spi_init();
+    int ret = bsp_lcd_board_io_init();
     if (ret != 0) {
-        BSP_LOGE(TAG, "LCD 显示初始化失败: SPI 总线初始化失败, ret=%d", ret);
         return ret;
     }
 
@@ -152,22 +201,16 @@ int bsp_lcd_touch_init(void)
         return 0;
     }
 
-    int ret = bsp_i2c_init();
-    if (ret != 0) {
-        BSP_LOGE(TAG, "LCD 触摸初始化失败: I2C 初始化失败, ret=%d", ret);
-        return ret;
-    }
-
     i2c_master_bus_handle_t i2c_bus = (i2c_master_bus_handle_t)bsp_i2c_get_bus_handle();
     if (i2c_bus == NULL) {
-        BSP_LOGE(TAG, "LCD 触摸初始化失败: I2C 总线句柄为空");
+        BSP_LOGE(TAG, "LCD 触摸初始化失败: I2C 未初始化");
         return -1;
     }
 
     esp_lcd_panel_io_i2c_config_t touch_io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    ret = bsp_lcd_err_to_int(esp_lcd_new_panel_io_i2c(i2c_bus,
-                                                      &touch_io_cfg,
-                                                      &s_lcd_touch_io));
+    int ret = bsp_lcd_err_to_int(esp_lcd_new_panel_io_i2c(i2c_bus,
+                                                          &touch_io_cfg,
+                                                          &s_lcd_touch_io));
     if (ret != 0) {
         BSP_LOGE(TAG, "LCD 触摸 I2C panel IO 创建失败, ret=%d", ret);
         return ret;
@@ -262,6 +305,12 @@ int bsp_lcd_deinit(void)
             ret = del_ret;
         }
         BSP_LOGI(TAG, "LCD 显示 IO 已释放, ret=%d", del_ret);
+    }
+
+    if (s_lcd_pca9557 != NULL) {
+        pca9557_deinit(s_lcd_pca9557);
+        s_lcd_pca9557 = NULL;
+        BSP_LOGI(TAG, "LCD 板级 IO 已释放");
     }
 
     return ret;

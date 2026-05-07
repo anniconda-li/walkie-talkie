@@ -36,12 +36,6 @@ int service_network_init(const service_network_config_t *cfg)
         return 0;
     }
 
-    int ret = bsp_uart_init();
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "网络服务初始化失败: UART 初始化失败, ret=%d", ret);
-        return ret;
-    }
-
     ml307c_config_t ml307c_cfg = {
         .timeout_ms = SERVICE_NETWORK_DEFAULT_TIMEOUT_MS,
         .socket_id = SERVICE_NETWORK_DEFAULT_SOCKET_ID,
@@ -69,7 +63,7 @@ int service_network_init(const service_network_config_t *cfg)
         return -1;
     }
 
-    ret = ml307c_check_alive(s_ml307c);
+    int ret = ml307c_check_alive(s_ml307c);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "网络服务初始化失败: AT 通信失败, ret=%d", ret);
         ml307c_deinit(s_ml307c);

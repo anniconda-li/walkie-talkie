@@ -144,17 +144,6 @@ int service_audio_init(const service_audio_config_t *cfg)
         return ret;
     }
 
-    ret = bsp_i2c_init();
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: I2C 初始化失败, ret=%d", ret);
-        return ret;
-    }
-
-    ret = bsp_i2s_init();
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: I2S 初始化失败, ret=%d", ret);
-        return ret;
-    }
     osal_delay_ms(SERVICE_AUDIO_CODEC_CLOCK_STABLE_MS);
 
     es7210_interface_t es7210_itf = {
