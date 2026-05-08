@@ -15,7 +15,7 @@ extern "C" {
 /**
  * @brief 初始化 BSP 基础资源。
  *
- * 当前会初始化 I2C、SPI、UART 和 I2S 底层资源。
+ * 当前会初始化 I2C、SPI、UART、I2S 和电池检测底层资源。
  *
  * @return 成功返回 0；失败返回负值。
  */

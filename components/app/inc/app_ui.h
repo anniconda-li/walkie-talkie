@@ -27,6 +27,14 @@ int app_ui_create(void);
 int app_ui_set_network_state(int state);
 
 /**
+ * @brief 更新电量显示。
+ *
+ * @param[in] percent 电量百分比，范围 0-100。
+ * @return 成功返回 0；失败返回负值。
+ */
+int app_ui_set_battery_level(int percent);
+
+/**
  * @brief 更新对讲状态显示。
  *
  * @param[in] state 对讲状态值。

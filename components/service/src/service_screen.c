@@ -1,8 +1,8 @@
 /**
- * @file service_lvgl.c
- * @brief ESP 平台 LVGL 运行时服务实现。
+ * @file service_screen.c
+ * @brief ESP 平台屏幕服务实现。
  */
-#include "service_lvgl.h"
+#include "service_screen.h"
 
 #include "bsp_lcd.h"
 #include "esp_lvgl_port.h"
@@ -11,24 +11,24 @@
 #include <stdbool.h>
 
 /**
- * @brief LVGL 服务日志标签。
+ * @brief 屏幕服务日志标签。
  */
-static const char *TAG = "service_lvgl";
+static const char *TAG = "service_screen";
 
 /**
  * @brief LVGL 单缓冲高度，单位为行。
  */
-#define SERVICE_LVGL_DRAW_BUF_LINES 20u
+#define SERVICE_SCREEN_DRAW_BUF_LINES 20u
 
 /**
  * @brief LVGL 显示对象。
  */
-static lv_display_t *s_lvgl_display = NULL;
+static lv_display_t *s_screen_display = NULL;
 
 /**
  * @brief LVGL 触摸输入对象。
  */
-static lv_indev_t *s_lvgl_touch = NULL;
+static lv_indev_t *s_screen_touch = NULL;
 
 /**
  * @brief LVGL port 是否已初始化。
@@ -41,28 +41,28 @@ static bool s_lvgl_port_inited = false;
  * @param[in] ret ESP 错误码。
  * @return 成功返回 0；失败返回负值。
  */
-static int service_lvgl_err_to_int(int ret)
+static int service_screen_err_to_int(int ret)
 {
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-int service_lvgl_init(void)
+int service_screen_init(void)
 {
-    if (s_lvgl_display != NULL) {
-        SERVICE_LOGI(TAG, "LVGL 服务已初始化");
+    if (s_screen_display != NULL) {
+        SERVICE_LOGI(TAG, "屏幕服务已初始化");
         return 0;
     }
 
     int ret = bsp_lcd_init();
     if (ret != 0) {
-        SERVICE_LOGE(TAG, "LVGL 初始化失败: LCD 初始化失败, ret=%d", ret);
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: LCD 初始化失败, ret=%d", ret);
         return ret;
     }
 
     lvgl_port_cfg_t lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    ret = service_lvgl_err_to_int(lvgl_port_init(&lvgl_port_cfg));
+    ret = service_screen_err_to_int(lvgl_port_init(&lvgl_port_cfg));
     if (ret != 0) {
-        SERVICE_LOGE(TAG, "LVGL port 初始化失败, ret=%d", ret);
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: LVGL port 初始化失败, ret=%d", ret);
         bsp_lcd_deinit();
         return ret;
     }
@@ -72,7 +72,7 @@ int service_lvgl_init(void)
         .io_handle = bsp_lcd_get_panel_io_handle(),
         .panel_handle = bsp_lcd_get_panel_handle(),
         .control_handle = NULL,
-        .buffer_size = BSP_LCD_H_RES * SERVICE_LVGL_DRAW_BUF_LINES,
+        .buffer_size = BSP_LCD_H_RES * SERVICE_SCREEN_DRAW_BUF_LINES,
         .double_buffer = false,
         .trans_size = 0,
         .hres = BSP_LCD_H_RES,
@@ -94,15 +94,15 @@ int service_lvgl_init(void)
         },
     };
 
-    s_lvgl_display = lvgl_port_add_disp(&display_cfg);
-    if (s_lvgl_display == NULL) {
-        SERVICE_LOGE(TAG, "LVGL display 创建失败");
-        service_lvgl_deinit();
+    s_screen_display = lvgl_port_add_disp(&display_cfg);
+    if (s_screen_display == NULL) {
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: LVGL display 创建失败");
+        service_screen_deinit();
         return -1;
     }
 
     lvgl_port_touch_cfg_t touch_cfg = {
-        .disp = s_lvgl_display,
+        .disp = s_screen_display,
         .handle = bsp_lcd_get_touch_handle(),
         .scale = {
             .x = 1.0f,
@@ -110,48 +110,48 @@ int service_lvgl_init(void)
         },
     };
 
-    s_lvgl_touch = lvgl_port_add_touch(&touch_cfg);
-    if (s_lvgl_touch == NULL) {
-        SERVICE_LOGE(TAG, "LVGL touch 创建失败");
-        service_lvgl_deinit();
+    s_screen_touch = lvgl_port_add_touch(&touch_cfg);
+    if (s_screen_touch == NULL) {
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: LVGL touch 创建失败");
+        service_screen_deinit();
         return -2;
     }
 
-    SERVICE_LOGI(TAG, "LVGL 服务初始化成功, res=%ux%u",
+    SERVICE_LOGI(TAG, "屏幕服务初始化成功, res=%ux%u",
                  (unsigned int)BSP_LCD_H_RES,
                  (unsigned int)BSP_LCD_V_RES);
     return 0;
 }
 
-int service_lvgl_deinit(void)
+int service_screen_deinit(void)
 {
     int ret = 0;
 
-    if (s_lvgl_touch != NULL) {
-        int del_ret = service_lvgl_err_to_int(lvgl_port_remove_touch(s_lvgl_touch));
-        s_lvgl_touch = NULL;
+    if (s_screen_touch != NULL) {
+        int del_ret = service_screen_err_to_int(lvgl_port_remove_touch(s_screen_touch));
+        s_screen_touch = NULL;
         if (ret == 0) {
             ret = del_ret;
         }
-        SERVICE_LOGI(TAG, "LVGL touch 已释放, ret=%d", del_ret);
+        SERVICE_LOGI(TAG, "屏幕 touch 已释放, ret=%d", del_ret);
     }
 
-    if (s_lvgl_display != NULL) {
-        int del_ret = service_lvgl_err_to_int(lvgl_port_remove_disp(s_lvgl_display));
-        s_lvgl_display = NULL;
+    if (s_screen_display != NULL) {
+        int del_ret = service_screen_err_to_int(lvgl_port_remove_disp(s_screen_display));
+        s_screen_display = NULL;
         if (ret == 0) {
             ret = del_ret;
         }
-        SERVICE_LOGI(TAG, "LVGL display 已释放, ret=%d", del_ret);
+        SERVICE_LOGI(TAG, "屏幕 display 已释放, ret=%d", del_ret);
     }
 
     if (s_lvgl_port_inited) {
-        int del_ret = service_lvgl_err_to_int(lvgl_port_deinit());
+        int del_ret = service_screen_err_to_int(lvgl_port_deinit());
         s_lvgl_port_inited = false;
         if (ret == 0) {
             ret = del_ret;
         }
-        SERVICE_LOGI(TAG, "LVGL port 已释放, ret=%d", del_ret);
+        SERVICE_LOGI(TAG, "屏幕 LVGL port 已释放, ret=%d", del_ret);
     }
 
     int lcd_ret = bsp_lcd_deinit();
@@ -162,39 +162,39 @@ int service_lvgl_deinit(void)
     return ret;
 }
 
-int service_lvgl_lock(uint32_t timeout_ms)
+int service_screen_lock(uint32_t timeout_ms)
 {
     if (!s_lvgl_port_inited) {
-        SERVICE_LOGE(TAG, "LVGL 加锁失败: 服务未初始化");
+        SERVICE_LOGE(TAG, "屏幕加锁失败: 服务未初始化");
         return -1;
     }
 
     return lvgl_port_lock(timeout_ms) ? 0 : -1;
 }
 
-void service_lvgl_unlock(void)
+void service_screen_unlock(void)
 {
     if (s_lvgl_port_inited) {
         lvgl_port_unlock();
     }
 }
 
-uint16_t service_lvgl_get_hres(void)
+uint16_t service_screen_get_hres(void)
 {
     return (uint16_t)BSP_LCD_H_RES;
 }
 
-uint16_t service_lvgl_get_vres(void)
+uint16_t service_screen_get_vres(void)
 {
     return (uint16_t)BSP_LCD_V_RES;
 }
 
-lv_display_t *service_lvgl_get_display(void)
+lv_display_t *service_screen_get_display(void)
 {
-    return s_lvgl_display;
+    return s_screen_display;
 }
 
-lv_indev_t *service_lvgl_get_touch_indev(void)
+lv_indev_t *service_screen_get_touch_indev(void)
 {
-    return s_lvgl_touch;
+    return s_screen_touch;
 }

@@ -79,6 +79,12 @@
 #define BSP_LCD_TOUCH_INT_IO GPIO_NUM_19 /**< 触摸中断。 */
 
 /**
+ * @brief 电池电量检测引脚定义。
+ */
+#define BSP_BATTERY_ADC_IO GPIO_NUM_20       /**< 电池分压采样 ADC 输入。 */
+#define BSP_BATTERY_ADC_EN_IO GPIO_NUM_0     /**< 电池采样使能脚，低电平使能。 */
+
+/**
  * @brief 项目 I2C 总线引脚定义。
  */
 #define BSP_I2C_SDA_IO GPIO_NUM_1 /**< I2C SDA。 */

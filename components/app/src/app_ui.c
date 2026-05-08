@@ -5,7 +5,7 @@
 #include "app_ui.h"
 
 #include "app_common.h"
-#include "service_lvgl.h"
+#include "service_screen.h"
 #include "ui.h"
 #include "ui_shell.h"
 
@@ -25,19 +25,19 @@ int app_ui_create(void)
         return 0;
     }
 
-    if (service_lvgl_get_display() == NULL) {
-        APP_LOGE(TAG, "UI 创建失败: LVGL 服务未初始化");
+    if (service_screen_get_display() == NULL) {
+        APP_LOGE(TAG, "UI 创建失败: 屏幕服务未初始化");
         return -1;
     }
 
-    if (service_lvgl_lock(100) != 0) {
+    if (service_screen_lock(100) != 0) {
         APP_LOGE(TAG, "UI 创建失败: LVGL 加锁超时");
         return -2;
     }
 
     ui_init();
     s_ui_created = 1;
-    service_lvgl_unlock();
+    service_screen_unlock();
 
     APP_LOGI(TAG, "应用 UI 创建完成");
     return 0;
@@ -49,13 +49,35 @@ int app_ui_set_network_state(int state)
         return -1;
     }
 
-    if (service_lvgl_lock(100) != 0) {
+    if (service_screen_lock(100) != 0) {
         APP_LOGE(TAG, "UI 网络状态更新失败: LVGL 加锁超时");
         return -2;
     }
 
     ui_shell_set_signal_level((uint8_t)(state & 0x03));
-    service_lvgl_unlock();
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_set_battery_level(int percent)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "UI 电量更新失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_shell_set_battery_level((uint8_t)percent);
+    service_screen_unlock();
     return 0;
 }
 
@@ -71,12 +93,12 @@ int app_ui_set_record_state(int state)
         return -1;
     }
 
-    if (service_lvgl_lock(100) != 0) {
+    if (service_screen_lock(100) != 0) {
         APP_LOGE(TAG, "UI 录音状态更新失败: LVGL 加锁超时");
         return -2;
     }
 
     ui_shell_set_battery_level((uint8_t)(20 + ((state & 0x03) * 20)));
-    service_lvgl_unlock();
+    service_screen_unlock();
     return 0;
 }

@@ -12,6 +12,7 @@ idf_component_register(
         esp_driver_i2s
         esp_driver_gpio
         esp_driver_spi
+        esp_adc
         esp_lcd
         espressif__esp32-camera
         espressif__esp_lcd_touch

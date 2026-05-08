@@ -287,10 +287,6 @@ static void refresh_battery_level(void)
     }
 
     width = (20 * (int32_t)g_battery_percent) / 100;
-    if(width < 1) {
-        width = 1;
-    }
-
     lv_obj_set_width(g_battery_level, width);
 
     if(g_battery_label != NULL) {
@@ -691,10 +687,7 @@ void ui_shell_refresh_language(void)
 
 void ui_shell_set_battery_level(uint8_t percent)
 {
-    if(percent < 1) {
-        percent = 1;
-    }
-    else if(percent > 100) {
+    if(percent > 100) {
         percent = 100;
     }
 

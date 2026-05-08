@@ -40,8 +40,7 @@ void ui_shell_refresh_language(void);
 /**
  * @brief 设置状态栏电量显示
  *
- * @param percent 电量百分比，推荐传入 1-100。小于 1 会按 1 显示，
- *                大于 100 会按 100 显示。
+ * @param percent 电量百分比，范围 0-100。大于 100 会按 100 显示。
  *
  * Windows 模拟器可直接调用该接口测试 UI；ESP32-S3 移植时，
  * 将电池 ADC/电源管理芯片换算出的百分比传入这里即可。

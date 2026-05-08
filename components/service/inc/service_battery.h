@@ -1,0 +1,55 @@
+/**
+ * @file service_battery.h
+ * @brief 电池电量服务接口。
+ */
+#ifndef SERVICE_BATTERY_H
+#define SERVICE_BATTERY_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief 初始化电池电量服务。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_battery_init(void);
+
+/**
+ * @brief 释放电池电量服务。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_battery_deinit(void);
+
+/**
+ * @brief 获取电池电量百分比。
+ *
+ * @param[out] percent 电量百分比，范围 0 到 100。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_battery_get_percent(int *percent);
+
+/**
+ * @brief 获取 ADC 引脚上的分压后电压。
+ *
+ * @param[out] voltage_mv ADC 引脚电压，单位 mV。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_battery_get_adc_voltage_mv(int *voltage_mv);
+
+/**
+ * @brief 获取同一次采样对应的 ADC 电压和电量百分比。
+ *
+ * @param[out] voltage_mv ADC 引脚电压，单位 mV。
+ * @param[out] percent 电量百分比，范围 0 到 100。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_battery_get_status(int *voltage_mv, int *percent);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SERVICE_BATTERY_H */
