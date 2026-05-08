@@ -29,6 +29,10 @@ static const char *TAG = "bsp_ml307c";
 #define ML307C_NET_POLL_MS          3000u
 #define ML307C_SOCKET_READY_MS      120000u
 #define ML307C_SOCKET_POLL_MS       3000u
+#define ML307C_HTTP_TIMEOUT_MS      30000u
+#define ML307C_HTTP_LATENCY_MS      100u
+#define ML307C_HTTP_TASK_ID         1u
+#define ML307C_HTTP_ROUTE           "6[1]"
 
 struct ml307c_dev {
     ml307c_config_t config;
@@ -40,6 +44,26 @@ struct ml307c_dev {
 
 static void ml307c_log_response(const char *title, const char *resp);
 static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value);
+
+static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needle)
+{
+    if (buf == NULL || needle == NULL) {
+        return -1;
+    }
+
+    uint16_t needle_len = (uint16_t)strlen(needle);
+    if (needle_len == 0u || len < needle_len) {
+        return -1;
+    }
+
+    for (uint16_t i = 0; i <= (uint16_t)(len - needle_len); i++) {
+        if (memcmp(&buf[i], needle, needle_len) == 0) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
 
 static uint8_t ml307c_get_socket_id(ml307c_handle_t dev)
 {
@@ -632,9 +656,9 @@ int ml307c_close_net(ml307c_handle_t dev)
     return ml307c_tcp_close(dev);
 }
 
-int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
+static int ml307c_socket_connect(ml307c_handle_t dev, const char *ip, int port, int proto)
 {
-    if (dev == NULL || ip == NULL || port <= 0 || port > 65535) {
+    if (dev == NULL || ip == NULL || port <= 0 || port > 65535 || proto < 0 || proto > 1) {
         return -1;
     }
 
@@ -647,8 +671,8 @@ int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
         return ret;
     }
 
-    snprintf(cmd, sizeof(cmd), "AT+SOCK=%u,\"%s\",%d,0" ML307C_CRLF,
-             (unsigned int)socket_id, ip, port);
+    snprintf(cmd, sizeof(cmd), "AT+SOCK=%u,\"%s\",%d,%d" ML307C_CRLF,
+             (unsigned int)socket_id, ip, port, proto);
     ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
     if (ret != 0) {
         return ret;
@@ -721,18 +745,31 @@ int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
     return -2;
 }
 
-int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
+int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
+{
+    return ml307c_socket_connect(dev, ip, port, 0);
+}
+
+int ml307c_udp_connect(ml307c_handle_t dev, const char *ip, int port)
+{
+    return ml307c_socket_connect(dev, ip, port, 1);
+}
+
+static int ml307c_send_route(ml307c_handle_t dev, const char *route, uint8_t *data, int len)
 {
     if (dev == NULL || (data == NULL && len > 0) || len < 0 || len > 65535) {
         return -1;
     }
 
-    uint8_t socket_id = ml307c_get_socket_id(dev);
+    if (route == NULL || route[0] == '\0') {
+        return -1;
+    }
+
     char prefix[32];
     int prefix_len = snprintf(prefix,
                               sizeof(prefix),
-                              "AT+SENDR=\"%u\",",
-                              (unsigned int)socket_id);
+                              "AT+SENDR=\"%s\",",
+                              route);
     if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) {
         return -2;
     }
@@ -766,6 +803,172 @@ int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
     }
 
     return send_ret == 0 ? 0 : -7;
+}
+
+int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
+{
+    uint8_t socket_id = ml307c_get_socket_id(dev);
+    char route[8];
+    snprintf(route, sizeof(route), "%u[1]", (unsigned int)socket_id);
+    return ml307c_send_route(dev, route, data, len);
+}
+
+int ml307c_udp_send(ml307c_handle_t dev, uint8_t *data, int len)
+{
+    uint8_t socket_id = ml307c_get_socket_id(dev);
+    char route[8];
+    snprintf(route, sizeof(route), "%u[1]", (unsigned int)socket_id);
+    return ml307c_send_route(dev, route, data, len);
+}
+
+int ml307c_read_raw(ml307c_handle_t dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
+{
+    if (dev == NULL || buf == NULL || len == 0u) {
+        return -1;
+    }
+
+    return dev->itf.uart_read(buf, len, timeout_ms);
+}
+
+static int ml307c_http_capture_response(ml307c_handle_t dev,
+                                        uint8_t *resp,
+                                        uint16_t resp_size,
+                                        uint16_t *resp_len,
+                                        uint32_t timeout_ms)
+{
+    uint32_t start = dev->itf.get_tick();
+    uint16_t total = 0u;
+    int http_pos = -1;
+
+    while ((dev->itf.get_tick() - start) < timeout_ms) {
+        uint8_t tmp[128];
+        int rlen = dev->itf.uart_read(tmp, sizeof(tmp), 100u);
+        if (rlen > 0) {
+            uint16_t copy_len = (uint16_t)rlen;
+            if (copy_len > (uint16_t)(resp_size - total)) {
+                copy_len = (uint16_t)(resp_size - total);
+            }
+            if (copy_len > 0u) {
+                memcpy(&resp[total], tmp, copy_len);
+                total = (uint16_t)(total + copy_len);
+            }
+
+            http_pos = ml307c_find_bytes(resp, total, "\r\n+HTTP:");
+            if (http_pos < 0) {
+                http_pos = ml307c_find_bytes(resp, total, "+HTTP:");
+            }
+            if (http_pos >= 0 && ml307c_find_bytes(&resp[http_pos], (uint16_t)(total - http_pos), "\r\nOK") >= 0) {
+                int body_start = 0;
+                while (body_start < http_pos &&
+                       (resp[body_start] == '\r' || resp[body_start] == '\n')) {
+                    body_start++;
+                }
+
+                int body_len = http_pos - body_start;
+                if (body_len < 0) {
+                    body_len = 0;
+                }
+                if (body_len > 0 && body_start > 0) {
+                    memmove(resp, &resp[body_start], (size_t)body_len);
+                }
+
+                *resp_len = (uint16_t)body_len;
+                return 0;
+            }
+        }
+
+        dev->itf.delay_ms(10u);
+    }
+
+    *resp_len = total;
+    BSP_LOGW(TAG, "ML307C HTTP 响应等待超时, received=%u", (unsigned int)total);
+    return -1;
+}
+
+int ml307c_http_post(ml307c_handle_t dev,
+                     uint8_t id,
+                     const char *url,
+                     const char *header,
+                     const uint8_t *body,
+                     uint16_t body_len,
+                     uint8_t *resp,
+                     uint16_t resp_size,
+                     uint16_t *resp_len)
+{
+    if (dev == NULL || url == NULL || body == NULL || body_len == 0u ||
+        resp == NULL || resp_size == 0u || resp_len == NULL) {
+        return -1;
+    }
+
+    if (id == 0u) {
+        id = ML307C_HTTP_TASK_ID;
+    }
+
+    const char *safe_header = header != NULL ? header : "";
+    char cmd[768];
+
+    snprintf(cmd,
+             sizeof(cmd),
+             "AT+HTTPURL=%u,1,1,\"%s\",\"%s\"" ML307C_CRLF,
+             (unsigned int)id,
+             safe_header,
+             url);
+    int ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
+
+    snprintf(cmd,
+             sizeof(cmd),
+             "AT+HTTPCFG=%u,10,30,0,0" ML307C_CRLF,
+             (unsigned int)id);
+    ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
+
+    snprintf(cmd,
+             sizeof(cmd),
+             "AT+HTTPSSL=%u,%d,1" ML307C_CRLF,
+             (unsigned int)id,
+             strncmp(url, "https://", 8u) == 0 ? 1 : 0);
+    (void)ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+
+    snprintf(cmd,
+             sizeof(cmd),
+             "AT+HTTPRESP=%u,0,1,\"%s\"" ML307C_CRLF,
+             (unsigned int)id,
+             ML307C_HTTP_ROUTE);
+    ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        return ret;
+    }
+
+    snprintf(cmd,
+             sizeof(cmd),
+             "AT+HTTP=%u,%u,%u,%u" ML307C_CRLF,
+             (unsigned int)id,
+             (unsigned int)body_len,
+             (unsigned int)ML307C_HTTP_TIMEOUT_MS,
+             (unsigned int)ML307C_HTTP_LATENCY_MS);
+
+    ml307c_drain_uart(dev);
+    ml307c_clear_buffer(dev);
+
+    uint16_t cmd_len = (uint16_t)strlen(cmd);
+    if (dev->itf.uart_write((uint8_t *)cmd, cmd_len) != cmd_len) {
+        return -2;
+    }
+    if (dev->itf.uart_write((uint8_t *)body, body_len) != body_len) {
+        return -3;
+    }
+
+    *resp_len = 0u;
+    return ml307c_http_capture_response(dev,
+                                        resp,
+                                        resp_size,
+                                        resp_len,
+                                        ML307C_HTTP_TIMEOUT_MS + 10000u);
 }
 
 int ml307c_tcp_close(ml307c_handle_t dev)

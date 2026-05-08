@@ -154,6 +154,15 @@ int ml307c_close_net(ml307c_handle_t dev);
 int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port);
 
 /**
+ * @brief       配置并等待 DTU socket UDP 通道就绪
+ * @param[in]   dev      模块句柄
+ * @param[in]   ip       目标IP地址或域名
+ * @param[in]   port     目标端口号
+ * @return      0成功，负值失败
+ */
+int ml307c_udp_connect(ml307c_handle_t dev, const char *ip, int port);
+
+/**
  * @brief       通过已建立的 DTU socket 通道发送数据
  * @param[in]   dev      模块句柄
  * @param[in]   data     数据缓冲区
@@ -162,6 +171,48 @@ int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port);
  * @note        使用 AT+SENDR="x[1]",data 发送，返回 0 只表示推送到模块发送区成功。
  */
 int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len);
+
+/**
+ * @brief       通过已建立的 DTU socket UDP 通道发送数据
+ * @param[in]   dev      模块句柄
+ * @param[in]   data     数据缓冲区
+ * @param[in]   len      数据长度
+ * @return      0成功，负值失败
+ */
+int ml307c_udp_send(ml307c_handle_t dev, uint8_t *data, int len);
+
+/**
+ * @brief       读取 DTU/HTTP 透传到 UART 的原始下行数据
+ * @param[in]   dev      模块句柄
+ * @param[out]  buf      输出缓冲区
+ * @param[in]   len      最大读取长度
+ * @param[in]   timeout_ms 读取超时
+ * @return      读取字节数，失败返回负值
+ */
+int ml307c_read_raw(ml307c_handle_t dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+
+/**
+ * @brief       HTTP POST 并捕获响应 body
+ * @param[in]   dev       模块句柄
+ * @param[in]   id        HTTP 任务 ID
+ * @param[in]   url       请求 URL
+ * @param[in]   header    HTTP header 字符串，可为空
+ * @param[in]   body      请求体
+ * @param[in]   body_len  请求体长度
+ * @param[out]  resp      响应 body 输出缓冲区
+ * @param[in]   resp_size 响应缓冲区长度
+ * @param[out]  resp_len  实际响应 body 长度
+ * @return      0成功，负值失败
+ */
+int ml307c_http_post(ml307c_handle_t dev,
+                     uint8_t id,
+                     const char *url,
+                     const char *header,
+                     const uint8_t *body,
+                     uint16_t body_len,
+                     uint8_t *resp,
+                     uint16_t resp_size,
+                     uint16_t *resp_len);
 
 /**
  * @brief       关闭当前 DTU socket TCP 通道

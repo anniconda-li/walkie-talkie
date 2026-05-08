@@ -49,12 +49,18 @@ int app_ui_set_network_state(int state)
         return -1;
     }
 
+    if (state < 0) {
+        state = 0;
+    } else if (state > 4) {
+        state = 4;
+    }
+
     if (service_screen_lock(100) != 0) {
         APP_LOGE(TAG, "UI 网络状态更新失败: LVGL 加锁超时");
         return -2;
     }
 
-    ui_shell_set_signal_level((uint8_t)(state & 0x03));
+    ui_shell_set_signal_level((uint8_t)state);
     service_screen_unlock();
     return 0;
 }

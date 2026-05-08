@@ -13,12 +13,16 @@
 /**
  * @brief 非阻塞等待时间。
  */
+#ifndef OSAL_WAIT_NONE
 #define OSAL_WAIT_NONE     0u
+#endif
 
 /**
  * @brief 永久阻塞等待时间。
  */
+#ifndef OSAL_WAIT_FOREVER
 #define OSAL_WAIT_FOREVER  0xFFFFFFFFu
+#endif
 
 /**
  * @brief OSAL 队列句柄。

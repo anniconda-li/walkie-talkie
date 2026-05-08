@@ -88,6 +88,52 @@ int service_network_tcp_send(const uint8_t *data, int len);
  */
 int service_network_tcp_close(void);
 
+/**
+ * @brief 配置并等待 UDP DTU 通道就绪。
+ *
+ * @param[in] host 服务器 IP 或域名。
+ * @param[in] port 服务器端口。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_network_udp_connect(const char *host, int port);
+
+/**
+ * @brief 通过 UDP DTU 通道发送数据。
+ *
+ * @param[in] data 待发送数据缓冲区。
+ * @param[in] len 待发送数据长度，单位字节。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_network_udp_send(const uint8_t *data, int len);
+
+/**
+ * @brief 读取 ML307C 下行透传数据。
+ *
+ * @param[out] buf 输出缓冲区。
+ * @param[in] len 最大读取字节数。
+ * @param[in] timeout_ms 读取超时，单位毫秒。
+ * @return 读取字节数；超时返回 0；失败返回负值。
+ */
+int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+
+/**
+ * @brief HTTP POST 上传 WAV，并返回响应 body。
+ *
+ * @param[in] url 请求 URL。
+ * @param[in] wav WAV 数据缓冲区。
+ * @param[in] wav_len WAV 数据长度。
+ * @param[out] resp 响应 body 输出缓冲区。
+ * @param[in] resp_size 响应缓冲区长度。
+ * @param[out] resp_len 实际响应长度。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_network_http_post_wav(const char *url,
+                                  const uint8_t *wav,
+                                  uint16_t wav_len,
+                                  uint8_t *resp,
+                                  uint16_t resp_size,
+                                  uint16_t *resp_len);
+
 #ifdef __cplusplus
 }
 #endif
