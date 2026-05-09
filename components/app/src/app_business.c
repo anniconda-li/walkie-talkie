@@ -5,21 +5,85 @@
 #include "app_business.h"
 
 #include "app_ai_voice.h"
-#include "app_audio_session.h"
 #include "app_business_config.h"
 #include "app_common.h"
 #include "app_intercom.h"
 #include "app_status_monitor.h"
+#include "app_ui.h"
+#include "osal_mutex.h"
 #include "service_audio.h"
 #include "service_battery.h"
 #include "service_network.h"
+#include "service_screen.h"
 #include "ui_event.h"
 
 #include <stdint.h>
+#include <stddef.h>
 
 static const char *TAG = "app_business";
 
 static volatile int s_started = 0;
+static osal_mutex_t s_audio_session_mutex = NULL;
+static int s_audio_session_busy = 0;
+
+static int app_business_audio_session_init(void)
+{
+    if (s_audio_session_mutex != NULL) {
+        return 0;
+    }
+
+    s_audio_session_mutex = osal_mutex_create();
+    return s_audio_session_mutex == NULL ? -1 : 0;
+}
+
+int app_business_audio_session_try_begin(void)
+{
+    if (app_business_audio_session_init() != 0) {
+        return -1;
+    }
+
+    /* 非阻塞获取：业务层只做抢占失败即放弃，避免 UI 长按事件被卡住。 */
+    if (osal_mutex_lock(s_audio_session_mutex, OSAL_WAIT_NONE) != 0) {
+        return -2;
+    }
+
+    if (s_audio_session_busy) {
+        osal_mutex_unlock(s_audio_session_mutex);
+        return -3;
+    }
+
+    s_audio_session_busy = 1;
+    osal_mutex_unlock(s_audio_session_mutex);
+    return 0;
+}
+
+void app_business_audio_session_end(void)
+{
+    if (s_audio_session_mutex == NULL) {
+        return;
+    }
+
+    if (osal_mutex_lock(s_audio_session_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_audio_session_busy = 0;
+        osal_mutex_unlock(s_audio_session_mutex);
+    }
+}
+
+int app_business_audio_session_is_busy(void)
+{
+    int busy = 0;
+
+    if (s_audio_session_mutex == NULL) {
+        return 0;
+    }
+
+    if (osal_mutex_lock(s_audio_session_mutex, OSAL_WAIT_NONE) == 0) {
+        busy = s_audio_session_busy;
+        osal_mutex_unlock(s_audio_session_mutex);
+    }
+
+    return busy;
+}
 
 static void app_business_on_channel_changed(int32_t channel)
 {
@@ -60,6 +124,7 @@ static void app_business_on_volume_changed(int32_t value)
 
 static void app_business_register_ui_callbacks(void)
 {
+    /* UI 层只发事件，具体业务由拆分后的 app 模块处理。 */
     ui_event_callbacks_t callbacks = {
         .intercom_channel_changed = app_business_on_channel_changed,
         .intercom_ptt_started = app_business_on_ptt_started,
@@ -78,15 +143,29 @@ int app_business_start(void)
         return 0;
     }
 
-    int ret = app_audio_session_init();
+    int ret = app_business_audio_session_init();
     if (ret != 0) {
         APP_LOGE(TAG, "音频会话状态初始化失败, ret=%d", ret);
+        return ret;
+    }
+
+    ret = service_screen_init();
+    if (ret != 0) {
+        APP_LOGE(TAG, "屏幕服务初始化失败, ret=%d", ret);
+        return ret;
+    }
+
+    ret = app_ui_create();
+    if (ret != 0) {
+        APP_LOGE(TAG, "应用 UI 创建失败, ret=%d", ret);
+        (void)service_screen_deinit();
         return ret;
     }
 
     ret = service_battery_init();
     if (ret != 0) {
         APP_LOGE(TAG, "电池服务初始化失败, ret=%d", ret);
+        (void)service_screen_deinit();
         return ret;
     }
 
@@ -98,6 +177,7 @@ int app_business_start(void)
     ret = service_audio_init(&audio_cfg);
     if (ret != 0) {
         APP_LOGE(TAG, "音频服务初始化失败, ret=%d", ret);
+        (void)service_screen_deinit();
         return ret;
     }
 
@@ -106,6 +186,7 @@ int app_business_start(void)
         APP_LOGW(TAG, "网络服务初始化失败，后台状态任务仍会显示无信号, ret=%d", ret);
     }
 
+    /* 先注册 UI 回调，再启动后台业务，确保开机后用户操作能被接收。 */
     app_business_register_ui_callbacks();
 
     ret = app_status_monitor_start();

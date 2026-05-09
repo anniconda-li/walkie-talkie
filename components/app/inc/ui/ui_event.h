@@ -1,3 +1,7 @@
+/**
+ * @file ui_event.h
+ * @brief UI 事件桥接和视图注册接口。
+ */
 #ifndef UI_EVENT_H
 #define UI_EVENT_H
 
@@ -5,77 +9,114 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/*
- * Windows simulator:
- *   UI events update visual state directly here. Hardware-side actions can be
- *   tested by registering callbacks from the PC app layer.
+/**
+ * @brief UI 事件回调集合。
  *
- * ESP32-S3 LCD porting:
- *   Keep page creation code unchanged and bind these callbacks to board
- *   drivers/services instead: PTT audio, camera capture/upload, AI recording,
- *   backlight PWM, audio volume, persistent language storage, and server config.
+ * UI 层只负责把按键、滑动和下拉框变化转换成事件；硬件和业务行为由 app 层
+ * 注册回调处理。
  */
 typedef struct {
-    void (*intercom_channel_changed)(int32_t channel);
-    void (*intercom_ptt_started)(int32_t channel);
-    void (*intercom_ptt_stopped)(int32_t channel);
-    void (*camera_capture_requested)(void);
-    void (*camera_upload_requested)(void);
-    void (*camera_retake_requested)(void);
-    void (*ai_question_started)(void);
-    void (*ai_question_stopped)(void);
-    void (*settings_brightness_changed)(int32_t value);
-    void (*settings_volume_changed)(int32_t value);
-    void (*settings_language_changed)(bool english);
+    void (*intercom_channel_changed)(int32_t channel); /**< 对讲频道变化回调。 */
+    void (*intercom_ptt_started)(int32_t channel);     /**< PTT 按下回调。 */
+    void (*intercom_ptt_stopped)(int32_t channel);     /**< PTT 松开回调。 */
+    void (*camera_capture_requested)(void);            /**< 相机拍照请求回调。 */
+    void (*camera_upload_requested)(void);             /**< 相机上传请求回调。 */
+    void (*camera_retake_requested)(void);             /**< 相机重拍请求回调。 */
+    void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
+    void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
+    void (*settings_brightness_changed)(int32_t value); /**< 亮度变化回调。 */
+    void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
+    void (*settings_language_changed)(bool english);   /**< 语言变化回调。 */
 } ui_event_callbacks_t;
 
+/**
+ * @brief 对讲页面视图对象集合。
+ */
 typedef struct {
-    lv_obj_t *channel_dec_button;
-    lv_obj_t *channel_inc_button;
-    lv_obj_t *channel_label;
-    lv_obj_t *channel_hint_label;
-    lv_obj_t *ptt_button;
-    lv_obj_t *broadcast_rings[3];
-    int32_t channel;
+    lv_obj_t *channel_dec_button;  /**< 频道减少按钮。 */
+    lv_obj_t *channel_inc_button;  /**< 频道增加按钮。 */
+    lv_obj_t *channel_label;       /**< 当前频道标签。 */
+    lv_obj_t *channel_hint_label;  /**< 频道提示标签。 */
+    lv_obj_t *ptt_button;          /**< PTT 按钮。 */
+    lv_obj_t *broadcast_rings[3];  /**< PTT 波纹动画对象。 */
+    int32_t channel;               /**< 当前 UI 频道号。 */
 } ui_intercom_view_t;
 
+/**
+ * @brief 相机页面视图对象集合。
+ */
 typedef struct {
-    lv_obj_t *capture_label;
-    lv_obj_t *upload_label;
-    lv_obj_t *retake_label;
-    lv_obj_t *preview;
-    lv_obj_t *status_label;
-    lv_obj_t *capture_button;
-    lv_obj_t *upload_button;
-    lv_obj_t *retake_button;
-    bool frozen;
+    lv_obj_t *capture_label;  /**< 拍照按钮文本。 */
+    lv_obj_t *upload_label;   /**< 上传按钮文本。 */
+    lv_obj_t *retake_label;   /**< 重拍按钮文本。 */
+    lv_obj_t *preview;        /**< 预览区域对象。 */
+    lv_obj_t *status_label;   /**< 状态文本。 */
+    lv_obj_t *capture_button; /**< 拍照按钮。 */
+    lv_obj_t *upload_button;  /**< 上传按钮。 */
+    lv_obj_t *retake_button;  /**< 重拍按钮。 */
+    bool frozen;              /**< 预览是否冻结。 */
 } ui_camera_view_t;
 
+/**
+ * @brief AI 页面视图对象集合。
+ */
 typedef struct {
-    lv_obj_t *answer_label;
-    lv_obj_t *ask_button;
-    lv_obj_t *ask_label;
-    lv_obj_t *voice_bars[4];
-    bool speaking;
+    lv_obj_t *answer_label; /**< AI 回答显示标签。 */
+    lv_obj_t *ask_button;   /**< AI 问答按钮。 */
+    lv_obj_t *ask_label;    /**< AI 问答按钮文本。 */
+    lv_obj_t *voice_bars[4]; /**< 录音动效柱。 */
+    bool speaking;          /**< 是否处于录音动效状态。 */
 } ui_ai_view_t;
 
+/**
+ * @brief 设置页面视图对象集合。
+ */
 typedef struct {
-    lv_obj_t *brightness_label;
-    lv_obj_t *volume_label;
-    lv_obj_t *language_label;
-    lv_obj_t *language_symbol_label;
-    lv_obj_t *server_label;
-    lv_obj_t *ip_label;
-    lv_obj_t *port_label;
-    lv_obj_t *brightness_slider;
-    lv_obj_t *volume_slider;
-    lv_obj_t *language_dropdown;
+    lv_obj_t *brightness_label;       /**< 亮度标签。 */
+    lv_obj_t *volume_label;           /**< 音量标签。 */
+    lv_obj_t *language_label;         /**< 语言标签。 */
+    lv_obj_t *language_symbol_label;  /**< 语言符号标签。 */
+    lv_obj_t *server_label;           /**< 服务器设置标签。 */
+    lv_obj_t *ip_label;               /**< IP 标签。 */
+    lv_obj_t *port_label;             /**< 端口标签。 */
+    lv_obj_t *brightness_slider;      /**< 亮度滑块。 */
+    lv_obj_t *volume_slider;          /**< 音量滑块。 */
+    lv_obj_t *language_dropdown;      /**< 语言下拉框。 */
 } ui_settings_view_t;
 
+/**
+ * @brief 注册 UI 事件回调集合。
+ *
+ * @param[in] callbacks 回调集合；传入 NULL 时清空回调。
+ */
 void ui_event_set_callbacks(const ui_event_callbacks_t *callbacks);
+
+/**
+ * @brief 注册对讲页面视图对象。
+ *
+ * @param[in] view 对讲页面视图对象集合。
+ */
 void ui_event_register_intercom(ui_intercom_view_t *view);
+
+/**
+ * @brief 注册相机页面视图对象。
+ *
+ * @param[in] view 相机页面视图对象集合。
+ */
 void ui_event_register_camera(ui_camera_view_t *view);
+
+/**
+ * @brief 注册 AI 页面视图对象。
+ *
+ * @param[in] view AI 页面视图对象集合。
+ */
 void ui_event_register_ai(ui_ai_view_t *view);
+
+/**
+ * @brief 注册设置页面视图对象。
+ *
+ * @param[in] view 设置页面视图对象集合。
+ */
 void ui_event_register_settings(ui_settings_view_t *view);
 
 #endif /* UI_EVENT_H */

@@ -4,11 +4,9 @@
  */
 
 #include "app_business.h"
-#include "app_ui.h"
 #include "bsp.h"
 #include "osal_log.h"
 #include "osal_task.h"
-#include "service_screen.h"
 
 /**
  * @brief 应用日志标签。
@@ -25,25 +23,9 @@ void app_main(void)
         return;
     }
 
-    ret = service_screen_init();
-    if (ret != 0) {
-        OSAL_LOGE(TAG, "屏幕服务初始化失败, ret=%d", ret);
-        (void)bsp_deinit();
-        return;
-    }
-
-    ret = app_ui_create();
-    if (ret != 0) {
-        OSAL_LOGE(TAG, "应用 UI 创建失败, ret=%d", ret);
-        (void)service_screen_deinit();
-        (void)bsp_deinit();
-        return;
-    }
-
     ret = app_business_start();
     if (ret != 0) {
         OSAL_LOGE(TAG, "业务控制器启动失败, ret=%d", ret);
-        (void)service_screen_deinit();
         (void)bsp_deinit();
         return;
     }

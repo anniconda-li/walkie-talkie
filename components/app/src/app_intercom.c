@@ -4,19 +4,44 @@
  */
 #include "app_intercom.h"
 
-#include "app_audio_session.h"
+#include "app_business.h"
 #include "app_business_config.h"
 #include "app_common.h"
 #include "app_status_monitor.h"
-#include "app_walkie_protocol.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
 
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 static const char *TAG = "app_intercom";
+
+#define APP_INTERCOM_PACKET_MAGIC       "WTK1"
+#define APP_INTERCOM_DEVICE_FIELD_LEN   16u
+#define APP_INTERCOM_PACKET_HEADER_LEN  34u
+#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES
+#define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
+
+typedef enum {
+    APP_INTERCOM_PKT_REGISTER = 1,
+    APP_INTERCOM_PKT_CHANNEL = 2,
+    APP_INTERCOM_PKT_PTT_START = 3,
+    APP_INTERCOM_PKT_AUDIO = 4,
+    APP_INTERCOM_PKT_PTT_STOP = 5,
+    APP_INTERCOM_PKT_HEARTBEAT = 6,
+} app_intercom_packet_type_t;
+
+typedef struct {
+    uint8_t type;
+    uint16_t channel;
+    uint32_t seq;
+    const uint8_t *payload;
+    uint16_t payload_len;
+    const uint8_t *packet;
+    uint16_t packet_len;
+} app_intercom_packet_view_t;
 
 static osal_task_t s_ptt_task = NULL;
 static volatile int s_started = 0;
@@ -25,18 +50,104 @@ static volatile int s_ptt_active = 0;
 static int32_t s_current_channel = APP_BUSINESS_DEFAULT_CHANNEL;
 static uint32_t s_udp_seq = 0u;
 
+/** @brief 写入对讲协议 little-endian uint16 字段。 */
+static void app_intercom_write_u16(uint8_t *buf, uint16_t value)
+{
+    buf[0] = (uint8_t)(value & 0xffu);
+    buf[1] = (uint8_t)((value >> 8) & 0xffu);
+}
+
+/** @brief 读取对讲协议 little-endian uint16 字段。 */
+static uint16_t app_intercom_read_u16(const uint8_t *buf)
+{
+    return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+}
+
+/** @brief 写入对讲协议 little-endian uint32 字段。 */
+static void app_intercom_write_u32(uint8_t *buf, uint32_t value)
+{
+    buf[0] = (uint8_t)(value & 0xffu);
+    buf[1] = (uint8_t)((value >> 8) & 0xffu);
+    buf[2] = (uint8_t)((value >> 16) & 0xffu);
+    buf[3] = (uint8_t)((value >> 24) & 0xffu);
+}
+
+/** @brief 读取对讲协议 little-endian uint32 字段。 */
+static uint32_t app_intercom_read_u32(const uint8_t *buf)
+{
+    return (uint32_t)buf[0] |
+           ((uint32_t)buf[1] << 8) |
+           ((uint32_t)buf[2] << 16) |
+           ((uint32_t)buf[3] << 24);
+}
+
 static uint16_t app_intercom_build_packet(uint8_t *out,
                                           uint8_t type,
                                           const uint8_t *payload,
                                           uint16_t payload_len)
 {
-    return app_walkie_build_packet(out,
-                                   type,
-                                   (uint16_t)s_current_channel,
-                                   s_udp_seq++,
-                                   APP_BUSINESS_DEVICE_NAME,
-                                   payload,
-                                   payload_len);
+    if (out == NULL || payload_len > APP_INTERCOM_PACKET_MAX_PAYLOAD) {
+        return 0u;
+    }
+
+    memcpy(&out[0], APP_INTERCOM_PACKET_MAGIC, 4u);
+    out[4] = type;
+    out[5] = APP_INTERCOM_PACKET_HEADER_LEN;
+    app_intercom_write_u16(&out[6], (uint16_t)s_current_channel);
+    app_intercom_write_u32(&out[8], s_udp_seq++);
+    app_intercom_write_u32(&out[12], osal_get_tick_ms());
+    /* 设备名固定 16 字节，短名后面补 0，便于服务器原样转发和客户端比较。 */
+    memset(&out[16], 0, APP_INTERCOM_DEVICE_FIELD_LEN);
+    strncpy((char *)&out[16], APP_BUSINESS_DEVICE_NAME, APP_INTERCOM_DEVICE_FIELD_LEN - 1u);
+    app_intercom_write_u16(&out[32], payload_len);
+
+    if (payload != NULL && payload_len > 0u) {
+        memcpy(&out[APP_INTERCOM_PACKET_HEADER_LEN], payload, payload_len);
+    }
+
+    return (uint16_t)(APP_INTERCOM_PACKET_HEADER_LEN + payload_len);
+}
+
+static int app_intercom_parse_packet(const uint8_t *packet,
+                                     uint16_t len,
+                                     app_intercom_packet_view_t *view)
+{
+    if (packet == NULL || view == NULL || len < APP_INTERCOM_PACKET_HEADER_LEN) {
+        return -1;
+    }
+    if (memcmp(packet, APP_INTERCOM_PACKET_MAGIC, 4u) != 0) {
+        return -2;
+    }
+
+    uint8_t header_len = packet[5];
+    uint16_t payload_len = app_intercom_read_u16(&packet[32]);
+    /* 解析阶段只建立 view，不复制 payload，减少 20ms 音频包处理开销。 */
+    if (header_len != APP_INTERCOM_PACKET_HEADER_LEN ||
+        len < (uint16_t)(header_len + payload_len)) {
+        return -3;
+    }
+
+    view->type = packet[4];
+    view->channel = app_intercom_read_u16(&packet[6]);
+    view->seq = app_intercom_read_u32(&packet[8]);
+    view->payload = &packet[header_len];
+    view->payload_len = payload_len;
+    view->packet = packet;
+    view->packet_len = (uint16_t)(header_len + payload_len);
+    return 0;
+}
+
+static int app_intercom_packet_is_own(const uint8_t *packet)
+{
+    char name[APP_INTERCOM_DEVICE_FIELD_LEN + 1u];
+
+    if (packet == NULL) {
+        return 0;
+    }
+
+    memcpy(name, &packet[16], APP_INTERCOM_DEVICE_FIELD_LEN);
+    name[APP_INTERCOM_DEVICE_FIELD_LEN] = '\0';
+    return strncmp(name, APP_BUSINESS_DEVICE_NAME, APP_INTERCOM_DEVICE_FIELD_LEN) == 0;
 }
 
 static int app_intercom_send_control(uint8_t type)
@@ -45,7 +156,8 @@ static int app_intercom_send_control(uint8_t type)
         return -1;
     }
 
-    uint8_t packet[APP_WALKIE_PACKET_HEADER_LEN];
+    /* 控制包没有 payload，用于服务器维护设备在线状态和频道状态。 */
+    uint8_t packet[APP_INTERCOM_PACKET_HEADER_LEN];
     uint16_t len = app_intercom_build_packet(packet, type, NULL, 0u);
     return service_network_udp_send(packet, len);
 }
@@ -53,37 +165,39 @@ static int app_intercom_send_control(uint8_t type)
 static void app_intercom_heartbeat_task(void *arg)
 {
     (void)arg;
-    (void)app_intercom_send_control(APP_WALKIE_PKT_REGISTER);
-    (void)app_intercom_send_control(APP_WALKIE_PKT_CHANNEL);
+    (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
+    (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
     while (1) {
+        /* 网络恢复后在后台重建 UDP DTU 通道，并重新上报设备和频道。 */
         if (app_status_monitor_network_ready() && !s_udp_ready) {
             int ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
             if (ret == 0) {
                 s_udp_ready = 1;
-                (void)app_intercom_send_control(APP_WALKIE_PKT_REGISTER);
-                (void)app_intercom_send_control(APP_WALKIE_PKT_CHANNEL);
+                (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
+                (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
             }
         }
-        (void)app_intercom_send_control(APP_WALKIE_PKT_HEARTBEAT);
+        (void)app_intercom_send_control(APP_INTERCOM_PKT_HEARTBEAT);
         osal_delay_ms(10000u);
     }
 }
 
 static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 {
-    app_walkie_packet_view_t view;
-    if (app_walkie_parse_packet(packet, len, &view) != 0) {
+    app_intercom_packet_view_t view;
+    if (app_intercom_parse_packet(packet, len, &view) != 0) {
         return;
     }
+    /* 服务器会原样转发音频包，本机自己的包和非当前频道包都直接忽略。 */
     if (view.channel != (uint16_t)s_current_channel ||
-        app_walkie_packet_is_from_device(packet, APP_BUSINESS_DEVICE_NAME)) {
+        app_intercom_packet_is_own(packet)) {
         return;
     }
 
-    if (view.type == APP_WALKIE_PKT_AUDIO &&
+    if (view.type == APP_INTERCOM_PKT_AUDIO &&
         view.payload_len > 0u &&
-        !app_audio_session_is_busy()) {
+        !app_business_audio_session_is_busy()) {
         int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];
         uint16_t copy_len = view.payload_len > sizeof(pcm) ? sizeof(pcm) : view.payload_len;
         memcpy(pcm, view.payload, copy_len);
@@ -97,7 +211,7 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 static void app_intercom_udp_rx_task(void *arg)
 {
     (void)arg;
-    uint8_t rx[APP_WALKIE_PACKET_MAX_BYTES * 2u];
+    uint8_t rx[APP_INTERCOM_PACKET_MAX_BYTES * 2u];
     uint16_t used = 0u;
 
     while (1) {
@@ -105,8 +219,9 @@ static void app_intercom_udp_rx_task(void *arg)
         if (ret > 0) {
             used = (uint16_t)(used + ret);
             uint16_t pos = 0u;
-            while ((pos + APP_WALKIE_PACKET_HEADER_LEN) <= used) {
-                if (memcmp(&rx[pos], "WTK1", 4u) != 0) {
+            /* UART 透传数据可能跨多次读取，保留半包并只消费完整 WTK1 包。 */
+            while ((pos + APP_INTERCOM_PACKET_HEADER_LEN) <= used) {
+                if (memcmp(&rx[pos], APP_INTERCOM_PACKET_MAGIC, 4u) != 0) {
                     pos++;
                     continue;
                 }
@@ -114,7 +229,7 @@ static void app_intercom_udp_rx_task(void *arg)
                 uint8_t header_len = rx[pos + 5u];
                 uint16_t payload_len = (uint16_t)rx[pos + 32u] | ((uint16_t)rx[pos + 33u] << 8);
                 uint16_t packet_len = (uint16_t)(header_len + payload_len);
-                if (header_len != APP_WALKIE_PACKET_HEADER_LEN || packet_len > APP_WALKIE_PACKET_MAX_BYTES) {
+                if (header_len != APP_INTERCOM_PACKET_HEADER_LEN || packet_len > APP_INTERCOM_PACKET_MAX_BYTES) {
                     pos++;
                     continue;
                 }
@@ -143,28 +258,29 @@ static void app_intercom_ptt_task(void *arg)
 {
     (void)arg;
     int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];
-    uint8_t packet[APP_WALKIE_PACKET_MAX_BYTES];
+    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];
 
     while (1) {
         (void)osal_task_notify_take(OSAL_WAIT_FOREVER);
-        if (!s_ptt_active || app_audio_session_try_begin() != 0) {
+        if (!s_ptt_active || app_business_audio_session_try_begin() != 0) {
             continue;
         }
 
-        (void)app_intercom_send_control(APP_WALKIE_PKT_PTT_START);
+        /* PTT 期间按固定 20ms PCM 帧发送，第一版不做编解码和重传。 */
+        (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
                 uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
                 uint16_t packet_len = app_intercom_build_packet(packet,
-                                                                APP_WALKIE_PKT_AUDIO,
+                                                                APP_INTERCOM_PKT_AUDIO,
                                                                 (const uint8_t *)pcm,
                                                                 payload_len);
                 (void)service_network_udp_send(packet, packet_len);
             }
         }
-        (void)app_intercom_send_control(APP_WALKIE_PKT_PTT_STOP);
-        app_audio_session_end();
+        (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
+        app_business_audio_session_end();
     }
 }
 
@@ -209,13 +325,13 @@ void app_intercom_set_channel(int32_t channel)
         channel = APP_BUSINESS_DEFAULT_CHANNEL;
     }
     s_current_channel = channel;
-    (void)app_intercom_send_control(APP_WALKIE_PKT_CHANNEL);
+    (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 }
 
 void app_intercom_ptt_start(int32_t channel)
 {
     s_current_channel = channel > 0 ? channel : s_current_channel;
-    if (app_audio_session_is_busy()) {
+    if (app_business_audio_session_is_busy()) {
         return;
     }
 

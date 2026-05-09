@@ -10,6 +10,8 @@
 #include "service_battery.h"
 #include "service_network.h"
 
+#include <stddef.h>
+
 static const char *TAG = "app_status_monitor";
 
 static volatile int s_started = 0;
@@ -17,6 +19,7 @@ static volatile int s_network_ready = 0;
 
 static int app_status_monitor_csq_to_bars(const service_network_status_t *status)
 {
+    /* 网络未 ready 或 CSQ 未知时显示 0 格，避免 UI 给出误导性信号。 */
     if (status == NULL || status->at_ready != 1 || status->sim_ready != 1 ||
         status->link_state != 1 || status->rssi < 0 || status->rssi == 99) {
         return 0;
@@ -39,6 +42,7 @@ static void app_status_monitor_battery_task(void *arg)
     (void)arg;
 
     while (1) {
+        /* service 层已经完成 ADC 滤波和百分比映射，UI 只消费百分比。 */
         int voltage_mv = 0;
         int percent = 0;
         if (service_battery_get_status(&voltage_mv, &percent) == 0) {
@@ -61,6 +65,7 @@ static void app_status_monitor_network_task(void *arg)
         } else {
             (void)app_ui_set_network_state(0);
             s_network_ready = 0;
+            /* 初始化失败或掉线后允许后台继续重试，不阻塞主业务启动。 */
             (void)service_network_init(NULL);
         }
 
