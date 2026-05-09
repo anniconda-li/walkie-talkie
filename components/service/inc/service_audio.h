@@ -2,8 +2,8 @@
  * @file service_audio.h
  * @brief 音频能力服务接口。
  *
- * 本服务对上提供单声道 PCM 录放能力。ES7210 的 MIC1/MIC2 双通道采集和
- * ES8311 播放所需的 L/R 双声道复制都封装在 service 内部。
+ * 本服务对上提供单声道 PCM 录放能力。底层采集和播放设备通过能力接口绑定，
+ * service 负责录放状态、参数检查和业务友好的录放 API。
  */
 #ifndef SERVICE_AUDIO_H
 #define SERVICE_AUDIO_H
@@ -15,21 +15,39 @@ extern "C" {
 #endif
 
 /**
- * @brief 单声道输入来源。
+ * @brief 音频服务依赖的下层采集能力。
  */
-typedef enum {
-    SERVICE_AUDIO_INPUT_MIC1 = 0, /**< 只使用 MIC1。 */
-    SERVICE_AUDIO_INPUT_MIC2,     /**< 只使用 MIC2。 */
-    SERVICE_AUDIO_INPUT_MIX_AVG,  /**< MIC1/MIC2 平均混合。 */
-} service_audio_input_t;
+typedef struct {
+    int (*is_initialized)(void); /**< 判断下层采集 driver 是否已初始化。 */
+    int (*start_record)(void); /**< 开始录音，可为空。 */
+    int (*stop_record)(void);  /**< 停止录音，可为空。 */
+    int (*read_pcm)(int16_t *pcm,
+                    uint32_t samples,
+                    uint32_t timeout_ms); /**< 读取单声道 PCM 样本。 */
+} service_audio_capture_ops_t;
+
+/**
+ * @brief 音频服务依赖的下层播放能力。
+ */
+typedef struct {
+    int (*is_initialized)(void); /**< 判断下层播放 driver 是否已初始化。 */
+    int (*start_playback)(void); /**< 开始播放，可为空。 */
+    int (*stop_playback)(void);  /**< 停止播放，可为空。 */
+    int (*play_pcm)(const int16_t *pcm,
+                    uint32_t samples,
+                    uint32_t timeout_ms); /**< 播放单声道 PCM 样本。 */
+    int (*set_volume)(uint8_t volume);    /**< 设置下层播放音量。 */
+    int (*set_mute)(int mute);            /**< 设置下层静音状态。 */
+} service_audio_playback_ops_t;
 
 /**
  * @brief 音频服务初始化配置。
  */
 typedef struct {
+    service_audio_capture_ops_t capture_ops;   /**< 下层采集能力函数表。 */
+    service_audio_playback_ops_t playback_ops; /**< 下层播放能力函数表。 */
     uint8_t volume;              /**< 播放音量，范围 0-100；填 0 使用默认值 100。 */
     uint8_t passthrough_gain;    /**< 本地直通软件增益；填 0 使用默认值 1。 */
-    service_audio_input_t input; /**< 默认单声道输入来源。 */
 } service_audio_config_t;
 
 /**
@@ -48,6 +66,34 @@ int service_audio_init(const service_audio_config_t *cfg);
 int service_audio_deinit(void);
 
 /**
+ * @brief 开始录音。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_audio_start_record(void);
+
+/**
+ * @brief 停止录音。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_audio_stop_record(void);
+
+/**
+ * @brief 开始播放。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_audio_start_playback(void);
+
+/**
+ * @brief 停止播放。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_audio_stop_playback(void);
+
+/**
  * @brief 读取单声道 PCM 音频数据。
  *
  * @param[out] pcm 单声道 PCM 输出缓冲区。
@@ -60,7 +106,7 @@ int service_audio_read(int16_t *pcm, uint32_t samples, uint32_t timeout_ms);
 /**
  * @brief 播放单声道 PCM 音频数据。
  *
- * 内部会把 mono PCM 复制到 L/R 两个 I2S slot，兼容耳机和单声道功放输出。
+ * 下层播放 driver 负责把业务单声道 PCM 适配到具体硬件帧格式。
  *
  * @param[in] pcm 单声道 PCM 输入缓冲区。
  * @param[in] samples 待播放的 int16_t 样本数。
@@ -84,14 +130,6 @@ int service_audio_set_volume(uint8_t volume);
  * @return 成功返回 0；失败返回负值。
  */
 int service_audio_set_mute(int mute);
-
-/**
- * @brief 设置单声道输入来源。
- *
- * @param[in] input 输入来源。
- * @return 成功返回 0；失败返回负值。
- */
-int service_audio_set_input(service_audio_input_t input);
 
 /**
  * @brief 设置本地直通软件增益。

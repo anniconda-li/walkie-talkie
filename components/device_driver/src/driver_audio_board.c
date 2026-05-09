@@ -1,19 +1,19 @@
 /**
- * @file bsp_audio.c
+ * @file driver_audio_board.c
  * @brief BSP 音频板级控制实现。
  */
-#include "bsp_audio.h"
+#include "driver_audio_board.h"
 
 #include "bsp_common.h"
 #include "driver/gpio.h"
 #include "osal_task.h"
 
-static const char *TAG = "bsp_audio";
+static const char *TAG = "driver_audio";
 
-static int bsp_audio_codec_set_enable_level(int level)
+static int driver_audio_board_codec_set_enable_level(int level)
 {
     gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << BSP_AUDIO_CODEC_ENABLE_IO,
+        .pin_bit_mask = 1ULL << driver_audio_board_codec_ENABLE_IO,
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -23,25 +23,25 @@ static int bsp_audio_codec_set_enable_level(int level)
     int ret = gpio_config(&cfg);
     if (ret != 0) {
         BSP_LOGE(TAG, "音频 codec 使能脚配置失败, io=%d, ret=%d",
-                 BSP_AUDIO_CODEC_ENABLE_IO, ret);
+                 driver_audio_board_codec_ENABLE_IO, ret);
         return ret < 0 ? ret : -ret;
     }
 
-    ret = gpio_set_level(BSP_AUDIO_CODEC_ENABLE_IO, level);
+    ret = gpio_set_level(driver_audio_board_codec_ENABLE_IO, level);
     if (ret != 0) {
         BSP_LOGE(TAG, "音频 codec 使能脚设置失败, io=%d, level=%d, ret=%d",
-                 BSP_AUDIO_CODEC_ENABLE_IO, level, ret);
+                 driver_audio_board_codec_ENABLE_IO, level, ret);
         return ret < 0 ? ret : -ret;
     }
 
     BSP_LOGI(TAG, "音频 codec 使能脚已设置, io=%d, level=%d",
-             BSP_AUDIO_CODEC_ENABLE_IO, level);
+             driver_audio_board_codec_ENABLE_IO, level);
     return 0;
 }
 
-int bsp_audio_codec_power_on(void)
+int driver_audio_board_codec_power_on(void)
 {
-    int ret = bsp_audio_codec_set_enable_level(1);
+    int ret = driver_audio_board_codec_set_enable_level(1);
     if (ret == 0) {
         osal_delay_ms(100u);
     }
@@ -49,7 +49,7 @@ int bsp_audio_codec_power_on(void)
     return ret;
 }
 
-int bsp_audio_codec_power_off(void)
+int driver_audio_board_codec_power_off(void)
 {
-    return bsp_audio_codec_set_enable_level(0);
+    return driver_audio_board_codec_set_enable_level(0);
 }

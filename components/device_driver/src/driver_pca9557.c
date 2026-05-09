@@ -2,7 +2,7 @@
  * @file bsp_pca9557.c
  * @brief PCA9557 8 位 I2C IO 扩展器驱动实现。
  */
-#include "bsp_pca9557.h"
+#include "driver_pca9557.h"
 
 #include "bsp_common.h"
 

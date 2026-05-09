@@ -1,15 +1,16 @@
 /**
- * @file bsp_es8311.c
+ * @file driver_es8311.c
  * @brief ES8311 低功耗单声道音频 CODEC 驱动实现。
  */
-#include "bsp_es8311.h"
+#include "driver_es8311.h"
 
 #include "bsp_common.h"
 #include "osal_task.h"
 
+#include <string.h>
 #include <stdlib.h>
 
-static const char *TAG = "bsp_es8311";
+static const char *TAG = "driver_es8311";
 
 #define ES8311_RESET_REG00       0x00u
 #define ES8311_CLK_MANAGER_REG01 0x01u
@@ -33,11 +34,18 @@ static const char *TAG = "bsp_es8311";
 #define ES8311_DAC_REG31         0x31u
 #define ES8311_DAC_REG32         0x32u
 #define ES8311_DAC_REG37         0x37u
+#define DRIVER_ES8311_I2C_SPEED_HZ 100000u
+#define DRIVER_ES8311_I2C_ADDR     0x18u
+#define DRIVER_ES8311_MAX_FRAMES   256u
 
 struct es8311_dev {
     es8311_interface_t itf;
     uint32_t play_log_count;
 };
+
+static es8311_handle_t s_es8311 = NULL;
+static driver_es8311_bsp_ops_t s_driver_ops;
+static int16_t s_driver_stereo_buf[DRIVER_ES8311_MAX_FRAMES * 2u];
 
 static int es8311_write_u8(es8311_handle_t dev, uint8_t reg, uint8_t value)
 {
@@ -204,4 +212,117 @@ int es8311_set_mute(es8311_handle_t dev, int mute)
     }
 
     return ret;
+}
+
+static int driver_es8311_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
+{
+    return s_driver_ops.i2c_write_reg(DRIVER_ES8311_I2C_ADDR,
+                                      DRIVER_ES8311_I2C_SPEED_HZ,
+                                      reg,
+                                      data,
+                                      len);
+}
+
+static int driver_es8311_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
+{
+    return s_driver_ops.i2c_read_reg(DRIVER_ES8311_I2C_ADDR,
+                                     DRIVER_ES8311_I2C_SPEED_HZ,
+                                     reg,
+                                     data,
+                                     len);
+}
+
+int driver_es8311_init(const driver_es8311_bsp_ops_t *ops)
+{
+    if (s_es8311 != NULL) {
+        return 0;
+    }
+    if (ops == NULL ||
+        ops->i2c_write_reg == NULL ||
+        ops->i2c_read_reg == NULL ||
+        ops->i2s_write == NULL) {
+        BSP_LOGE(TAG, "ES8311 板级初始化失败: BSP 能力无效");
+        return -1;
+    }
+
+    s_driver_ops = *ops;
+    es8311_interface_t itf = {
+        .write_reg = driver_es8311_write_reg,
+        .read_reg = driver_es8311_read_reg,
+        .write = s_driver_ops.i2s_write,
+    };
+
+    s_es8311 = es8311_init(&itf);
+    return s_es8311 != NULL ? 0 : -2;
+}
+
+int driver_es8311_deinit(void)
+{
+    if (s_es8311 != NULL) {
+        es8311_deinit(s_es8311);
+        s_es8311 = NULL;
+    }
+    memset(&s_driver_ops, 0, sizeof(s_driver_ops));
+    return 0;
+}
+
+int driver_es8311_is_initialized(void)
+{
+    return s_es8311 != NULL ? 1 : 0;
+}
+
+int driver_es8311_start_playback(void)
+{
+    return s_es8311 != NULL ? 0 : -1;
+}
+
+int driver_es8311_stop_playback(void)
+{
+    return s_es8311 != NULL ? 0 : -1;
+}
+
+int driver_es8311_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
+{
+    if (s_es8311 == NULL || pcm == NULL || samples == 0u) {
+        return -1;
+    }
+
+    uint32_t total = 0u;
+    while (total < samples) {
+        uint32_t frames = samples - total;
+        if (frames > DRIVER_ES8311_MAX_FRAMES) {
+            frames = DRIVER_ES8311_MAX_FRAMES;
+        }
+
+        for (uint32_t i = 0; i < frames; i++) {
+            s_driver_stereo_buf[i * 2u] = pcm[total + i];
+            s_driver_stereo_buf[i * 2u + 1u] = pcm[total + i];
+        }
+
+        uint32_t write_len = frames * 4u;
+        int written = es8311_play(s_es8311, (const uint8_t *)s_driver_stereo_buf, write_len, timeout_ms);
+        if (written < 0) {
+            return written;
+        }
+        if (written == 0) {
+            break;
+        }
+
+        total += (uint32_t)written / 4u;
+        if ((uint32_t)written < write_len) {
+            break;
+        }
+    }
+
+    return total > 0u ? (int)total : 0;
+}
+
+int driver_es8311_set_volume(uint8_t volume)
+{
+    return s_es8311 != NULL ? es8311_set_volume(s_es8311, volume) : -1;
+}
+
+int driver_es8311_set_mute(int mute)
+{
+    return s_es8311 != NULL ? es8311_set_mute(s_es8311, mute) : -1;
 }

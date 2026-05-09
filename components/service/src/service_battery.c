@@ -4,7 +4,6 @@
  */
 #include "service_battery.h"
 
-#include "bsp_battery.h"
 #include "service_common.h"
 
 #include <stddef.h>
@@ -39,6 +38,7 @@ static const service_battery_curve_point_t s_battery_curve[] = {
 static uint8_t s_battery_inited = 0u;
 static uint8_t s_filter_valid = 0u;
 static int s_filtered_adc_mv = 0;
+static service_battery_sample_ops_t s_battery_ops;
 
 static int service_battery_filter_voltage(int adc_mv)
 {
@@ -108,26 +108,45 @@ static int service_battery_voltage_to_percent(int adc_mv)
     return 0;
 }
 
-int service_battery_init(void)
+static int service_battery_ops_is_valid(const service_battery_sample_ops_t *ops)
 {
-    int ret = bsp_battery_init();
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "电池服务初始化失败, ret=%d", ret);
-        s_battery_inited = 0u;
-        return ret;
+    if (ops == NULL || ops->is_initialized == NULL || ops->read_voltage_mv == NULL) {
+        return -1;
     }
 
+    return 0;
+}
+
+int service_battery_init(const service_battery_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return s_battery_inited != 0u ? 0 : -2;
+    }
+
+    if (service_battery_ops_is_valid(&cfg->sample_ops) != 0) {
+        SERVICE_LOGE(TAG, "电池服务初始化失败: ops 无效");
+        s_battery_inited = 0u;
+        return -3;
+    }
+
+    if (cfg->sample_ops.is_initialized() != 1) {
+        SERVICE_LOGE(TAG, "电池服务初始化失败: 下层电池 driver 未初始化");
+        s_battery_inited = 0u;
+        return -4;
+    }
+
+    s_battery_ops = cfg->sample_ops;
     s_battery_inited = 1u;
     return 0;
 }
 
 int service_battery_deinit(void)
 {
-    int ret = bsp_battery_deinit();
     s_battery_inited = 0u;
     s_filter_valid = 0u;
     s_filtered_adc_mv = 0;
-    return ret;
+    s_battery_ops = (service_battery_sample_ops_t){0};
+    return 0;
 }
 
 int service_battery_get_adc_voltage_mv(int *voltage_mv)
@@ -137,13 +156,13 @@ int service_battery_get_adc_voltage_mv(int *voltage_mv)
     }
 
     if (s_battery_inited == 0u) {
-        int ret = service_battery_init();
+        int ret = service_battery_init(NULL);
         if (ret != 0) {
             return ret;
         }
     }
 
-    return bsp_battery_read_voltage_mv(voltage_mv);
+    return s_battery_ops.read_voltage_mv(voltage_mv);
 }
 
 int service_battery_get_percent(int *percent)

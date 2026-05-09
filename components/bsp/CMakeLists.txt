@@ -14,8 +14,5 @@ idf_component_register(
         esp_driver_spi
         esp_adc
         esp_lcd
-        espressif__esp32-camera
-        espressif__esp_lcd_touch
-        espressif__esp_lcd_touch_ft5x06
         osal
     )

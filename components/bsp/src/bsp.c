@@ -4,7 +4,6 @@
  */
 #include "bsp.h"
 
-#include "bsp_battery.h"
 #include "bsp_common.h"
 #include "bsp_i2c.h"
 #include "bsp_i2s.h"
@@ -42,12 +41,6 @@ int bsp_init(void)
         return ret;
     }
 
-    ret = bsp_battery_init();
-    if (ret != 0) {
-        BSP_LOGE(TAG, "BSP 初始化失败: 电池检测初始化失败, ret=%d", ret);
-        return ret;
-    }
-
     BSP_LOGI(TAG, "BSP 基础资源初始化完成");
     return 0;
 }
@@ -55,11 +48,6 @@ int bsp_init(void)
 int bsp_deinit(void)
 {
     int ret = 0;
-
-    int battery_ret = bsp_battery_deinit();
-    if (ret == 0 && battery_ret != 0) {
-        ret = battery_ret;
-    }
 
     int i2s_ret = bsp_i2s_deinit();
     if (ret == 0 && i2s_ret != 0) {

@@ -1,6 +1,6 @@
 /**
  * @file bsp_uart.c
- * @brief ML307C 使用的 UART BSP 适配实现。
+ * @brief BSP UART adapter implementation.
  */
 #include "bsp_uart.h"
 
@@ -32,7 +32,7 @@ static const char *TAG = "bsp_uart";
 int bsp_uart_init(void)
 {
     if (s_uart_inited) {
-        BSP_LOGI(TAG, "ML307C UART 已初始化");
+        BSP_LOGI(TAG, "UART 已初始化");
         return 0;
     }
 
@@ -44,55 +44,55 @@ int bsp_uart_init(void)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
     };
 
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT_ML307C, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(UART_PORT_ML307C, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_param_config(BSP_UART_PORT, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(BSP_UART_PORT, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
     uart_queue = osal_queue_create(10, sizeof(uint8_t));
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT_ML307C, 1024, 1024, 10,
+    ESP_ERROR_CHECK(uart_driver_install(BSP_UART_PORT, 1024, 1024, 10,
                                        (QueueHandle_t *)uart_queue, 0));
 
     s_uart_inited = 1;
-    BSP_LOGI(TAG, "ML307C UART 初始化成功, port=%d, baud=%d", UART_PORT_ML307C, 115200);
+    BSP_LOGI(TAG, "UART 初始化成功, port=%d, baud=%d", BSP_UART_PORT, 115200);
     return 0;
 }
 
 /**
- * @brief 通过 UART1 向 ML307C 发送数据。
+ * @brief 通过 UART1 发送数据。
  *
  * @param[in] data 待发送数据缓冲区。
  * @param[in] len 待发送数据长度，单位为字节。
  * @return 实际写入的字节数；失败返回负值。
  */
-int ml307c_uart_write_impl(uint8_t *data, uint16_t len)
+int bsp_uart_write(uint8_t *data, uint16_t len)
 {
-    int ret = uart_write_bytes(UART_PORT_ML307C, (const char *)data, len);
+    int ret = uart_write_bytes(BSP_UART_PORT, (const char *)data, len);
     if (ret >= 0) {
-        BSP_LOGI(TAG, "ML307C UART 发送完成, request=%u, written=%d",
+        BSP_LOGI(TAG, "UART 发送完成, request=%u, written=%d",
                  (unsigned int)len, ret);
     } else {
-        BSP_LOGE(TAG, "ML307C UART 发送失败, ret=%d", ret);
+        BSP_LOGE(TAG, "UART 发送失败, ret=%d", ret);
     }
 
     return ret;
 }
 
 /**
- * @brief 从 UART1 读取 ML307C 返回的数据。
+ * @brief 从 UART1 读取数据。
  *
  * @param[out] buf 接收缓冲区。
  * @param[in] len 最大读取长度，单位为字节。
  * @param[in] timeout_ms 读取超时时间，单位为毫秒。
  * @return 实际读取字节数；超时或失败返回 0。
  */
-int ml307c_uart_read_impl(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
+int bsp_uart_read(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
-    int read_len = uart_read_bytes(UART_PORT_ML307C, buf, len, pdMS_TO_TICKS(timeout_ms));
+    int read_len = uart_read_bytes(BSP_UART_PORT, buf, len, pdMS_TO_TICKS(timeout_ms));
     if (read_len >= 0) {
-        BSP_LOGI(TAG, "ML307C UART 接收完成, request=%u, read=%d",
+        BSP_LOGI(TAG, "UART 接收完成, request=%u, read=%d",
                  (unsigned int)len, read_len);
         return read_len;
     }
 
-    BSP_LOGE(TAG, "ML307C UART 接收失败, ret=%d", read_len);
+    BSP_LOGE(TAG, "UART 接收失败, ret=%d", read_len);
     return 0;
 }

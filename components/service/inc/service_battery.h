@@ -10,11 +10,26 @@ extern "C" {
 #endif
 
 /**
+ * @brief 电池服务依赖的下层采样能力。
+ */
+typedef struct {
+    int (*is_initialized)(void); /**< 判断下层电池采样 driver 是否已初始化。 */
+    int (*read_voltage_mv)(int *voltage_mv); /**< 读取 ADC 输入电压，单位 mV。 */
+} service_battery_sample_ops_t;
+
+/**
+ * @brief 电池服务初始化配置。
+ */
+typedef struct {
+    service_battery_sample_ops_t sample_ops; /**< 下层采样能力函数表。 */
+} service_battery_config_t;
+
+/**
  * @brief 初始化电池电量服务。
  *
  * @return 成功返回 0；失败返回负值。
  */
-int service_battery_init(void);
+int service_battery_init(const service_battery_config_t *cfg);
 
 /**
  * @brief 释放电池电量服务。

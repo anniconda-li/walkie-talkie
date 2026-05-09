@@ -1,5 +1,5 @@
 /**
- * @file bsp_pca9557.h
+ * @file driver_pca9557.h
  * @brief PCA9557 8 位 I2C IO 扩展器驱动接口。
  *
  * PCA9557 提供输入、输出、极性反转和方向配置四个 8 位寄存器。本驱动通过

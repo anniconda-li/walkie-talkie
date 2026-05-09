@@ -12,8 +12,6 @@
 #include "app_ui.h"
 #include "osal_mutex.h"
 #include "service_audio.h"
-#include "service_battery.h"
-#include "service_network.h"
 #include "service_screen.h"
 #include "ui_event.h"
 
@@ -149,41 +147,10 @@ int app_business_start(void)
         return ret;
     }
 
-    ret = service_screen_init();
-    if (ret != 0) {
-        APP_LOGE(TAG, "屏幕服务初始化失败, ret=%d", ret);
-        return ret;
-    }
-
     ret = app_ui_create();
     if (ret != 0) {
         APP_LOGE(TAG, "应用 UI 创建失败, ret=%d", ret);
-        (void)service_screen_deinit();
         return ret;
-    }
-
-    ret = service_battery_init();
-    if (ret != 0) {
-        APP_LOGE(TAG, "电池服务初始化失败, ret=%d", ret);
-        (void)service_screen_deinit();
-        return ret;
-    }
-
-    service_audio_config_t audio_cfg = {
-        .volume = 80u,
-        .passthrough_gain = 1u,
-        .input = SERVICE_AUDIO_INPUT_MIC1,
-    };
-    ret = service_audio_init(&audio_cfg);
-    if (ret != 0) {
-        APP_LOGE(TAG, "音频服务初始化失败, ret=%d", ret);
-        (void)service_screen_deinit();
-        return ret;
-    }
-
-    ret = service_network_init(NULL);
-    if (ret != 0) {
-        APP_LOGW(TAG, "网络服务初始化失败，后台状态任务仍会显示无信号, ret=%d", ret);
     }
 
     /* 先注册 UI 回调，再启动后台业务，确保开机后用户操作能被接收。 */

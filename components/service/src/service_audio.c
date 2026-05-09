@@ -4,12 +4,6 @@
  */
 #include "service_audio.h"
 
-#include "bsp_audio.h"
-#include "bsp_es7210.h"
-#include "bsp_es8311.h"
-#include "bsp_i2c.h"
-#include "bsp_i2s.h"
-#include "osal_task.h"
 #include "service_common.h"
 
 #include <stddef.h>
@@ -18,35 +12,16 @@ static const char *TAG = "service_audio";
 
 #define SERVICE_AUDIO_DEFAULT_VOLUME           100u
 #define SERVICE_AUDIO_DEFAULT_GAIN             1u
-#define SERVICE_AUDIO_CODEC_CLOCK_STABLE_MS    50u
-#define SERVICE_AUDIO_CHUNK_FRAMES             256u
-#define SERVICE_AUDIO_STEREO_SAMPLE_COUNT      (SERVICE_AUDIO_CHUNK_FRAMES * 2u)
-#define SERVICE_AUDIO_STEREO_BYTES             (SERVICE_AUDIO_STEREO_SAMPLE_COUNT * sizeof(int16_t))
+#define SERVICE_AUDIO_CHUNK_SAMPLES            256u
 
-static es7210_handle_t s_es7210 = NULL;
-static es8311_handle_t s_es8311 = NULL;
-static service_audio_input_t s_input = SERVICE_AUDIO_INPUT_MIC1;
+static service_audio_capture_ops_t s_capture_ops;
+static service_audio_playback_ops_t s_playback_ops;
+static uint8_t s_audio_inited = 0u;
 static uint8_t s_passthrough_gain = SERVICE_AUDIO_DEFAULT_GAIN;
-static uint8_t s_stereo_read_buf[SERVICE_AUDIO_STEREO_BYTES];
-static int16_t s_stereo_play_buf[SERVICE_AUDIO_STEREO_SAMPLE_COUNT];
 
 static int service_audio_is_inited(void)
 {
-    return s_es7210 != NULL && s_es8311 != NULL;
-}
-
-static int service_audio_input_is_valid(service_audio_input_t input)
-{
-    return input == SERVICE_AUDIO_INPUT_MIC1 ||
-           input == SERVICE_AUDIO_INPUT_MIC2 ||
-           input == SERVICE_AUDIO_INPUT_MIX_AVG;
-}
-
-static int16_t service_audio_read_i16_le(const uint8_t *data, uint32_t sample_index)
-{
-    uint32_t offset = sample_index * 2u;
-    uint16_t raw = (uint16_t)data[offset] | ((uint16_t)data[offset + 1u] << 8);
-    return (int16_t)raw;
+    return s_audio_inited != 0u;
 }
 
 static int16_t service_audio_clip_i16(int32_t value)
@@ -61,57 +36,21 @@ static int16_t service_audio_clip_i16(int32_t value)
     return (int16_t)value;
 }
 
-static int16_t service_audio_select_mono_sample(int16_t mic1, int16_t mic2)
+static int service_audio_ops_are_valid(const service_audio_capture_ops_t *capture_ops,
+                                       const service_audio_playback_ops_t *playback_ops)
 {
-    switch (s_input) {
-    case SERVICE_AUDIO_INPUT_MIC2:
-        return mic2;
-    case SERVICE_AUDIO_INPUT_MIX_AVG:
-        return (int16_t)(((int32_t)mic1 + (int32_t)mic2) / 2);
-    case SERVICE_AUDIO_INPUT_MIC1:
-    default:
-        return mic1;
-    }
-}
-
-static uint32_t service_audio_stereo_to_mono(const uint8_t *input,
-                                             uint32_t input_bytes,
-                                             int16_t *output,
-                                             uint32_t output_samples)
-{
-    uint32_t frame_count = input_bytes / 4u;
-
-    if (frame_count > output_samples) {
-        frame_count = output_samples;
+    if (capture_ops == NULL ||
+        capture_ops->is_initialized == NULL ||
+        capture_ops->read_pcm == NULL ||
+        playback_ops == NULL ||
+        playback_ops->is_initialized == NULL ||
+        playback_ops->play_pcm == NULL ||
+        playback_ops->set_volume == NULL ||
+        playback_ops->set_mute == NULL) {
+        return -1;
     }
 
-    for (uint32_t i = 0; i < frame_count; i++) {
-        int16_t mic1 = service_audio_read_i16_le(input, i * 2u);
-        int16_t mic2 = service_audio_read_i16_le(input, i * 2u + 1u);
-        output[i] = service_audio_select_mono_sample(mic1, mic2);
-    }
-
-    return frame_count;
-}
-
-static uint32_t service_audio_mono_to_stereo(const int16_t *input,
-                                             uint32_t input_samples,
-                                             int16_t *output,
-                                             uint32_t output_samples)
-{
-    uint32_t frame_count = input_samples;
-    uint32_t max_frames = output_samples / 2u;
-
-    if (frame_count > max_frames) {
-        frame_count = max_frames;
-    }
-
-    for (uint32_t i = 0; i < frame_count; i++) {
-        output[i * 2u] = input[i];
-        output[i * 2u + 1u] = input[i];
-    }
-
-    return frame_count;
+    return 0;
 }
 
 int service_audio_init(const service_audio_config_t *cfg)
@@ -123,95 +62,91 @@ int service_audio_init(const service_audio_config_t *cfg)
 
     uint8_t volume = SERVICE_AUDIO_DEFAULT_VOLUME;
     s_passthrough_gain = SERVICE_AUDIO_DEFAULT_GAIN;
-    s_input = SERVICE_AUDIO_INPUT_MIC1;
 
     if (cfg != NULL) {
+        if (service_audio_ops_are_valid(&cfg->capture_ops, &cfg->playback_ops) != 0) {
+            SERVICE_LOGE(TAG, "音频服务初始化失败: ops 无效");
+            return -5;
+        }
+        s_capture_ops = cfg->capture_ops;
+        s_playback_ops = cfg->playback_ops;
         volume = cfg->volume == 0u ? SERVICE_AUDIO_DEFAULT_VOLUME : cfg->volume;
         s_passthrough_gain = cfg->passthrough_gain == 0u ?
                              SERVICE_AUDIO_DEFAULT_GAIN :
                              cfg->passthrough_gain;
-        s_input = cfg->input;
     }
 
-    if (!service_audio_input_is_valid(s_input)) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: 输入来源无效, input=%d", s_input);
-        return -1;
+    if (s_capture_ops.read_pcm == NULL || s_playback_ops.play_pcm == NULL) {
+        SERVICE_LOGE(TAG, "音频服务初始化失败: 未绑定音频能力");
+        return -4;
     }
 
-    int ret = bsp_audio_codec_power_on();
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: codec 使能失败, ret=%d", ret);
-        return ret;
+    if (s_capture_ops.is_initialized() != 1 || s_playback_ops.is_initialized() != 1) {
+        SERVICE_LOGE(TAG, "音频服务初始化失败: 下层音频 driver 未初始化");
+        s_capture_ops = (service_audio_capture_ops_t){0};
+        s_playback_ops = (service_audio_playback_ops_t){0};
+        return -6;
     }
 
-    osal_delay_ms(SERVICE_AUDIO_CODEC_CLOCK_STABLE_MS);
-
-    es7210_interface_t es7210_itf = {
-        .write_reg = es7210_i2c_write_reg_impl,
-        .read_reg = es7210_i2c_read_reg_impl,
-        .read = es7210_i2s_read_impl,
-    };
-    es8311_interface_t es8311_itf = {
-        .write_reg = es8311_i2c_write_reg_impl,
-        .read_reg = es8311_i2c_read_reg_impl,
-        .write = es8311_i2s_write_impl,
-    };
-
-    s_es7210 = es7210_init(&es7210_itf);
-    if (s_es7210 == NULL) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: ES7210 初始化失败");
-        return -2;
+    if (s_playback_ops.set_volume(volume) != 0) {
+        SERVICE_LOGW(TAG, "音频服务初始化: 默认音量设置失败");
     }
 
-    s_es8311 = es8311_init(&es8311_itf);
-    if (s_es8311 == NULL) {
-        es7210_deinit(s_es7210);
-        s_es7210 = NULL;
-        SERVICE_LOGE(TAG, "音频服务初始化失败: ES8311 初始化失败");
-        return -3;
-    }
-
-    ret = es8311_set_volume(s_es8311, volume);
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: 设置音量失败, ret=%d", ret);
-        service_audio_deinit();
-        return ret;
-    }
-
-    ret = es8311_set_mute(s_es8311, 0);
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败: 取消静音失败, ret=%d", ret);
-        service_audio_deinit();
-        return ret;
-    }
-
-    SERVICE_LOGI(TAG, "音频服务初始化成功, volume=%u, input=%d, gain=%u",
+    s_audio_inited = 1u;
+    SERVICE_LOGI(TAG, "音频服务初始化成功, volume=%u, gain=%u",
                  (unsigned int)volume,
-                 s_input,
                  (unsigned int)s_passthrough_gain);
     return 0;
 }
 
 int service_audio_deinit(void)
 {
-    if (s_es8311 != NULL) {
-        es8311_deinit(s_es8311);
-        s_es8311 = NULL;
-    }
-
-    if (s_es7210 != NULL) {
-        es7210_deinit(s_es7210);
-        s_es7210 = NULL;
-    }
-
-    (void)bsp_audio_codec_power_off();
+    s_audio_inited = 0u;
+    s_capture_ops = (service_audio_capture_ops_t){0};
+    s_playback_ops = (service_audio_playback_ops_t){0};
     SERVICE_LOGI(TAG, "音频服务已释放");
     return 0;
 }
 
+int service_audio_start_record(void)
+{
+    if (!service_audio_is_inited()) {
+        return -1;
+    }
+
+    return s_capture_ops.start_record != NULL ? s_capture_ops.start_record() : 0;
+}
+
+int service_audio_stop_record(void)
+{
+    if (!service_audio_is_inited()) {
+        return -1;
+    }
+
+    return s_capture_ops.stop_record != NULL ? s_capture_ops.stop_record() : 0;
+}
+
+int service_audio_start_playback(void)
+{
+    if (!service_audio_is_inited()) {
+        return -1;
+    }
+
+    return s_playback_ops.start_playback != NULL ? s_playback_ops.start_playback() : 0;
+}
+
+int service_audio_stop_playback(void)
+{
+    if (!service_audio_is_inited()) {
+        return -1;
+    }
+
+    return s_playback_ops.stop_playback != NULL ? s_playback_ops.stop_playback() : 0;
+}
+
 int service_audio_read(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
-    if (s_es7210 == NULL) {
+    if (!service_audio_is_inited() || s_capture_ops.read_pcm == NULL) {
         SERVICE_LOGE(TAG, "音频读取失败: 服务未初始化");
         return -1;
     }
@@ -224,30 +159,21 @@ int service_audio_read(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
     uint32_t total_samples = 0;
     while (total_samples < samples) {
         uint32_t remain_samples = samples - total_samples;
-        uint32_t chunk_frames = remain_samples > SERVICE_AUDIO_CHUNK_FRAMES ?
-                                SERVICE_AUDIO_CHUNK_FRAMES :
+        uint32_t chunk_frames = remain_samples > SERVICE_AUDIO_CHUNK_SAMPLES ?
+                                SERVICE_AUDIO_CHUNK_SAMPLES :
                                 remain_samples;
-        uint32_t read_len = chunk_frames * 4u;
-        int read_bytes = es7210_read(s_es7210, s_stereo_read_buf, read_len, timeout_ms);
+        int read_samples = s_capture_ops.read_pcm(&pcm[total_samples], chunk_frames, timeout_ms);
 
-        if (read_bytes < 0) {
-            return read_bytes;
+        if (read_samples < 0) {
+            return read_samples;
         }
-        if (read_bytes == 0) {
+        if (read_samples == 0) {
             break;
         }
 
-        uint32_t converted = service_audio_stereo_to_mono(s_stereo_read_buf,
-                                                          (uint32_t)read_bytes,
-                                                          &pcm[total_samples],
-                                                          remain_samples);
-        if (converted == 0u) {
-            break;
-        }
+        total_samples += (uint32_t)read_samples;
 
-        total_samples += converted;
-
-        if ((uint32_t)read_bytes < read_len) {
+        if ((uint32_t)read_samples < chunk_frames) {
             break;
         }
     }
@@ -257,7 +183,7 @@ int service_audio_read(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 
 int service_audio_play(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
-    if (s_es8311 == NULL) {
+    if (!service_audio_is_inited() || s_playback_ops.play_pcm == NULL) {
         SERVICE_LOGE(TAG, "音频播放失败: 服务未初始化");
         return -1;
     }
@@ -270,15 +196,10 @@ int service_audio_play(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms
     uint32_t total_samples = 0;
     while (total_samples < samples) {
         uint32_t remain_samples = samples - total_samples;
-        uint32_t chunk_samples = remain_samples > SERVICE_AUDIO_CHUNK_FRAMES ?
-                                 SERVICE_AUDIO_CHUNK_FRAMES :
+        uint32_t chunk_samples = remain_samples > SERVICE_AUDIO_CHUNK_SAMPLES ?
+                                 SERVICE_AUDIO_CHUNK_SAMPLES :
                                  remain_samples;
-        uint32_t frames = service_audio_mono_to_stereo(&pcm[total_samples],
-                                                       chunk_samples,
-                                                       s_stereo_play_buf,
-                                                       SERVICE_AUDIO_STEREO_SAMPLE_COUNT);
-        uint32_t write_len = frames * 4u;
-        int written = es8311_play(s_es8311, (const uint8_t *)s_stereo_play_buf, write_len, timeout_ms);
+        int written = s_playback_ops.play_pcm(&pcm[total_samples], chunk_samples, timeout_ms);
 
         if (written < 0) {
             return written;
@@ -287,10 +208,9 @@ int service_audio_play(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms
             break;
         }
 
-        uint32_t played = (uint32_t)written / 4u;
-        total_samples += played;
+        total_samples += (uint32_t)written;
 
-        if ((uint32_t)written < write_len) {
+        if ((uint32_t)written < chunk_samples) {
             break;
         }
     }
@@ -300,34 +220,22 @@ int service_audio_play(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms
 
 int service_audio_set_volume(uint8_t volume)
 {
-    if (s_es8311 == NULL) {
+    if (!service_audio_is_inited() || s_playback_ops.set_volume == NULL) {
         SERVICE_LOGE(TAG, "设置音量失败: 服务未初始化");
         return -1;
     }
 
-    return es8311_set_volume(s_es8311, volume);
+    return s_playback_ops.set_volume(volume);
 }
 
 int service_audio_set_mute(int mute)
 {
-    if (s_es8311 == NULL) {
+    if (!service_audio_is_inited() || s_playback_ops.set_mute == NULL) {
         SERVICE_LOGE(TAG, "设置静音失败: 服务未初始化");
         return -1;
     }
 
-    return es8311_set_mute(s_es8311, mute);
-}
-
-int service_audio_set_input(service_audio_input_t input)
-{
-    if (!service_audio_input_is_valid(input)) {
-        SERVICE_LOGE(TAG, "设置输入来源失败: input=%d", input);
-        return -1;
-    }
-
-    s_input = input;
-    SERVICE_LOGI(TAG, "音频输入来源已设置, input=%d", s_input);
-    return 0;
+    return s_playback_ops.set_mute(mute);
 }
 
 int service_audio_set_passthrough_gain(uint8_t gain)

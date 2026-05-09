@@ -1,18 +1,19 @@
 /**
- * @file bsp_ml307c.c
+ * @file driver_ml307c.c
  * @brief ML307C-RTU/DTU 4G 模块驱动实现。
  */
 
-#include "bsp_ml307c.h"
+#include "driver_ml307c.h"
 
 #include "bsp_common.h"
+#include "osal_mutex.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static const char *TAG = "bsp_ml307c";
+static const char *TAG = "driver_ml307c";
 
 #define ML307C_CRLF                 "\r\n"
 #define ML307C_OK                   "OK"
@@ -33,6 +34,7 @@ static const char *TAG = "bsp_ml307c";
 #define ML307C_HTTP_LATENCY_MS      100u
 #define ML307C_HTTP_TASK_ID         1u
 #define ML307C_HTTP_ROUTE           "6[1]"
+#define DRIVER_ML307C_LOCK_TIMEOUT_MS 5000u
 
 struct ml307c_dev {
     ml307c_config_t config;
@@ -41,6 +43,11 @@ struct ml307c_dev {
     uint8_t is_ready;
     uint8_t is_network_ok;
 };
+
+static ml307c_handle_t s_ml307c = NULL;
+static osal_mutex_t s_ml307c_mutex = NULL;
+static uint8_t s_ml307c_tcp_connected = 0u;
+static uint8_t s_ml307c_udp_connected = 0u;
 
 static void ml307c_log_response(const char *title, const char *resp);
 static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value);
@@ -1030,4 +1037,274 @@ int ml307c_get_iccid(ml307c_handle_t dev, char *buf)
     }
 
     return ml307c_parse_digits_after(resp, "+ICCID", buf, 21u);
+}
+
+static int driver_ml307c_reg_ready(int reg_state)
+{
+    return reg_state == 1 || reg_state == 5;
+}
+
+static int driver_ml307c_lock(uint32_t timeout_ms)
+{
+    return s_ml307c_mutex != NULL ? osal_mutex_lock(s_ml307c_mutex, timeout_ms) : -1;
+}
+
+static void driver_ml307c_unlock(void)
+{
+    if (s_ml307c_mutex != NULL) {
+        osal_mutex_unlock(s_ml307c_mutex);
+    }
+}
+
+int driver_ml307c_init(const driver_ml307c_bsp_ops_t *ops, const ml307c_config_t *cfg)
+{
+    if (s_ml307c != NULL) {
+        return 0;
+    }
+    if (ops == NULL ||
+        ops->uart_write == NULL ||
+        ops->uart_read == NULL ||
+        ops->delay_ms == NULL ||
+        ops->get_tick_ms == NULL) {
+        return -1;
+    }
+
+    ml307c_config_t local_cfg = {
+        .timeout_ms = DRIVER_ML307C_LOCK_TIMEOUT_MS,
+        .socket_id = ML307C_DEFAULT_SOCKET_ID,
+    };
+    if (cfg != NULL) {
+        local_cfg = *cfg;
+    }
+
+    ml307c_interface_t itf = {
+        .uart_write = ops->uart_write,
+        .uart_read = ops->uart_read,
+        .delay_ms = ops->delay_ms,
+        .get_tick = ops->get_tick_ms,
+    };
+
+    if (s_ml307c_mutex == NULL) {
+        s_ml307c_mutex = osal_mutex_create();
+        if (s_ml307c_mutex == NULL) {
+            return -2;
+        }
+    }
+
+    s_ml307c = ml307c_init(&local_cfg, &itf);
+    if (s_ml307c == NULL) {
+        return -3;
+    }
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        ml307c_deinit(s_ml307c);
+        s_ml307c = NULL;
+        return ret;
+    }
+
+    ret = ml307c_check_alive(s_ml307c);
+    if (ret == 0) {
+        ret = ml307c_check_sim(s_ml307c);
+    }
+    driver_ml307c_unlock();
+
+    if (ret != 0) {
+        ml307c_deinit(s_ml307c);
+        s_ml307c = NULL;
+        return ret;
+    }
+
+    s_ml307c_tcp_connected = 0u;
+    s_ml307c_udp_connected = 0u;
+    return 0;
+}
+
+int driver_ml307c_deinit(void)
+{
+    if (s_ml307c != NULL) {
+        ml307c_deinit(s_ml307c);
+        s_ml307c = NULL;
+    }
+    s_ml307c_tcp_connected = 0u;
+    s_ml307c_udp_connected = 0u;
+    return 0;
+}
+
+int driver_ml307c_is_initialized(void)
+{
+    return s_ml307c != NULL ? 1 : 0;
+}
+
+int driver_ml307c_get_status(driver_ml307c_status_t *status)
+{
+    if (s_ml307c == NULL || status == NULL) {
+        return -1;
+    }
+
+    status->rssi = -1;
+    status->reg_state = -1;
+    status->link_state = -1;
+    status->sim_ready = 0;
+    status->at_ready = 0;
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        return ret;
+    }
+
+    if (ml307c_check_alive(s_ml307c) == 0) {
+        status->at_ready = 1;
+    }
+    if (ml307c_check_sim(s_ml307c) == 0) {
+        status->sim_ready = 1;
+    }
+    (void)ml307c_get_signal(s_ml307c, &status->rssi);
+    (void)ml307c_get_network_state(s_ml307c, &status->reg_state);
+    (void)ml307c_get_link_state(s_ml307c, &status->link_state);
+
+    driver_ml307c_unlock();
+    return 0;
+}
+
+int driver_ml307c_is_ready(void)
+{
+    driver_ml307c_status_t status;
+    int ret = driver_ml307c_get_status(&status);
+    if (ret != 0) {
+        return ret;
+    }
+
+    return status.at_ready == 1 &&
+           status.sim_ready == 1 &&
+           driver_ml307c_reg_ready(status.reg_state) &&
+           status.link_state == 1;
+}
+
+int driver_ml307c_tcp_connect(const char *host, int port)
+{
+    if (s_ml307c == NULL || host == NULL || port <= 0) {
+        return -1;
+    }
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_tcp_connect(s_ml307c, host, port);
+    driver_ml307c_unlock();
+    s_ml307c_tcp_connected = ret == 0 ? 1u : 0u;
+    return ret;
+}
+
+int driver_ml307c_tcp_send(const uint8_t *data, int len)
+{
+    if (s_ml307c == NULL || data == NULL || len <= 0) {
+        return -1;
+    }
+    if (s_ml307c_tcp_connected == 0u) {
+        BSP_LOGW(TAG, "ML307C TCP 发送时通道未标记为已连接，仍尝试发送");
+    }
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_tcp_send(s_ml307c, (uint8_t *)data, len);
+    driver_ml307c_unlock();
+    return ret;
+}
+
+int driver_ml307c_tcp_close(void)
+{
+    if (s_ml307c == NULL) {
+        return -1;
+    }
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_tcp_close(s_ml307c);
+    driver_ml307c_unlock();
+    if (ret == 0) {
+        s_ml307c_tcp_connected = 0u;
+    }
+    return ret;
+}
+
+int driver_ml307c_udp_connect(const char *host, int port)
+{
+    if (s_ml307c == NULL || host == NULL || port <= 0) {
+        return -1;
+    }
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_udp_connect(s_ml307c, host, port);
+    driver_ml307c_unlock();
+    s_ml307c_udp_connected = ret == 0 ? 1u : 0u;
+    return ret;
+}
+
+int driver_ml307c_udp_send(const uint8_t *data, int len)
+{
+    if (s_ml307c == NULL || data == NULL || len <= 0) {
+        return -1;
+    }
+    if (s_ml307c_udp_connected == 0u) {
+        BSP_LOGW(TAG, "ML307C UDP 发送时通道未标记为已连接，仍尝试发送");
+    }
+
+    int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_udp_send(s_ml307c, (uint8_t *)data, len);
+    driver_ml307c_unlock();
+    return ret;
+}
+
+int driver_ml307c_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
+{
+    if (s_ml307c == NULL || buf == NULL || len == 0u) {
+        return -1;
+    }
+
+    if (driver_ml307c_lock(timeout_ms + 20u) != 0) {
+        return 0;
+    }
+    int ret = ml307c_read_raw(s_ml307c, buf, len, timeout_ms);
+    driver_ml307c_unlock();
+    return ret;
+}
+
+int driver_ml307c_http_post_wav(const char *url,
+                                const uint8_t *wav,
+                                uint16_t wav_len,
+                                uint8_t *resp,
+                                uint16_t resp_size,
+                                uint16_t *resp_len)
+{
+    if (s_ml307c == NULL || url == NULL || wav == NULL || resp == NULL || resp_len == NULL) {
+        return -1;
+    }
+
+    int ret = driver_ml307c_lock(60000u);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_http_post(s_ml307c,
+                           ML307C_HTTP_TASK_ID,
+                           url,
+                           "Content-Type: audio/wav",
+                           wav,
+                           wav_len,
+                           resp,
+                           resp_size,
+                           resp_len);
+    driver_ml307c_unlock();
+    return ret;
 }

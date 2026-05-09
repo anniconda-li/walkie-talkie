@@ -2,8 +2,8 @@
  * @file service_network.h
  * @brief 网络能力服务接口。
  *
- * 本服务对上提供蜂窝网络状态查询和 TCP 发送能力，隐藏 ML307C 模块、
- * UART 注入和 AT 指令细节。app 层只需要面向网络能力编排业务。
+ * 本服务对上提供网络状态查询、TCP/UDP 和 HTTP WAV 上传能力。底层网络链路
+ * 通过能力接口绑定，app 层只需要面向网络能力编排业务。
  */
 #ifndef SERVICE_NETWORK_H
 #define SERVICE_NETWORK_H
@@ -14,24 +14,46 @@
 extern "C" {
 #endif
 
-/**
- * @brief 网络服务初始化配置。
- */
-typedef struct {
-    uint32_t at_timeout_ms; /**< AT 命令默认超时时间，单位毫秒；填 0 使用默认值。 */
-    uint8_t socket_id;      /**< DTU socket 通道号；填 0 使用默认通道 1。 */
-} service_network_config_t;
+typedef struct service_network_config service_network_config_t;
 
 /**
- * @brief 蜂窝网络状态快照。
+ * @brief 通用网络状态快照。
  */
 typedef struct {
     int rssi;          /**< 信号强度，0-31 表示有效，99 表示未知，负值表示查询失败。 */
     int reg_state;     /**< CEREG 注册状态：1 本地注册，5 漫游注册。 */
     int link_state;    /**< ISLINK 数据链路状态：1 已连接，0 未连接。 */
-    int sim_ready;     /**< SIM 卡状态：1 正常，0 异常。 */
-    int at_ready;      /**< AT 通信状态：1 正常，0 异常。 */
+    int sim_ready;     /**< 蜂窝 SIM 或等效链路前置条件：1 正常，0 异常。 */
+    int at_ready;      /**< 蜂窝 AT 或等效驱动通信状态：1 正常，0 异常。 */
 } service_network_status_t;
+
+/**
+ * @brief 网络服务依赖的下层网络能力。
+ */
+typedef struct {
+    int (*is_initialized)(void); /**< 判断下层网络 driver 是否已初始化。 */
+    int (*get_status)(service_network_status_t *status); /**< 获取网络状态。 */
+    int (*is_ready)(void);                            /**< 判断网络是否就绪。 */
+    int (*tcp_connect)(const char *host, int port);   /**< 建立 TCP 连接。 */
+    int (*tcp_send)(const uint8_t *data, int len);    /**< 发送 TCP 数据。 */
+    int (*tcp_close)(void);                           /**< 关闭 TCP 连接。 */
+    int (*udp_connect)(const char *host, int port);   /**< 建立或配置 UDP 通道。 */
+    int (*udp_send)(const uint8_t *data, int len);    /**< 发送 UDP 数据。 */
+    int (*read_downlink)(uint8_t *buf, uint16_t len, uint32_t timeout_ms); /**< 读取下行数据。 */
+    int (*http_post_wav)(const char *url,
+                         const uint8_t *wav,
+                         uint16_t wav_len,
+                         uint8_t *resp,
+                         uint16_t resp_size,
+                         uint16_t *resp_len); /**< HTTP POST WAV 并读取响应。 */
+} service_network_ops_t;
+
+/**
+ * @brief 网络服务初始化配置。
+ */
+struct service_network_config {
+    service_network_ops_t ops; /**< 下层网络能力函数表。 */
+};
 
 /**
  * @brief 初始化网络服务。
@@ -107,7 +129,7 @@ int service_network_udp_connect(const char *host, int port);
 int service_network_udp_send(const uint8_t *data, int len);
 
 /**
- * @brief 读取 ML307C 下行透传数据。
+ * @brief 读取网络下行数据。
  *
  * @param[out] buf 输出缓冲区。
  * @param[in] len 最大读取字节数。

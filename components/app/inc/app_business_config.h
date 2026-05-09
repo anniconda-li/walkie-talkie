@@ -39,7 +39,6 @@ extern "C" {
 #define APP_BUSINESS_WAV_HEADER_LEN     44u
 /** @brief AI 录音 WAV 请求和响应复用缓冲区最大字节数。 */
 #define APP_BUSINESS_AI_WAV_MAX_BYTES   (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_MAX_SAMPLES * sizeof(int16_t)))
-
 #ifdef __cplusplus
 }
 #endif

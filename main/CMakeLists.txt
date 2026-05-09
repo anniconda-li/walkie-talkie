@@ -8,6 +8,7 @@ idf_component_register(
     REQUIRES
         app
         bsp
+        device_driver
         osal
         service
 )

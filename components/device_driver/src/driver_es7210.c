@@ -1,15 +1,16 @@
 /**
- * @file bsp_es7210.c
+ * @file driver_es7210.c
  * @brief ES7210 四通道音频 ADC 驱动实现。
  */
-#include "bsp_es7210.h"
+#include "driver_es7210.h"
 
 #include "bsp_common.h"
 #include "osal_task.h"
 
+#include <string.h>
 #include <stdlib.h>
 
-static const char *TAG = "bsp_es7210";
+static const char *TAG = "driver_es7210";
 
 #define ES7210_RESET_REG00          0x00u
 #define ES7210_MAINCLK_REG02        0x02u
@@ -42,11 +43,20 @@ static const char *TAG = "bsp_es7210";
 #define ES7210_MIC4_POWER_REG4A     0x4Au
 #define ES7210_MIC12_POWER_REG4B    0x4Bu
 #define ES7210_MIC34_POWER_REG4C    0x4Cu
+#define DRIVER_ES7210_I2C_SPEED_HZ  100000u
+#define DRIVER_ES7210_I2C_ADDR      0x40u
+#define DRIVER_ES7210_I2C_ADDR_ALT  0x20u
+#define DRIVER_ES7210_MAX_FRAMES    256u
 
 struct es7210_dev {
     es7210_interface_t itf;
     uint32_t read_log_count;
 };
+
+static es7210_handle_t s_es7210 = NULL;
+static driver_es7210_bsp_ops_t s_driver_ops;
+static uint16_t s_driver_addr = DRIVER_ES7210_I2C_ADDR;
+static uint8_t s_driver_raw_buf[DRIVER_ES7210_MAX_FRAMES * 4u];
 
 static int es7210_write_u8(es7210_handle_t dev, uint8_t reg, uint8_t value)
 {
@@ -170,4 +180,131 @@ int es7210_read(es7210_handle_t dev,
     }
 
     return ret;
+}
+
+static int driver_es7210_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
+{
+    int ret = s_driver_ops.i2c_write_reg(s_driver_addr,
+                                         DRIVER_ES7210_I2C_SPEED_HZ,
+                                         reg,
+                                         data,
+                                         len);
+    if (ret == 0 || reg != 0x00u || s_driver_addr == DRIVER_ES7210_I2C_ADDR_ALT) {
+        return ret;
+    }
+
+    s_driver_addr = DRIVER_ES7210_I2C_ADDR_ALT;
+    ret = s_driver_ops.i2c_write_reg(s_driver_addr,
+                                     DRIVER_ES7210_I2C_SPEED_HZ,
+                                     reg,
+                                     data,
+                                     len);
+    if (ret != 0) {
+        s_driver_addr = DRIVER_ES7210_I2C_ADDR;
+    }
+    return ret;
+}
+
+static int driver_es7210_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
+{
+    return s_driver_ops.i2c_read_reg(s_driver_addr,
+                                     DRIVER_ES7210_I2C_SPEED_HZ,
+                                     reg,
+                                     data,
+                                     len);
+}
+
+static int16_t driver_es7210_read_i16_le(const uint8_t *data, uint32_t sample_index)
+{
+    uint32_t offset = sample_index * 2u;
+    uint16_t raw = (uint16_t)data[offset] | ((uint16_t)data[offset + 1u] << 8);
+    return (int16_t)raw;
+}
+
+int driver_es7210_init(const driver_es7210_bsp_ops_t *ops)
+{
+    if (s_es7210 != NULL) {
+        return 0;
+    }
+    if (ops == NULL ||
+        ops->i2c_write_reg == NULL ||
+        ops->i2c_read_reg == NULL ||
+        ops->i2s_read == NULL) {
+        BSP_LOGE(TAG, "ES7210 板级初始化失败: BSP 能力无效");
+        return -1;
+    }
+
+    s_driver_ops = *ops;
+    s_driver_addr = DRIVER_ES7210_I2C_ADDR;
+    es7210_interface_t itf = {
+        .write_reg = driver_es7210_write_reg,
+        .read_reg = driver_es7210_read_reg,
+        .read = s_driver_ops.i2s_read,
+    };
+
+    s_es7210 = es7210_init(&itf);
+    return s_es7210 != NULL ? 0 : -2;
+}
+
+int driver_es7210_deinit(void)
+{
+    if (s_es7210 != NULL) {
+        es7210_deinit(s_es7210);
+        s_es7210 = NULL;
+    }
+    memset(&s_driver_ops, 0, sizeof(s_driver_ops));
+    return 0;
+}
+
+int driver_es7210_is_initialized(void)
+{
+    return s_es7210 != NULL ? 1 : 0;
+}
+
+int driver_es7210_start_record(void)
+{
+    return s_es7210 != NULL ? 0 : -1;
+}
+
+int driver_es7210_stop_record(void)
+{
+    return s_es7210 != NULL ? 0 : -1;
+}
+
+int driver_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
+{
+    if (s_es7210 == NULL || pcm == NULL || samples == 0u) {
+        return -1;
+    }
+
+    uint32_t total = 0u;
+    while (total < samples) {
+        uint32_t frames = samples - total;
+        if (frames > DRIVER_ES7210_MAX_FRAMES) {
+            frames = DRIVER_ES7210_MAX_FRAMES;
+        }
+
+        uint32_t read_len = frames * 4u;
+        int read_bytes = es7210_read(s_es7210, s_driver_raw_buf, read_len, timeout_ms);
+        if (read_bytes < 0) {
+            return read_bytes;
+        }
+        if (read_bytes == 0) {
+            break;
+        }
+
+        uint32_t read_frames = (uint32_t)read_bytes / 4u;
+        for (uint32_t i = 0; i < read_frames; i++) {
+            int16_t mic1 = driver_es7210_read_i16_le(s_driver_raw_buf, i * 2u);
+            int16_t mic2 = driver_es7210_read_i16_le(s_driver_raw_buf, i * 2u + 1u);
+            pcm[total + i] = (int16_t)(((int32_t)mic1 + (int32_t)mic2) / 2);
+        }
+        total += read_frames;
+
+        if ((uint32_t)read_bytes < read_len) {
+            break;
+        }
+    }
+
+    return total > 0u ? (int)total : 0;
 }

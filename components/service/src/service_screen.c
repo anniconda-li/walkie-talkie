@@ -4,11 +4,11 @@
  */
 #include "service_screen.h"
 
-#include "bsp_lcd.h"
 #include "esp_lvgl_port.h"
 #include "service_common.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * @brief 屏幕服务日志标签。
@@ -34,6 +34,8 @@ static lv_indev_t *s_screen_touch = NULL;
  * @brief LVGL port 是否已初始化。
  */
 static bool s_lvgl_port_inited = false;
+static service_screen_device_ops_t s_screen_ops;
+static uint8_t s_screen_ops_ready = 0u;
 
 /**
  * @brief 将 ESP 错误码转换为通用 int 返回值。
@@ -46,42 +48,70 @@ static int service_screen_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-int service_screen_init(void)
+static int service_screen_ops_is_valid(const service_screen_device_ops_t *ops)
+{
+    if (ops == NULL ||
+        ops->is_initialized == NULL ||
+        ops->get_panel_io == NULL ||
+        ops->get_panel == NULL ||
+        ops->get_touch == NULL ||
+        ops->hres == 0u ||
+        ops->vres == 0u) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int service_screen_init(const service_screen_config_t *cfg)
 {
     if (s_screen_display != NULL) {
         SERVICE_LOGI(TAG, "屏幕服务已初始化");
         return 0;
     }
 
-    int ret = bsp_lcd_init();
-    if (ret != 0) {
-        SERVICE_LOGE(TAG, "屏幕服务初始化失败: LCD 初始化失败, ret=%d", ret);
-        return ret;
+    if (cfg == NULL || service_screen_ops_is_valid(&cfg->device_ops) != 0) {
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: 未提供屏幕能力");
+        return -3;
     }
 
+    if (cfg->device_ops.is_initialized() != 1) {
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕 driver 未初始化");
+        return -4;
+    }
+    if (cfg->device_ops.get_panel_io() == NULL ||
+        cfg->device_ops.get_panel() == NULL ||
+        cfg->device_ops.get_touch() == NULL) {
+        SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕句柄无效");
+        return -5;
+    }
+
+    s_screen_ops = cfg->device_ops;
+    s_screen_ops_ready = 1u;
+
     lvgl_port_cfg_t lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    ret = service_screen_err_to_int(lvgl_port_init(&lvgl_port_cfg));
+    int ret = service_screen_err_to_int(lvgl_port_init(&lvgl_port_cfg));
     if (ret != 0) {
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: LVGL port 初始化失败, ret=%d", ret);
-        bsp_lcd_deinit();
+        s_screen_ops_ready = 0u;
         return ret;
     }
     s_lvgl_port_inited = true;
 
     lvgl_port_display_cfg_t display_cfg = {
-        .io_handle = bsp_lcd_get_panel_io_handle(),
-        .panel_handle = bsp_lcd_get_panel_handle(),
+        .io_handle = s_screen_ops.get_panel_io(),
+        .panel_handle = s_screen_ops.get_panel(),
         .control_handle = NULL,
-        .buffer_size = BSP_LCD_H_RES * SERVICE_SCREEN_DRAW_BUF_LINES,
+        .buffer_size = s_screen_ops.hres * SERVICE_SCREEN_DRAW_BUF_LINES,
         .double_buffer = false,
         .trans_size = 0,
-        .hres = BSP_LCD_H_RES,
-        .vres = BSP_LCD_V_RES,
+        .hres = s_screen_ops.hres,
+        .vres = s_screen_ops.vres,
         .monochrome = false,
         .rotation = {
-            .swap_xy = BSP_LCD_SWAP_XY != 0,
-            .mirror_x = BSP_LCD_MIRROR_X != 0,
-            .mirror_y = BSP_LCD_MIRROR_Y != 0,
+            .swap_xy = s_screen_ops.swap_xy != 0u,
+            .mirror_x = s_screen_ops.mirror_x != 0u,
+            .mirror_y = s_screen_ops.mirror_y != 0u,
         },
         .color_format = LV_COLOR_FORMAT_RGB565,
         .flags = {
@@ -103,7 +133,7 @@ int service_screen_init(void)
 
     lvgl_port_touch_cfg_t touch_cfg = {
         .disp = s_screen_display,
-        .handle = bsp_lcd_get_touch_handle(),
+        .handle = s_screen_ops.get_touch(),
         .scale = {
             .x = 1.0f,
             .y = 1.0f,
@@ -118,8 +148,8 @@ int service_screen_init(void)
     }
 
     SERVICE_LOGI(TAG, "屏幕服务初始化成功, res=%ux%u",
-                 (unsigned int)BSP_LCD_H_RES,
-                 (unsigned int)BSP_LCD_V_RES);
+                 (unsigned int)s_screen_ops.hres,
+                 (unsigned int)s_screen_ops.vres);
     return 0;
 }
 
@@ -154,11 +184,8 @@ int service_screen_deinit(void)
         SERVICE_LOGI(TAG, "屏幕 LVGL port 已释放, ret=%d", del_ret);
     }
 
-    int lcd_ret = bsp_lcd_deinit();
-    if (ret == 0) {
-        ret = lcd_ret;
-    }
-
+    s_screen_ops = (service_screen_device_ops_t){0};
+    s_screen_ops_ready = 0u;
     return ret;
 }
 
@@ -181,12 +208,12 @@ void service_screen_unlock(void)
 
 uint16_t service_screen_get_hres(void)
 {
-    return (uint16_t)BSP_LCD_H_RES;
+    return s_screen_ops_ready != 0u ? s_screen_ops.hres : 0u;
 }
 
 uint16_t service_screen_get_vres(void)
 {
-    return (uint16_t)BSP_LCD_V_RES;
+    return s_screen_ops_ready != 0u ? s_screen_ops.vres : 0u;
 }
 
 lv_display_t *service_screen_get_display(void)

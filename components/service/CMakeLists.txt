@@ -7,8 +7,9 @@ idf_component_register(
         "inc"
 
     REQUIRES 
-        bsp
+        device_driver
         espressif__esp_lvgl_port
+        esp_lcd
         espressif__esp_lcd_touch
         lvgl__lvgl
         osal
