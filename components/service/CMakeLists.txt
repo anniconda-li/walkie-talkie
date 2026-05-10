@@ -11,6 +11,7 @@ idf_component_register(
         espressif__esp_lvgl_port
         esp_lcd
         espressif__esp_lcd_touch
+        heap
         lvgl__lvgl
         osal
 

@@ -251,7 +251,12 @@ int driver_wifi_udp_send(const uint8_t *data, int len)
     }
 
     int ret = sendto(s_udp_sock, data, (size_t)len, 0, (struct sockaddr *)&s_udp_peer, s_udp_peer_len);
-    return ret == len ? 0 : -2;
+    if (ret == len) {
+        return 0;
+    }
+
+    DRIVER_LOGW(TAG, "UDP 发送失败, len=%d, ret=%d, errno=%d", len, ret, errno);
+    return -2;
 }
 
 int driver_wifi_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)

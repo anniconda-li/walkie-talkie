@@ -5,8 +5,12 @@
  */
 #include "osal_task.h"
 
+#include "osal_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+
+static const char *TAG = "osal_task";
 
 static TickType_t osal_task_timeout_to_ticks(uint32_t timeout_ms)
 {
@@ -60,6 +64,17 @@ int osal_task_create(const char *name,
                                  priority,
                                  task != NULL ? &handle : NULL);
     if (ret != pdPASS) {
+        OSAL_LOGE(TAG,
+                  "任务创建失败, name=%s, stack=%u, priority=%u, tasks=%u, free_heap=%u, "
+                  "min_free_heap=%u, internal_free=%u, internal_largest=%u",
+                  name != NULL ? name : "osal_task",
+                  (unsigned int)stack_size,
+                  (unsigned int)priority,
+                  (unsigned int)uxTaskGetNumberOfTasks(),
+                  (unsigned int)esp_get_free_heap_size(),
+                  (unsigned int)esp_get_minimum_free_heap_size(),
+                  (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         return -1;
     }
 

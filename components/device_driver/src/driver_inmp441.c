@@ -14,7 +14,7 @@ static const char *TAG = "driver_inmp441";
 
 static driver_inmp441_bsp_ops_t s_driver_ops;
 static uint8_t s_driver_inited = 0u;
-static int16_t s_driver_raw_buf[DRIVER_INMP441_MAX_SAMPLES * 2u];
+static int16_t s_driver_raw_buf[DRIVER_INMP441_MAX_SAMPLES];
 
 int driver_inmp441_init(const driver_inmp441_bsp_ops_t *ops)
 {
@@ -44,16 +44,6 @@ int driver_inmp441_is_initialized(void)
     return s_driver_inited ? 1 : 0;
 }
 
-int driver_inmp441_start_record(void)
-{
-    return s_driver_inited ? 0 : -1;
-}
-
-int driver_inmp441_stop_record(void)
-{
-    return s_driver_inited ? 0 : -1;
-}
-
 int driver_inmp441_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
     if (!s_driver_inited || pcm == NULL || samples == 0u) {
@@ -67,7 +57,7 @@ int driver_inmp441_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
             frames = DRIVER_INMP441_MAX_SAMPLES;
         }
 
-        uint32_t read_len = frames * sizeof(int16_t) * 2u;
+        uint32_t read_len = frames * sizeof(int16_t);
         int read_bytes = s_driver_ops.i2s_read((uint8_t *)s_driver_raw_buf,
                                                read_len,
                                                timeout_ms);
@@ -78,9 +68,9 @@ int driver_inmp441_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
             break;
         }
 
-        uint32_t read_frames = (uint32_t)read_bytes / (sizeof(int16_t) * 2u);
+        uint32_t read_frames = (uint32_t)read_bytes / sizeof(int16_t);
         for (uint32_t i = 0; i < read_frames; i++) {
-            pcm[total + i] = s_driver_raw_buf[i * 2u];
+            pcm[total + i] = s_driver_raw_buf[i];
         }
         total += read_frames;
 

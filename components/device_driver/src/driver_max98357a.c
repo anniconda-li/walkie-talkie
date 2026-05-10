@@ -16,7 +16,7 @@ static driver_max98357a_bsp_ops_t s_driver_ops;
 static uint8_t s_driver_inited = 0u;
 static uint8_t s_driver_volume = 80u;
 static uint8_t s_driver_mute = 0u;
-static int16_t s_driver_stereo_buf[DRIVER_MAX98357A_MAX_FRAMES * 2u];
+static int16_t s_driver_mono_buf[DRIVER_MAX98357A_MAX_FRAMES];
 
 static int16_t driver_max98357a_scale_sample(int16_t sample)
 {
@@ -66,16 +66,6 @@ int driver_max98357a_is_initialized(void)
     return s_driver_inited ? 1 : 0;
 }
 
-int driver_max98357a_start_playback(void)
-{
-    return s_driver_inited ? 0 : -1;
-}
-
-int driver_max98357a_stop_playback(void)
-{
-    return s_driver_inited ? 0 : -1;
-}
-
 int driver_max98357a_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
     if (!s_driver_inited || pcm == NULL || samples == 0u) {
@@ -90,13 +80,11 @@ int driver_max98357a_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t tim
         }
 
         for (uint32_t i = 0; i < frames; i++) {
-            int16_t sample = driver_max98357a_scale_sample(pcm[total + i]);
-            s_driver_stereo_buf[i * 2u] = sample;
-            s_driver_stereo_buf[i * 2u + 1u] = sample;
+            s_driver_mono_buf[i] = driver_max98357a_scale_sample(pcm[total + i]);
         }
 
-        uint32_t write_len = frames * sizeof(int16_t) * 2u;
-        int written = s_driver_ops.i2s_write((const uint8_t *)s_driver_stereo_buf,
+        uint32_t write_len = frames * sizeof(int16_t);
+        int written = s_driver_ops.i2s_write((const uint8_t *)s_driver_mono_buf,
                                              write_len,
                                              timeout_ms);
         if (written < 0) {
@@ -106,7 +94,7 @@ int driver_max98357a_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t tim
             break;
         }
 
-        total += (uint32_t)written / (sizeof(int16_t) * 2u);
+        total += (uint32_t)written / sizeof(int16_t);
         if ((uint32_t)written < write_len) {
             break;
         }

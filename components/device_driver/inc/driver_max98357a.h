@@ -43,20 +43,6 @@ int driver_max98357a_deinit(void);
 int driver_max98357a_is_initialized(void);
 
 /**
- * @brief 开始播放。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int driver_max98357a_start_playback(void);
-
-/**
- * @brief 停止播放。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int driver_max98357a_stop_playback(void);
-
-/**
  * @brief 播放单声道 PCM 样本。
  *
  * @param[in] pcm 单声道 PCM 输入缓冲区。

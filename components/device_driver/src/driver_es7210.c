@@ -259,16 +259,6 @@ int driver_es7210_is_initialized(void)
     return s_es7210_inited != 0u ? 1 : 0;
 }
 
-int driver_es7210_start_record(void)
-{
-    return s_es7210_inited != 0u ? 0 : -1;
-}
-
-int driver_es7210_stop_record(void)
-{
-    return s_es7210_inited != 0u ? 0 : -1;
-}
-
 int driver_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
     if (s_es7210_inited == 0u || pcm == NULL || samples == 0u) {

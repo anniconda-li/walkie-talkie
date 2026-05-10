@@ -214,6 +214,5 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
     }
 
     *voltage_mv = mv;
-    DRIVER_LOGI(TAG, "电池 ADC 采样完成, raw=%d, voltage=%dmV", raw_avg, mv);
     return 0;
 }

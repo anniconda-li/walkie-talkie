@@ -82,7 +82,7 @@ int app_status_monitor_start(void)
     int ret = osal_task_create("biz_battery",
                                app_status_monitor_battery_task,
                                NULL,
-                               3072u,
+                               4096u,
                                5u,
                                NULL);
     if (ret != 0) {

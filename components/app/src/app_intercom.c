@@ -23,6 +23,9 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
 #define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
+#define APP_INTERCOM_PTT_TASK_STACK     6144u
+#define APP_INTERCOM_RX_TASK_STACK      4096u
+#define APP_INTERCOM_HEARTBEAT_STACK    3072u
 
 typedef enum {
     APP_INTERCOM_PKT_REGISTER = 1,
@@ -196,11 +199,11 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
     }
 
     if (view.type == APP_INTERCOM_PKT_AUDIO &&
-        view.payload_len > 0u &&
-        !app_business_audio_session_is_busy()) {
+        view.payload_len > 0u) {
         int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];
         uint16_t copy_len = view.payload_len > sizeof(pcm) ? sizeof(pcm) : view.payload_len;
         memcpy(pcm, view.payload, copy_len);
+        (void)service_audio_start_playback();
         int played = service_audio_play(pcm, copy_len / sizeof(int16_t), 30u);
         if (played < 0) {
             APP_LOGW(TAG, "UDP 音频播放失败, seq=%u, ret=%d", (unsigned int)view.seq, played);
@@ -268,18 +271,48 @@ static void app_intercom_ptt_task(void *arg)
 
         /* PTT 期间按固定 20ms PCM 帧发送，第一版不做编解码和重传。 */
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
+        uint32_t read_ok = 0u;
+        uint32_t read_fail = 0u;
+        uint32_t send_ok = 0u;
+        uint32_t send_fail = 0u;
+        int last_read_ret = 0;
+        int last_send_ret = 0;
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
+                read_ok++;
                 uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
                 uint16_t packet_len = app_intercom_build_packet(packet,
                                                                 APP_INTERCOM_PKT_AUDIO,
                                                                 (const uint8_t *)pcm,
                                                                 payload_len);
-                (void)service_network_udp_send(packet, packet_len);
+                if (packet_len > 0u) {
+                    int send_ret = service_network_udp_send(packet, packet_len);
+                    if (send_ret == 0) {
+                        send_ok++;
+                    } else {
+                        send_fail++;
+                        last_send_ret = send_ret;
+                    }
+                } else {
+                    send_fail++;
+                    last_send_ret = -100;
+                }
+            } else {
+                read_fail++;
+                last_read_ret = samples;
             }
         }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
+        APP_LOGI(TAG,
+                 "PTT 发送统计: read_ok=%u, read_fail=%u, send_ok=%u, send_fail=%u, "
+                 "last_read=%d, last_send=%d",
+                 (unsigned int)read_ok,
+                 (unsigned int)read_fail,
+                 (unsigned int)send_ok,
+                 (unsigned int)send_fail,
+                 last_read_ret,
+                 last_send_ret);
         app_business_audio_session_end();
     }
 }
@@ -297,21 +330,36 @@ int app_intercom_start(void)
         s_udp_ready = 1;
     }
 
-    ret = osal_task_create("biz_heartbeat", app_intercom_heartbeat_task, NULL, 3072u, 4u, NULL);
+    ret = osal_task_create("biz_ptt",
+                           app_intercom_ptt_task,
+                           NULL,
+                           APP_INTERCOM_PTT_TASK_STACK,
+                           6u,
+                           &s_ptt_task);
     if (ret != 0) {
-        APP_LOGE(TAG, "对讲心跳任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "PTT 任务启动失败, ret=%d", ret);
         return ret;
     }
 
-    ret = osal_task_create("biz_udp_rx", app_intercom_udp_rx_task, NULL, 4096u, 5u, NULL);
+    ret = osal_task_create("biz_udp_rx",
+                           app_intercom_udp_rx_task,
+                           NULL,
+                           APP_INTERCOM_RX_TASK_STACK,
+                           5u,
+                           NULL);
     if (ret != 0) {
         APP_LOGE(TAG, "UDP 接收任务启动失败, ret=%d", ret);
         return ret;
     }
 
-    ret = osal_task_create("biz_ptt", app_intercom_ptt_task, NULL, 4096u, 6u, &s_ptt_task);
+    ret = osal_task_create("biz_heartbeat",
+                           app_intercom_heartbeat_task,
+                           NULL,
+                           APP_INTERCOM_HEARTBEAT_STACK,
+                           4u,
+                           NULL);
     if (ret != 0) {
-        APP_LOGE(TAG, "PTT 任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "对讲心跳任务启动失败, ret=%d", ret);
         return ret;
     }
 

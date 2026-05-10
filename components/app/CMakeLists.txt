@@ -8,6 +8,7 @@ idf_component_register(
         "inc/ui"
 
     REQUIRES 
+        heap
         service
         lvgl__lvgl
         osal

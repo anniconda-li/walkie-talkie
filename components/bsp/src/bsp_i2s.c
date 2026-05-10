@@ -26,12 +26,6 @@ static i2s_chan_handle_t s_i2s_rx_handle = NULL;
 static i2s_chan_handle_t s_i2s_tx_handle = NULL;
 
 /**
- * @brief I2S 成功读写日志降频计数。
- */
-static uint32_t s_i2s_read_log_count = 0;
-static uint32_t s_i2s_write_log_count = 0;
-
-/**
  * @brief ES 音频 I2S controller.
  */
 #define BSP_I2S_ES_PORT I2S_NUM_0
@@ -106,7 +100,7 @@ static i2s_std_config_t bsp_i2s_get_inmp441_std_config(void)
             .mclk_multiple = I2S_MCLK_MULTIPLE_384,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_STEREO),
+                                                        I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = GPIO_NUM_NC,
             .bclk = BSP_AUDIO_INMP441_BCLK_IO,
@@ -120,6 +114,7 @@ static i2s_std_config_t bsp_i2s_get_inmp441_std_config(void)
             },
         },
     };
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     return std_cfg;
 }
 
@@ -138,7 +133,7 @@ static i2s_std_config_t bsp_i2s_get_max98357a_std_config(void)
             .mclk_multiple = I2S_MCLK_MULTIPLE_384,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_STEREO),
+                                                        I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = GPIO_NUM_NC,
             .bclk = BSP_AUDIO_MAX98357A_BCLK_IO,
@@ -377,12 +372,6 @@ int bsp_i2s_read(uint8_t *data, uint32_t len, uint32_t timeout_ms)
                                                   &bytes_read,
                                                   timeout_ms));
     if (ret == 0) {
-        s_i2s_read_log_count++;
-        if ((s_i2s_read_log_count % 100u) != 0u) {
-            return (int)bytes_read;
-        }
-        BSP_LOGI(TAG, "I2S 读取成功, request=%u, read=%u",
-                 (unsigned int)len, (unsigned int)bytes_read);
         return (int)bytes_read;
     }
 
@@ -405,12 +394,6 @@ int bsp_i2s_write(const uint8_t *data, uint32_t len, uint32_t timeout_ms)
                                                    &bytes_written,
                                                    timeout_ms));
     if (ret == 0) {
-        s_i2s_write_log_count++;
-        if ((s_i2s_write_log_count % 100u) != 0u) {
-            return (int)bytes_written;
-        }
-        BSP_LOGI(TAG, "I2S 写入成功, request=%u, written=%u",
-                 (unsigned int)len, (unsigned int)bytes_written);
         return (int)bytes_written;
     }
 

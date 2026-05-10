@@ -14,11 +14,11 @@ extern "C" {
 /** @brief 本机注册到服务器的设备名。 */
 #define APP_BUSINESS_DEVICE_NAME        "walkie-01"
 /** @brief UDP 对讲服务器地址。 */
-#define APP_BUSINESS_SERVER_HOST        "192.168.1.100"
+#define APP_BUSINESS_SERVER_HOST        "10.251.162.251"
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           9000
 /** @brief AI WAV 问答 HTTP 上传地址。 */
-#define APP_BUSINESS_AI_HTTP_URL        "http://192.168.1.100:8080/ai/wav"
+#define APP_BUSINESS_AI_HTTP_URL        "http://10.251.162.251:18080/ai/wav"
 /** @brief 开机默认频道号。 */
 #define APP_BUSINESS_DEFAULT_CHANNEL    1
 /** @brief 业务统一 PCM 采样率，单位 Hz。 */

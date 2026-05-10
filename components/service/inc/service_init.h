@@ -19,6 +19,13 @@ extern "C" {
 int service_init(void);
 
 /**
+ * @brief 仅完成音频 service 能力绑定并初始化音频 service。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_init_audio(void);
+
+/**
  * @brief 仅完成网络 service 能力绑定并初始化网络 service。
  *
  * @return 成功返回 0；失败返回负值。

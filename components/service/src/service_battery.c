@@ -193,10 +193,5 @@ int service_battery_get_status(int *voltage_mv, int *percent)
 
     *voltage_mv = filtered_mv;
     *percent = service_battery_round_percent(raw_percent);
-    SERVICE_LOGI(TAG,
-                 "电池电量: adc=%dmV, filtered=%dmV, percent=%d%%",
-                 adc_mv,
-                 filtered_mv,
-                 *percent);
     return 0;
 }

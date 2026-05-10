@@ -56,20 +56,6 @@ int driver_es7210_deinit(void);
 int driver_es7210_is_initialized(void);
 
 /**
- * @brief 开始录音。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int driver_es7210_start_record(void);
-
-/**
- * @brief 停止录音。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int driver_es7210_stop_record(void);
-
-/**
  * @brief 读取单声道 PCM 样本。
  *
  * @param[out] pcm 单声道 PCM 输出缓冲区。

@@ -269,16 +269,6 @@ int driver_es8311_is_initialized(void)
     return s_es8311_inited != 0u ? 1 : 0;
 }
 
-int driver_es8311_start_playback(void)
-{
-    return s_es8311_inited != 0u ? 0 : -1;
-}
-
-int driver_es8311_stop_playback(void)
-{
-    return s_es8311_inited != 0u ? 0 : -1;
-}
-
 int driver_es8311_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
     if (s_es8311_inited == 0u || pcm == NULL || samples == 0u) {

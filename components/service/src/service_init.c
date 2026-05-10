@@ -104,6 +104,42 @@ int service_init_network(void)
     return ret;
 }
 
+int service_init_audio(void)
+{
+    service_audio_config_t audio_cfg = {
+        .capture_ops = {
+#if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
+            .is_initialized = driver_inmp441_is_initialized,
+            .read_pcm = driver_inmp441_read_pcm,
+#else
+            .is_initialized = driver_es7210_is_initialized,
+            .read_pcm = driver_es7210_read_pcm,
+#endif
+        },
+        .playback_ops = {
+#if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
+            .is_initialized = driver_max98357a_is_initialized,
+            .play_pcm = driver_max98357a_play_pcm,
+            .set_volume = driver_max98357a_set_volume,
+            .set_mute = driver_max98357a_set_mute,
+#else
+            .is_initialized = driver_es8311_is_initialized,
+            .play_pcm = driver_es8311_play_pcm,
+            .set_volume = driver_es8311_set_volume,
+            .set_mute = driver_es8311_set_mute,
+#endif
+        },
+        .volume = 80u,
+        .passthrough_gain = 1u,
+    };
+    int ret = service_audio_init(&audio_cfg);
+    if (ret != 0) {
+        SERVICE_LOGE(TAG, "音频服务初始化失败, ret=%d", ret);
+    }
+
+    return ret;
+}
+
 int service_init(void)
 {
     service_screen_config_t screen_cfg = {
@@ -138,43 +174,8 @@ int service_init(void)
         return ret;
     }
 
-    service_audio_config_t audio_cfg = {
-        .capture_ops = {
-#if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
-            .is_initialized = driver_inmp441_is_initialized,
-            .start_record = driver_inmp441_start_record,
-            .stop_record = driver_inmp441_stop_record,
-            .read_pcm = driver_inmp441_read_pcm,
-#else
-            .is_initialized = driver_es7210_is_initialized,
-            .start_record = driver_es7210_start_record,
-            .stop_record = driver_es7210_stop_record,
-            .read_pcm = driver_es7210_read_pcm,
-#endif
-        },
-        .playback_ops = {
-#if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
-            .is_initialized = driver_max98357a_is_initialized,
-            .start_playback = driver_max98357a_start_playback,
-            .stop_playback = driver_max98357a_stop_playback,
-            .play_pcm = driver_max98357a_play_pcm,
-            .set_volume = driver_max98357a_set_volume,
-            .set_mute = driver_max98357a_set_mute,
-#else
-            .is_initialized = driver_es8311_is_initialized,
-            .start_playback = driver_es8311_start_playback,
-            .stop_playback = driver_es8311_stop_playback,
-            .play_pcm = driver_es8311_play_pcm,
-            .set_volume = driver_es8311_set_volume,
-            .set_mute = driver_es8311_set_mute,
-#endif
-        },
-        .volume = 80u,
-        .passthrough_gain = 1u,
-    };
-    ret = service_audio_init(&audio_cfg);
+    ret = service_init_audio();
     if (ret != 0) {
-        SERVICE_LOGE(TAG, "音频服务初始化失败, ret=%d", ret);
         return ret;
     }
 

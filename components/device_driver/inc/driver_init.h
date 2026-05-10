@@ -19,6 +19,13 @@ extern "C" {
 int driver_init(void);
 
 /**
+ * @brief 仅初始化当前配置选择的音频 driver。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int driver_audio_init(void);
+
+/**
  * @brief 仅初始化当前配置选择的网络 driver。
  *
  * @return 成功返回 0；失败返回负值。

@@ -107,7 +107,7 @@ static int driver_init_audio_i2s(void)
     return driver_max98357a_init(&max98357a_bsp_ops);
 }
 
-int driver_init(void)
+int driver_audio_init(void)
 {
     int ret = 0;
 
@@ -126,6 +126,16 @@ int driver_init(void)
 #else
 #error "Unsupported DRIVER_INIT_AUDIO selection"
 #endif
+
+    return 0;
+}
+
+int driver_init(void)
+{
+    int ret = driver_audio_init();
+    if (ret != 0) {
+        return ret;
+    }
 
     driver_pca9557_bsp_ops_t pca9557_bsp_ops = {
         .get_i2c_bus_handle = bsp_i2c_get_bus_handle,

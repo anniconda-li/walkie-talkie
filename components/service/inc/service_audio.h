@@ -19,8 +19,6 @@ extern "C" {
  */
 typedef struct {
     int (*is_initialized)(void); /**< 判断下层采集 driver 是否已初始化。 */
-    int (*start_record)(void); /**< 开始录音，可为空。 */
-    int (*stop_record)(void);  /**< 停止录音，可为空。 */
     int (*read_pcm)(int16_t *pcm,
                     uint32_t samples,
                     uint32_t timeout_ms); /**< 读取单声道 PCM 样本。 */
@@ -31,8 +29,6 @@ typedef struct {
  */
 typedef struct {
     int (*is_initialized)(void); /**< 判断下层播放 driver 是否已初始化。 */
-    int (*start_playback)(void); /**< 开始播放，可为空。 */
-    int (*stop_playback)(void);  /**< 停止播放，可为空。 */
     int (*play_pcm)(const int16_t *pcm,
                     uint32_t samples,
                     uint32_t timeout_ms); /**< 播放单声道 PCM 样本。 */
@@ -78,6 +74,17 @@ int service_audio_start_record(void);
  * @return 成功返回 0；失败返回负值。
  */
 int service_audio_stop_record(void);
+
+/**
+ * @brief 获取最近一次录音 PCM 数据。
+ *
+ * 指针指向 service 内部静态缓冲区，在下一次开始录音前有效。
+ *
+ * @param[out] pcm 录音 PCM 指针。
+ * @param[out] samples 录音样本数。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_audio_get_record_data(const int16_t **pcm, uint32_t *samples);
 
 /**
  * @brief 开始播放。
