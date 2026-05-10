@@ -4,7 +4,7 @@
  */
 #include "driver_audio_board.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 #include "driver/gpio.h"
 #include "osal_task.h"
 
@@ -22,19 +22,19 @@ static int driver_audio_board_codec_set_enable_level(int level)
 
     int ret = gpio_config(&cfg);
     if (ret != 0) {
-        BSP_LOGE(TAG, "音频 codec 使能脚配置失败, io=%d, ret=%d",
+        DRIVER_LOGE(TAG, "音频 codec 使能脚配置失败, io=%d, ret=%d",
                  driver_audio_board_codec_ENABLE_IO, ret);
         return ret < 0 ? ret : -ret;
     }
 
     ret = gpio_set_level(driver_audio_board_codec_ENABLE_IO, level);
     if (ret != 0) {
-        BSP_LOGE(TAG, "音频 codec 使能脚设置失败, io=%d, level=%d, ret=%d",
+        DRIVER_LOGE(TAG, "音频 codec 使能脚设置失败, io=%d, level=%d, ret=%d",
                  driver_audio_board_codec_ENABLE_IO, level, ret);
         return ret < 0 ? ret : -ret;
     }
 
-    BSP_LOGI(TAG, "音频 codec 使能脚已设置, io=%d, level=%d",
+    DRIVER_LOGI(TAG, "音频 codec 使能脚已设置, io=%d, level=%d",
              driver_audio_board_codec_ENABLE_IO, level);
     return 0;
 }

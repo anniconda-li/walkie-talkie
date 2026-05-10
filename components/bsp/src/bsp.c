@@ -4,7 +4,7 @@
  */
 #include "bsp.h"
 
-#include "bsp_common.h"
+#include "bsp_config.h"
 #include "bsp_i2c.h"
 #include "bsp_i2s.h"
 #include "bsp_spi.h"

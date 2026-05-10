@@ -4,7 +4,7 @@
  */
 #include "driver_battery.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 #include "driver/gpio.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -41,14 +41,14 @@ static int driver_battery_gpio_init(void)
 
     int ret = driver_battery_err_to_int(gpio_config(&en_cfg));
     if (ret != 0) {
-        BSP_LOGE(TAG, "电池检测使能脚配置失败, io=%d, ret=%d",
+        DRIVER_LOGE(TAG, "电池检测使能脚配置失败, io=%d, ret=%d",
                  driver_battery_ADC_EN_IO, ret);
         return ret;
     }
 
     ret = driver_battery_err_to_int(gpio_set_level(driver_battery_ADC_EN_IO, 1));
     if (ret != 0) {
-        BSP_LOGE(TAG, "电池检测使能脚关闭失败, io=%d, ret=%d",
+        DRIVER_LOGE(TAG, "电池检测使能脚关闭失败, io=%d, ret=%d",
                  driver_battery_ADC_EN_IO, ret);
         return ret;
     }
@@ -63,7 +63,7 @@ static int driver_battery_gpio_init(void)
 
     ret = driver_battery_err_to_int(gpio_config(&adc_gpio_cfg));
     if (ret != 0) {
-        BSP_LOGE(TAG, "电池 ADC 引脚配置失败, io=%d, ret=%d",
+        DRIVER_LOGE(TAG, "电池 ADC 引脚配置失败, io=%d, ret=%d",
                  driver_battery_ADC_IO, ret);
         return ret;
     }
@@ -82,11 +82,11 @@ static void driver_battery_cali_init(void)
     int ret = adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc_cali_handle);
     if (ret == 0) {
         s_adc_cali_enabled = 1u;
-        BSP_LOGI(TAG, "电池 ADC 校准已启用");
+        DRIVER_LOGI(TAG, "电池 ADC 校准已启用");
     } else {
         s_adc_cali_enabled = 0u;
         s_adc_cali_handle = NULL;
-        BSP_LOGW(TAG, "电池 ADC 校准不可用, 使用原始值估算, ret=%d", ret);
+        DRIVER_LOGW(TAG, "电池 ADC 校准不可用, 使用原始值估算, ret=%d", ret);
     }
 }
 
@@ -108,7 +108,7 @@ int driver_battery_init(void)
 
     ret = driver_battery_err_to_int(adc_oneshot_new_unit(&unit_cfg, &s_adc_handle));
     if (ret != 0) {
-        BSP_LOGE(TAG, "电池 ADC 单元初始化失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "电池 ADC 单元初始化失败, ret=%d", ret);
         s_adc_handle = NULL;
         return ret;
     }
@@ -122,7 +122,7 @@ int driver_battery_init(void)
                                                             driver_battery_ADC_CHANNEL,
                                                             &chan_cfg));
     if (ret != 0) {
-        BSP_LOGE(TAG, "电池 ADC 通道配置失败, channel=%d, ret=%d",
+        DRIVER_LOGE(TAG, "电池 ADC 通道配置失败, channel=%d, ret=%d",
                  driver_battery_ADC_CHANNEL, ret);
         (void)adc_oneshot_del_unit(s_adc_handle);
         s_adc_handle = NULL;
@@ -130,7 +130,7 @@ int driver_battery_init(void)
     }
 
     driver_battery_cali_init();
-    BSP_LOGI(TAG, "电池检测初始化完成, adc_io=%d, en_io=%d",
+    DRIVER_LOGI(TAG, "电池检测初始化完成, adc_io=%d, en_io=%d",
              driver_battery_ADC_IO, driver_battery_ADC_EN_IO);
     return 0;
 }
@@ -179,7 +179,7 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
 
     ret = driver_battery_err_to_int(gpio_set_level(driver_battery_ADC_EN_IO, 0));
     if (ret != 0) {
-        BSP_LOGE(TAG, "电池检测使能失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "电池检测使能失败, ret=%d", ret);
         return ret;
     }
 
@@ -193,7 +193,7 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
                                                       &raw));
         if (ret != 0) {
             (void)gpio_set_level(driver_battery_ADC_EN_IO, 1);
-            BSP_LOGE(TAG, "电池 ADC 读取失败, ret=%d", ret);
+            DRIVER_LOGE(TAG, "电池 ADC 读取失败, ret=%d", ret);
             return ret;
         }
         raw_sum += raw;
@@ -206,7 +206,7 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
     if (s_adc_cali_enabled != 0u && s_adc_cali_handle != NULL) {
         ret = driver_battery_err_to_int(adc_cali_raw_to_voltage(s_adc_cali_handle, raw_avg, &mv));
         if (ret != 0) {
-            BSP_LOGE(TAG, "电池 ADC 电压转换失败, raw=%d, ret=%d", raw_avg, ret);
+            DRIVER_LOGE(TAG, "电池 ADC 电压转换失败, raw=%d, ret=%d", raw_avg, ret);
             return ret;
         }
     } else {
@@ -214,6 +214,6 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
     }
 
     *voltage_mv = mv;
-    BSP_LOGI(TAG, "电池 ADC 采样完成, raw=%d, voltage=%dmV", raw_avg, mv);
+    DRIVER_LOGI(TAG, "电池 ADC 采样完成, raw=%d, voltage=%dmV", raw_avg, mv);
     return 0;
 }

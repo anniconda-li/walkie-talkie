@@ -4,7 +4,7 @@
  */
 #include "service_audio.h"
 
-#include "service_common.h"
+#include "service_config.h"
 
 #include <stddef.h>
 

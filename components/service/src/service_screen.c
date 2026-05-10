@@ -5,7 +5,7 @@
 #include "service_screen.h"
 
 #include "esp_lvgl_port.h"
-#include "service_common.h"
+#include "service_config.h"
 
 #include <stdbool.h>
 #include <stdint.h>

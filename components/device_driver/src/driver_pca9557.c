@@ -1,18 +1,23 @@
 /**
- * @file bsp_pca9557.c
+ * @file driver_pca9557.c
  * @brief PCA9557 8 位 I2C IO 扩展器驱动实现。
  */
 #include "driver_pca9557.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 
 #include <stdbool.h>
-#include <stdlib.h>
+#include <string.h>
 
 /**
  * @brief PCA9557 日志标签。
  */
-static const char *TAG = "bsp_pca9557";
+static const char *TAG = "driver_pca9557";
+
+#define DRIVER_PCA9557_I2C_ADDR        0x19u
+#define DRIVER_PCA9557_I2C_SPEED_HZ    100000u
+#define DRIVER_PCA9557_LCD_BL_PIN      PCA9557_PIN_5
+#define DRIVER_PCA9557_CAMERA_PWDN_PIN PCA9557_PIN_1
 
 /**
  * @brief PCA9557 输入端口寄存器。
@@ -34,16 +39,64 @@ static const char *TAG = "bsp_pca9557";
  */
 #define PCA9557_REG_CONFIG      0x03u
 
+typedef struct {
+    int (*write_reg)(uint8_t reg, const uint8_t *data, uint16_t len);
+    int (*read_reg)(uint8_t reg, uint8_t *data, uint16_t len);
+} pca9557_interface_t;
+
+typedef struct {
+    uint8_t output_init;
+    uint8_t polarity_init;
+    uint8_t direction_init;
+} pca9557_config_t;
+
 /**
  * @brief PCA9557 驱动对象。
  */
-struct pca9557_dev {
-    pca9557_interface_t *itf;        /**< I2C 接口函数指针。 */
+typedef struct {
+    pca9557_interface_t itf;         /**< I2C 接口函数指针。 */
     pca9557_config_t config;         /**< 当前设备配置。 */
     uint8_t output_cache;            /**< 输出寄存器缓存。 */
     uint8_t direction_cache;         /**< 方向寄存器缓存。 */
     uint8_t polarity_cache;          /**< 极性反转寄存器缓存。 */
+} pca9557_dev_t;
+
+static pca9557_dev_t s_board_pca9557;
+static uint8_t s_board_pca9557_inited = 0u;
+static driver_pca9557_bsp_ops_t s_board_ops;
+
+static int driver_pca9557_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
+{
+    if (s_board_ops.i2c_write_reg == NULL) {
+        return -1;
+    }
+
+    return s_board_ops.i2c_write_reg(DRIVER_PCA9557_I2C_ADDR,
+                                     DRIVER_PCA9557_I2C_SPEED_HZ,
+                                     reg,
+                                     data,
+                                     len);
+}
+
+static int driver_pca9557_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
+{
+    if (s_board_ops.i2c_read_reg == NULL) {
+        return -1;
+    }
+
+    return s_board_ops.i2c_read_reg(DRIVER_PCA9557_I2C_ADDR,
+                                    DRIVER_PCA9557_I2C_SPEED_HZ,
+                                    reg,
+                                    data,
+                                    len);
+}
+
+static pca9557_interface_t s_board_pca9557_itf = {
+    .write_reg = driver_pca9557_write_reg,
+    .read_reg = driver_pca9557_read_reg,
 };
+
+static int pca9557_set_direction(uint8_t direction);
 
 /**
  * @brief 检查 PCA9557 引脚编号是否有效。
@@ -64,19 +117,20 @@ static bool pca9557_is_valid_pin(pca9557_pin_t pin)
  * @param[out] value 寄存器值输出地址。
  * @return 成功返回 0；失败返回负值。
  */
-static int pca9557_read_reg(pca9557_handle_t dev, uint8_t reg, uint8_t *value)
+static int pca9557_read_reg(uint8_t reg, uint8_t *value)
 {
-    if (dev == NULL || value == NULL) {
-        BSP_LOGE(TAG, "PCA9557 读寄存器参数无效, dev=%p, value=%p", dev, value);
+    if (s_board_pca9557_inited == 0u || value == NULL) {
+        DRIVER_LOGE(TAG, "PCA9557 读寄存器参数无效, inited=%u, value=%p",
+                    (unsigned int)s_board_pca9557_inited, value);
         return -1;
     }
 
-    int ret = dev->itf->read_reg(reg, value, sizeof(*value));
+    int ret = s_board_pca9557.itf.read_reg(reg, value, sizeof(*value));
     if (ret == 0) {
-        BSP_LOGI(TAG, "PCA9557 读寄存器成功, reg=0x%02X, value=0x%02X",
+        DRIVER_LOGI(TAG, "PCA9557 读寄存器成功, reg=0x%02X, value=0x%02X",
                  (unsigned int)reg, (unsigned int)*value);
     } else {
-        BSP_LOGE(TAG, "PCA9557 读寄存器失败, reg=0x%02X, ret=%d",
+        DRIVER_LOGE(TAG, "PCA9557 读寄存器失败, reg=0x%02X, ret=%d",
                  (unsigned int)reg, ret);
     }
 
@@ -91,33 +145,32 @@ static int pca9557_read_reg(pca9557_handle_t dev, uint8_t reg, uint8_t *value)
  * @param[in] value 寄存器值。
  * @return 成功返回 0；失败返回负值。
  */
-static int pca9557_write_reg(pca9557_handle_t dev, uint8_t reg, uint8_t value)
+static int pca9557_write_reg(uint8_t reg, uint8_t value)
 {
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "PCA9557 写寄存器参数无效, dev=NULL");
+    if (s_board_pca9557_inited == 0u) {
+        DRIVER_LOGE(TAG, "PCA9557 写寄存器参数无效: 未初始化");
         return -1;
     }
 
-    int ret = dev->itf->write_reg(reg, &value, sizeof(value));
+    int ret = s_board_pca9557.itf.write_reg(reg, &value, sizeof(value));
     if (ret == 0) {
-        BSP_LOGI(TAG, "PCA9557 写寄存器成功, reg=0x%02X, value=0x%02X",
+        DRIVER_LOGI(TAG, "PCA9557 写寄存器成功, reg=0x%02X, value=0x%02X",
                  (unsigned int)reg, (unsigned int)value);
     } else {
-        BSP_LOGE(TAG, "PCA9557 写寄存器失败, reg=0x%02X, value=0x%02X, ret=%d",
+        DRIVER_LOGE(TAG, "PCA9557 写寄存器失败, reg=0x%02X, value=0x%02X, ret=%d",
                  (unsigned int)reg, (unsigned int)value, ret);
     }
 
     return ret;
 }
 
-pca9557_handle_t pca9557_init(const pca9557_config_t *config,
-                              pca9557_interface_t *itf)
+static int pca9557_init(const pca9557_config_t *config, pca9557_interface_t *itf)
 {
     if (itf == NULL ||
         itf->write_reg == NULL ||
         itf->read_reg == NULL) {
-        BSP_LOGE(TAG, "PCA9557 初始化失败: I2C 接口为空");
-        return NULL;
+        DRIVER_LOGE(TAG, "PCA9557 初始化失败: I2C 接口为空");
+        return -1;
     }
 
     pca9557_config_t dev_config = {
@@ -130,163 +183,242 @@ pca9557_handle_t pca9557_init(const pca9557_config_t *config,
         dev_config = *config;
     }
 
-    pca9557_handle_t dev = (pca9557_handle_t)calloc(1, sizeof(struct pca9557_dev));
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "PCA9557 初始化失败: 内存分配失败");
-        return NULL;
+    memset(&s_board_pca9557, 0, sizeof(s_board_pca9557));
+    s_board_pca9557.config = dev_config;
+    s_board_pca9557.itf = *itf;
+    s_board_pca9557.output_cache = dev_config.output_init;
+    s_board_pca9557.direction_cache = dev_config.direction_init;
+    s_board_pca9557.polarity_cache = dev_config.polarity_init;
+    s_board_pca9557_inited = 1u;
+
+    if (pca9557_write_reg(PCA9557_REG_OUTPUT, s_board_pca9557.output_cache) != 0 ||
+        pca9557_write_reg(PCA9557_REG_POLARITY, s_board_pca9557.polarity_cache) != 0 ||
+        pca9557_write_reg(PCA9557_REG_CONFIG, s_board_pca9557.direction_cache) != 0) {
+        memset(&s_board_pca9557, 0, sizeof(s_board_pca9557));
+        s_board_pca9557_inited = 0u;
+        DRIVER_LOGE(TAG, "PCA9557 初始化失败: 初始寄存器写入失败");
+        return -2;
     }
 
-    dev->config = dev_config;
-    dev->itf = itf;
-    dev->output_cache = dev_config.output_init;
-    dev->direction_cache = dev_config.direction_init;
-    dev->polarity_cache = dev_config.polarity_init;
-
-    if (pca9557_write_reg(dev, PCA9557_REG_OUTPUT, dev->output_cache) != 0 ||
-        pca9557_write_reg(dev, PCA9557_REG_POLARITY, dev->polarity_cache) != 0 ||
-        pca9557_write_reg(dev, PCA9557_REG_CONFIG, dev->direction_cache) != 0) {
-        free(dev);
-        BSP_LOGE(TAG, "PCA9557 初始化失败: 初始寄存器写入失败");
-        return NULL;
-    }
-
-    BSP_LOGI(TAG, "PCA9557 初始化成功, output=0x%02X, polarity=0x%02X, direction=0x%02X",
-             (unsigned int)dev->output_cache,
-             (unsigned int)dev->polarity_cache,
-             (unsigned int)dev->direction_cache);
-    return dev;
-}
-
-void pca9557_deinit(pca9557_handle_t dev)
-{
-    if (dev == NULL) {
-        return;
-    }
-
-    free(dev);
-    BSP_LOGI(TAG, "PCA9557 驱动已释放");
-}
-
-int pca9557_read_input(pca9557_handle_t dev, uint8_t *value)
-{
-    return pca9557_read_reg(dev, PCA9557_REG_INPUT, value);
-}
-
-int pca9557_read_output(pca9557_handle_t dev, uint8_t *value)
-{
-    if (dev == NULL || value == NULL) {
-        BSP_LOGE(TAG, "PCA9557 读取输出缓存参数无效");
-        return -1;
-    }
-
-    *value = dev->output_cache;
-    BSP_LOGI(TAG, "PCA9557 输出缓存读取成功, value=0x%02X", (unsigned int)*value);
+    DRIVER_LOGI(TAG, "PCA9557 初始化成功, output=0x%02X, polarity=0x%02X, direction=0x%02X",
+             (unsigned int)s_board_pca9557.output_cache,
+             (unsigned int)s_board_pca9557.polarity_cache,
+             (unsigned int)s_board_pca9557.direction_cache);
     return 0;
 }
 
-int pca9557_write_output(pca9557_handle_t dev, uint8_t value)
+static void pca9557_deinit(void)
 {
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "PCA9557 写输出寄存器参数无效");
+    if (s_board_pca9557_inited == 0u) {
+        return;
+    }
+
+    memset(&s_board_pca9557, 0, sizeof(s_board_pca9557));
+    s_board_pca9557_inited = 0u;
+    DRIVER_LOGI(TAG, "PCA9557 驱动已释放");
+}
+
+static int pca9557_read_input(uint8_t *value)
+{
+    return pca9557_read_reg(PCA9557_REG_INPUT, value);
+}
+
+static int pca9557_write_output(uint8_t value)
+{
+    if (s_board_pca9557_inited == 0u) {
+        DRIVER_LOGE(TAG, "PCA9557 写输出寄存器失败: 未初始化");
         return -1;
     }
 
-    int ret = pca9557_write_reg(dev, PCA9557_REG_OUTPUT, value);
+    int ret = pca9557_write_reg(PCA9557_REG_OUTPUT, value);
     if (ret == 0) {
-        dev->output_cache = value;
-        BSP_LOGI(TAG, "PCA9557 输出寄存器更新成功, value=0x%02X", (unsigned int)value);
+        s_board_pca9557.output_cache = value;
+        DRIVER_LOGI(TAG, "PCA9557 输出寄存器更新成功, value=0x%02X", (unsigned int)value);
     }
 
     return ret;
 }
 
-int pca9557_set_pin_mode(pca9557_handle_t dev,
-                         pca9557_pin_t pin,
-                         pca9557_io_mode_t mode)
+static int pca9557_set_pin_mode(pca9557_pin_t pin,
+                                pca9557_io_mode_t mode)
 {
-    if (dev == NULL || !pca9557_is_valid_pin(pin)) {
-        BSP_LOGE(TAG, "PCA9557 设置引脚方向参数无效, dev=%p, pin=%d", dev, pin);
+    if (s_board_pca9557_inited == 0u || !pca9557_is_valid_pin(pin)) {
+        DRIVER_LOGE(TAG, "PCA9557 设置引脚方向参数无效, inited=%u, pin=%d",
+                    (unsigned int)s_board_pca9557_inited, pin);
         return -1;
     }
 
-    uint8_t direction = dev->direction_cache;
+    uint8_t direction = s_board_pca9557.direction_cache;
     if (mode == PCA9557_IO_INPUT) {
         direction |= (uint8_t)(1u << pin);
     } else {
         direction &= (uint8_t)~(1u << pin);
     }
 
-    return pca9557_set_direction(dev, direction);
+    return pca9557_set_direction(direction);
 }
 
-int pca9557_set_direction(pca9557_handle_t dev, uint8_t direction)
+static int pca9557_set_direction(uint8_t direction)
 {
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "PCA9557 设置方向寄存器参数无效");
+    if (s_board_pca9557_inited == 0u) {
+        DRIVER_LOGE(TAG, "PCA9557 设置方向寄存器失败: 未初始化");
         return -1;
     }
 
-    int ret = pca9557_write_reg(dev, PCA9557_REG_CONFIG, direction);
+    int ret = pca9557_write_reg(PCA9557_REG_CONFIG, direction);
     if (ret == 0) {
-        dev->direction_cache = direction;
-        BSP_LOGI(TAG, "PCA9557 方向寄存器更新成功, direction=0x%02X",
+        s_board_pca9557.direction_cache = direction;
+        DRIVER_LOGI(TAG, "PCA9557 方向寄存器更新成功, direction=0x%02X",
                  (unsigned int)direction);
     }
 
     return ret;
 }
 
-int pca9557_set_pin_level(pca9557_handle_t dev,
-                          pca9557_pin_t pin,
-                          pca9557_level_t level)
+static int pca9557_set_pin_level(pca9557_pin_t pin,
+                                 pca9557_level_t level)
 {
-    if (dev == NULL || !pca9557_is_valid_pin(pin)) {
-        BSP_LOGE(TAG, "PCA9557 设置引脚电平参数无效, dev=%p, pin=%d", dev, pin);
+    if (s_board_pca9557_inited == 0u || !pca9557_is_valid_pin(pin)) {
+        DRIVER_LOGE(TAG, "PCA9557 设置引脚电平参数无效, inited=%u, pin=%d",
+                    (unsigned int)s_board_pca9557_inited, pin);
         return -1;
     }
 
-    uint8_t output = dev->output_cache;
+    uint8_t output = s_board_pca9557.output_cache;
     if (level == PCA9557_LEVEL_HIGH) {
         output |= (uint8_t)(1u << pin);
     } else {
         output &= (uint8_t)~(1u << pin);
     }
 
-    return pca9557_write_output(dev, output);
+    return pca9557_write_output(output);
 }
 
-int pca9557_get_pin_level(pca9557_handle_t dev,
-                          pca9557_pin_t pin,
-                          pca9557_level_t *level)
+static int pca9557_get_pin_level(pca9557_pin_t pin,
+                                 pca9557_level_t *level)
 {
-    if (!pca9557_is_valid_pin(pin) || level == NULL) {
-        BSP_LOGE(TAG, "PCA9557 读取引脚电平参数无效, pin=%d, level=%p", pin, level);
+    if (s_board_pca9557_inited == 0u || !pca9557_is_valid_pin(pin) || level == NULL) {
+        DRIVER_LOGE(TAG, "PCA9557 读取引脚电平参数无效, inited=%u, pin=%d, level=%p",
+                    (unsigned int)s_board_pca9557_inited, pin, level);
         return -1;
     }
 
     uint8_t input = 0;
-    int ret = pca9557_read_input(dev, &input);
+    int ret = pca9557_read_input(&input);
     if (ret != 0) {
         return ret;
     }
 
     *level = (input & (uint8_t)(1u << pin)) ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW;
-    BSP_LOGI(TAG, "PCA9557 引脚电平读取成功, pin=%d, level=%d", pin, *level);
+    DRIVER_LOGI(TAG, "PCA9557 引脚电平读取成功, pin=%d, level=%d", pin, *level);
     return 0;
 }
 
-int pca9557_set_polarity(pca9557_handle_t dev, uint8_t polarity)
+int driver_pca9557_init(const driver_pca9557_bsp_ops_t *ops)
 {
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "PCA9557 设置极性寄存器参数无效");
+    if (s_board_pca9557_inited != 0u) {
+        DRIVER_LOGI(TAG, "本板 PCA9557 已初始化");
+        return 0;
+    }
+
+    if (ops == NULL ||
+        ops->get_i2c_bus_handle == NULL ||
+        ops->i2c_write_reg == NULL ||
+        ops->i2c_read_reg == NULL) {
+        DRIVER_LOGE(TAG, "本板 PCA9557 初始化失败: BSP I2C 能力为空");
         return -1;
     }
 
-    int ret = pca9557_write_reg(dev, PCA9557_REG_POLARITY, polarity);
+    if (ops->get_i2c_bus_handle() == NULL) {
+        DRIVER_LOGE(TAG, "本板 PCA9557 初始化失败: I2C 未初始化");
+        return -2;
+    }
+
+    s_board_ops = *ops;
+
+    pca9557_config_t config = {
+        .output_init = 0x00u,
+        .polarity_init = 0x00u,
+        .direction_init = (uint8_t)~((1u << DRIVER_PCA9557_CAMERA_PWDN_PIN) |
+                                     (1u << DRIVER_PCA9557_LCD_BL_PIN)),
+    };
+
+    if (pca9557_init(&config, &s_board_pca9557_itf) != 0) {
+        DRIVER_LOGE(TAG, "本板 PCA9557 初始化失败");
+        return -3;
+    }
+
+    DRIVER_LOGI(TAG, "本板 PCA9557 初始化成功");
+    return 0;
+}
+
+int driver_pca9557_deinit(void)
+{
+    if (s_board_pca9557_inited == 0u) {
+        return 0;
+    }
+
+    pca9557_deinit();
+    s_board_ops = (driver_pca9557_bsp_ops_t){0};
+    DRIVER_LOGI(TAG, "本板 PCA9557 已释放");
+    return 0;
+}
+
+int driver_pca9557_is_initialized(void)
+{
+    return (s_board_pca9557_inited != 0u) ? 1 : 0;
+}
+
+int driver_pca9557_set_pin_mode(pca9557_pin_t pin, pca9557_io_mode_t mode)
+{
+    if (s_board_pca9557_inited == 0u) {
+        DRIVER_LOGE(TAG, "PCA9557 设置引脚方向失败: 未初始化");
+        return -1;
+    }
+
+    return pca9557_set_pin_mode(pin, mode);
+}
+
+int driver_pca9557_set_pin_level(pca9557_pin_t pin, pca9557_level_t level)
+{
+    if (s_board_pca9557_inited == 0u) {
+        DRIVER_LOGE(TAG, "PCA9557 设置引脚电平失败: 未初始化");
+        return -1;
+    }
+
+    return pca9557_set_pin_level(pin, level);
+}
+
+int driver_pca9557_get_pin_level(pca9557_pin_t pin, pca9557_level_t *level)
+{
+    if (s_board_pca9557_inited == 0u) {
+        DRIVER_LOGE(TAG, "PCA9557 读取引脚电平失败: 未初始化");
+        return -1;
+    }
+
+    return pca9557_get_pin_level(pin, level);
+}
+
+int driver_pca9557_set_lcd_backlight(int on)
+{
+    int ret = driver_pca9557_set_pin_level(DRIVER_PCA9557_LCD_BL_PIN,
+                                           on != 0 ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW);
     if (ret == 0) {
-        dev->polarity_cache = polarity;
-        BSP_LOGI(TAG, "PCA9557 极性寄存器更新成功, polarity=0x%02X",
-                 (unsigned int)polarity);
+        DRIVER_LOGI(TAG, "LCD 背光%s", on != 0 ? "打开" : "关闭");
+    } else {
+        DRIVER_LOGE(TAG, "LCD 背光控制失败, ret=%d", ret);
+    }
+
+    return ret;
+}
+
+int driver_pca9557_set_camera_pwdn(pca9557_level_t level)
+{
+    int ret = driver_pca9557_set_pin_level(DRIVER_PCA9557_CAMERA_PWDN_PIN, level);
+    if (ret == 0) {
+        DRIVER_LOGI(TAG, "Camera PWDN 设置成功, level=%d", level);
+    } else {
+        DRIVER_LOGE(TAG, "Camera PWDN 设置失败, ret=%d", ret);
     }
 
     return ret;

@@ -9,7 +9,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
-#include "osal_log.h"
+#include "driver_config.h"
 #include "osal_task.h"
 
 #include <errno.h>
@@ -44,16 +44,24 @@ static void device_wifi_event_handler(void *arg,
                                       void *event_data)
 {
     (void)arg;
-    (void)event_data;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         s_wifi_started = 1;
+        DRIVER_LOGI(TAG, "WiFi STA start");
         (void)esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
         s_wifi_got_ip = 0;
+        DRIVER_LOGW(TAG, "WiFi STA disconnected, reason=%d", event != NULL ? event->reason : -1);
         (void)esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_wifi_got_ip = 1;
+        if (event != NULL) {
+            DRIVER_LOGI(TAG, "WiFi STA got ip: " IPSTR, IP2STR(&event->ip_info.ip));
+        } else {
+            DRIVER_LOGI(TAG, "WiFi STA got ip");
+        }
     }
 }
 
@@ -139,7 +147,7 @@ int driver_wifi_init(const driver_wifi_config_t *cfg)
         return device_wifi_err_to_int(ret);
     }
 
-    OSAL_LOGI(TAG, "WiFi STA 启动完成, ssid=%s", cfg->ssid);
+    DRIVER_LOGI(TAG, "WiFi STA 启动完成, ssid=%s", cfg->ssid);
     return device_wifi_wait_ip();
 }
 
@@ -194,12 +202,16 @@ int driver_wifi_is_ready(void)
     return s_wifi_got_ip ? 1 : 0;
 }
 
-static int device_wifi_resolve(const char *host, int port, struct sockaddr_storage *addr, socklen_t *addr_len)
+static int device_wifi_resolve(const char *host,
+                               int port,
+                               int socktype,
+                               struct sockaddr_storage *addr,
+                               socklen_t *addr_len)
 {
     char port_str[8];
     struct addrinfo hints = {
         .ai_family = AF_INET,
-        .ai_socktype = SOCK_DGRAM,
+        .ai_socktype = socktype,
     };
     struct addrinfo *res = NULL;
 
@@ -221,7 +233,7 @@ int driver_wifi_udp_connect(const char *host, int port)
         return -1;
     }
 
-    if (device_wifi_resolve(host, port, &s_udp_peer, &s_udp_peer_len) != 0) {
+    if (device_wifi_resolve(host, port, SOCK_DGRAM, &s_udp_peer, &s_udp_peer_len) != 0) {
         return -2;
     }
 
@@ -270,7 +282,7 @@ int driver_wifi_tcp_connect(const char *host, int port)
     struct sockaddr_storage addr;
     socklen_t addr_len = 0;
     if (!s_wifi_got_ip || host == NULL || port <= 0 ||
-        device_wifi_resolve(host, port, &addr, &addr_len) != 0) {
+        device_wifi_resolve(host, port, SOCK_STREAM, &addr, &addr_len) != 0) {
         return -1;
     }
 

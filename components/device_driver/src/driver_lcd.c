@@ -4,7 +4,7 @@
  */
 #include "driver_lcd.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 #include "bsp_i2c.h"
 #include "driver_pca9557.h"
 #include "bsp_spi.h"
@@ -18,9 +18,6 @@
 #include "esp_lcd_touch_ft5x06.h"
 
 #include <stdbool.h>
-
-#define DRIVER_LCD_PCA9557_I2C_ADDR      0x19u
-#define DRIVER_LCD_PCA9557_I2C_SPEED_HZ  BSP_I2C_SCL_SPEED_HZ
 
 /**
  * @brief LCD 日志标签。
@@ -58,37 +55,6 @@ static esp_lcd_panel_io_handle_t s_lcd_touch_io = NULL;
 static esp_lcd_touch_handle_t s_lcd_touch = NULL;
 
 /**
- * @brief LCD 背光使用的 PCA9557 句柄。
- */
-static pca9557_handle_t s_lcd_pca9557 = NULL;
-
-static int driver_lcd_pca9557_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
-{
-    return bsp_i2c_write_reg(DRIVER_LCD_PCA9557_I2C_ADDR,
-                             DRIVER_LCD_PCA9557_I2C_SPEED_HZ,
-                             reg,
-                             data,
-                             len);
-}
-
-static int driver_lcd_pca9557_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
-{
-    return bsp_i2c_read_reg(DRIVER_LCD_PCA9557_I2C_ADDR,
-                            DRIVER_LCD_PCA9557_I2C_SPEED_HZ,
-                            reg,
-                            data,
-                            len);
-}
-
-/**
- * @brief LCD 板级 PCA9557 I2C 访问接口。
- */
-static pca9557_interface_t s_lcd_pca9557_itf = {
-    .write_reg = driver_lcd_pca9557_write_reg,
-    .read_reg = driver_lcd_pca9557_read_reg,
-};
-
-/**
  * @brief 将底层驱动错误码转换为 BSP 通用 int 返回值。
  *
  * @param[in] ret 底层驱动错误码。
@@ -100,49 +66,34 @@ static int driver_lcd_err_to_int(int ret)
 }
 
 /**
- * @brief 通过 PCA9557 准备 LCD 背光和板级相关 IO。
- *
- * 当前硬件中 PCA9557 IO5 连接 LCD 背光，高电平点亮；IO1 连接 OV-PWDN，
- * 输出低电平保持摄像头唤醒。
+ * @brief 检查并打开 LCD 背光。
  *
  * @return 成功返回 0；失败返回负值。
  */
-static int driver_lcd_board_io_init(void)
+static int driver_lcd_backlight_on(void)
 {
-    if (s_lcd_pca9557 != NULL) {
-        BSP_LOGI(TAG, "LCD 板级 IO 已初始化");
-        return 0;
-    }
-
-    if (bsp_i2c_get_bus_handle() == NULL) {
-        BSP_LOGE(TAG, "LCD 板级 IO 初始化失败: I2C 未初始化");
+    if (driver_pca9557_is_initialized() == 0) {
+        DRIVER_LOGE(TAG, "LCD 背光打开失败: PCA9557 未初始化");
         return -1;
     }
 
-    pca9557_config_t config = {
-        .output_init = (uint8_t)(1u << PCA9557_PIN_5),
-        .polarity_init = 0x00u,
-        .direction_init = (uint8_t)~((1u << PCA9557_PIN_1) | (1u << PCA9557_PIN_5)),
-    };
-
-    s_lcd_pca9557 = pca9557_init(&config, &s_lcd_pca9557_itf);
-    if (s_lcd_pca9557 == NULL) {
-        BSP_LOGE(TAG, "LCD 板级 IO 初始化失败: PCA9557 初始化失败");
-        return -2;
+    int ret = driver_pca9557_set_lcd_backlight(1);
+    if (ret != 0) {
+        DRIVER_LOGE(TAG, "LCD 背光打开失败, ret=%d", ret);
+        return ret;
     }
 
-    BSP_LOGI(TAG, "LCD 背光已打开, pca_io=5");
     return 0;
 }
 
 int driver_lcd_display_init(void)
 {
     if (s_lcd_panel != NULL) {
-        BSP_LOGI(TAG, "LCD 显示已初始化");
+        DRIVER_LOGI(TAG, "LCD 显示已初始化");
         return 0;
     }
 
-    int ret = driver_lcd_board_io_init();
+    int ret = driver_lcd_backlight_on();
     if (ret != 0) {
         return ret;
     }
@@ -161,7 +112,7 @@ int driver_lcd_display_init(void)
                                                       &io_spi_cfg,
                                                       &s_lcd_panel_io));
     if (ret != 0) {
-        BSP_LOGE(TAG, "LCD SPI panel IO 创建失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "LCD SPI panel IO 创建失败, ret=%d", ret);
         driver_lcd_deinit();
         return ret;
     }
@@ -176,7 +127,7 @@ int driver_lcd_display_init(void)
                                                       &panel_cfg,
                                                       &s_lcd_panel));
     if (ret != 0) {
-        BSP_LOGE(TAG, "ST7789 面板创建失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "ST7789 面板创建失败, ret=%d", ret);
         driver_lcd_deinit();
         return ret;
     }
@@ -203,12 +154,12 @@ int driver_lcd_display_init(void)
         ret = driver_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, true));
     }
     if (ret != 0) {
-        BSP_LOGE(TAG, "ST7789 面板初始化失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "ST7789 面板初始化失败, ret=%d", ret);
         driver_lcd_deinit();
         return ret;
     }
 
-    BSP_LOGI(TAG, "LCD 显示初始化成功, res=%ux%u, pclk=%u",
+    DRIVER_LOGI(TAG, "LCD 显示初始化成功, res=%ux%u, pclk=%u",
              (unsigned int)driver_lcd_H_RES,
              (unsigned int)driver_lcd_V_RES,
              (unsigned int)driver_lcd_SPI_PCLK_HZ);
@@ -218,13 +169,13 @@ int driver_lcd_display_init(void)
 int driver_lcd_touch_init(void)
 {
     if (s_lcd_touch != NULL) {
-        BSP_LOGI(TAG, "LCD 触摸已初始化");
+        DRIVER_LOGI(TAG, "LCD 触摸已初始化");
         return 0;
     }
 
     i2c_master_bus_handle_t i2c_bus = (i2c_master_bus_handle_t)bsp_i2c_get_bus_handle();
     if (i2c_bus == NULL) {
-        BSP_LOGE(TAG, "LCD 触摸初始化失败: I2C 未初始化");
+        DRIVER_LOGE(TAG, "LCD 触摸初始化失败: I2C 未初始化");
         return -1;
     }
 
@@ -233,7 +184,7 @@ int driver_lcd_touch_init(void)
                                                           &touch_io_cfg,
                                                           &s_lcd_touch_io));
     if (ret != 0) {
-        BSP_LOGE(TAG, "LCD 触摸 I2C panel IO 创建失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "LCD 触摸 I2C panel IO 创建失败, ret=%d", ret);
         return ret;
     }
 
@@ -261,13 +212,13 @@ int driver_lcd_touch_init(void)
                                                           &touch_cfg,
                                                           &s_lcd_touch));
     if (ret != 0) {
-        BSP_LOGE(TAG, "FT6336/FT5x06 触摸初始化失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "FT6336/FT5x06 触摸初始化失败, ret=%d", ret);
         esp_lcd_panel_io_del(s_lcd_touch_io);
         s_lcd_touch_io = NULL;
         return ret;
     }
 
-    BSP_LOGI(TAG, "LCD 触摸初始化成功, int=%d", driver_lcd_TOUCH_INT_IO);
+    DRIVER_LOGI(TAG, "LCD 触摸初始化成功, int=%d", driver_lcd_TOUCH_INT_IO);
     return 0;
 }
 
@@ -284,7 +235,7 @@ int driver_lcd_init(void)
         return ret;
     }
 
-    BSP_LOGI(TAG, "LCD 显示与触摸初始化完成");
+    DRIVER_LOGI(TAG, "LCD 显示与触摸初始化完成");
     return 0;
 }
 
@@ -298,7 +249,7 @@ int driver_lcd_deinit(void)
         if (ret == 0) {
             ret = del_ret;
         }
-        BSP_LOGI(TAG, "LCD 触摸控制器已释放, ret=%d", del_ret);
+        DRIVER_LOGI(TAG, "LCD 触摸控制器已释放, ret=%d", del_ret);
     }
 
     if (s_lcd_touch_io != NULL) {
@@ -307,7 +258,7 @@ int driver_lcd_deinit(void)
         if (ret == 0) {
             ret = del_ret;
         }
-        BSP_LOGI(TAG, "LCD 触摸 IO 已释放, ret=%d", del_ret);
+        DRIVER_LOGI(TAG, "LCD 触摸 IO 已释放, ret=%d", del_ret);
     }
 
     if (s_lcd_panel != NULL) {
@@ -316,7 +267,7 @@ int driver_lcd_deinit(void)
         if (ret == 0) {
             ret = del_ret;
         }
-        BSP_LOGI(TAG, "LCD 显示面板已释放, ret=%d", del_ret);
+        DRIVER_LOGI(TAG, "LCD 显示面板已释放, ret=%d", del_ret);
     }
 
     if (s_lcd_panel_io != NULL) {
@@ -325,13 +276,15 @@ int driver_lcd_deinit(void)
         if (ret == 0) {
             ret = del_ret;
         }
-        BSP_LOGI(TAG, "LCD 显示 IO 已释放, ret=%d", del_ret);
+        DRIVER_LOGI(TAG, "LCD 显示 IO 已释放, ret=%d", del_ret);
     }
 
-    if (s_lcd_pca9557 != NULL) {
-        pca9557_deinit(s_lcd_pca9557);
-        s_lcd_pca9557 = NULL;
-        BSP_LOGI(TAG, "LCD 板级 IO 已释放");
+    if (driver_pca9557_is_initialized() != 0) {
+        int bl_ret = driver_pca9557_set_lcd_backlight(0);
+        if (ret == 0) {
+            ret = bl_ret;
+        }
+        DRIVER_LOGI(TAG, "LCD 背光已关闭, ret=%d", bl_ret);
     }
 
     return ret;
@@ -340,15 +293,32 @@ int driver_lcd_deinit(void)
 int driver_lcd_display_on(int on)
 {
     if (s_lcd_panel == NULL) {
-        BSP_LOGE(TAG, "LCD 显示开关失败: 显示未初始化");
+        DRIVER_LOGE(TAG, "LCD 显示开关失败: 显示未初始化");
         return -1;
     }
 
-    int ret = driver_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, on != 0));
+    if (driver_pca9557_is_initialized() == 0) {
+        DRIVER_LOGE(TAG, "LCD 显示开关失败: PCA9557 未初始化");
+        return -2;
+    }
+
+    int ret = 0;
+    if (on != 0) {
+        ret = driver_pca9557_set_lcd_backlight(1);
+    }
+
     if (ret == 0) {
-        BSP_LOGI(TAG, "LCD 显示%s", on != 0 ? "打开" : "关闭");
+        ret = driver_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, on != 0));
+    }
+
+    if (ret == 0 && on == 0) {
+        ret = driver_pca9557_set_lcd_backlight(0);
+    }
+
+    if (ret == 0) {
+        DRIVER_LOGI(TAG, "LCD 显示%s", on != 0 ? "打开" : "关闭");
     } else {
-        BSP_LOGE(TAG, "LCD 显示开关失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "LCD 显示开关失败, ret=%d", ret);
     }
 
     return ret;
@@ -364,7 +334,7 @@ int driver_lcd_draw_bitmap(int x_start,
         x_start < 0 || y_start < 0 ||
         x_end <= x_start || y_end <= y_start ||
         x_end > (int)driver_lcd_H_RES || y_end > (int)driver_lcd_V_RES) {
-        BSP_LOGE(TAG, "LCD 画图参数无效, panel=%p, data=%p, area=(%d,%d)-(%d,%d)",
+        DRIVER_LOGE(TAG, "LCD 画图参数无效, panel=%p, data=%p, area=(%d,%d)-(%d,%d)",
                  s_lcd_panel, color_data, x_start, y_start, x_end, y_end);
         return -1;
     }
@@ -376,9 +346,9 @@ int driver_lcd_draw_bitmap(int x_start,
                                                            y_end,
                                                            color_data));
     if (ret == 0) {
-        BSP_LOGI(TAG, "LCD 画图成功, area=(%d,%d)-(%d,%d)", x_start, y_start, x_end, y_end);
+        DRIVER_LOGI(TAG, "LCD 画图成功, area=(%d,%d)-(%d,%d)", x_start, y_start, x_end, y_end);
     } else {
-        BSP_LOGE(TAG, "LCD 画图失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "LCD 画图失败, ret=%d", ret);
     }
 
     return ret;
@@ -387,7 +357,7 @@ int driver_lcd_draw_bitmap(int x_start,
 int driver_lcd_fill_screen(uint16_t color)
 {
     if (s_lcd_panel == NULL) {
-        BSP_LOGE(TAG, "LCD 清屏失败: 显示未初始化");
+        DRIVER_LOGE(TAG, "LCD 清屏失败: 显示未初始化");
         return -1;
     }
 
@@ -404,12 +374,12 @@ int driver_lcd_fill_screen(uint16_t color)
                                                                (int)y + 1,
                                                                line));
         if (ret != 0) {
-            BSP_LOGE(TAG, "LCD 清屏失败, y=%u, ret=%d", (unsigned int)y, ret);
+            DRIVER_LOGE(TAG, "LCD 清屏失败, y=%u, ret=%d", (unsigned int)y, ret);
             return ret;
         }
     }
 
-    BSP_LOGI(TAG, "LCD 清屏成功, color=0x%04X", (unsigned int)color);
+    DRIVER_LOGI(TAG, "LCD 清屏成功, color=0x%04X", (unsigned int)color);
     return 0;
 }
 
@@ -418,7 +388,7 @@ int driver_lcd_read_touch(driver_lcd_touch_point_t *points,
                        uint8_t *point_num)
 {
     if (s_lcd_touch == NULL || points == NULL || point_num == NULL || max_points == 0) {
-        BSP_LOGE(TAG, "LCD 触摸读取参数无效, touch=%p, points=%p, point_num=%p, max=%u",
+        DRIVER_LOGE(TAG, "LCD 触摸读取参数无效, touch=%p, points=%p, point_num=%p, max=%u",
                  s_lcd_touch, points, point_num, (unsigned int)max_points);
         return -1;
     }
@@ -431,7 +401,7 @@ int driver_lcd_read_touch(driver_lcd_touch_point_t *points,
 
     int ret = driver_lcd_err_to_int(esp_lcd_touch_read_data(s_lcd_touch));
     if (ret != 0) {
-        BSP_LOGE(TAG, "LCD 触摸原始数据读取失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "LCD 触摸原始数据读取失败, ret=%d", ret);
         return ret;
     }
 
@@ -440,7 +410,7 @@ int driver_lcd_read_touch(driver_lcd_touch_point_t *points,
                                                     point_num,
                                                     read_max));
     if (ret != 0) {
-        BSP_LOGE(TAG, "LCD 触摸坐标解析失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "LCD 触摸坐标解析失败, ret=%d", ret);
         return ret;
     }
 
@@ -452,7 +422,7 @@ int driver_lcd_read_touch(driver_lcd_touch_point_t *points,
     }
 
     if (*point_num > 0) {
-        BSP_LOGI(TAG, "LCD 触摸读取成功, points=%u, x=%u, y=%u",
+        DRIVER_LOGI(TAG, "LCD 触摸读取成功, points=%u, x=%u, y=%u",
                  (unsigned int)*point_num,
                  (unsigned int)points[0].x,
                  (unsigned int)points[0].y);

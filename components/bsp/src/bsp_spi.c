@@ -4,7 +4,7 @@
  */
 #include "bsp_spi.h"
 
-#include "bsp_common.h"
+#include "bsp_config.h"
 
 #include <stdint.h>
 

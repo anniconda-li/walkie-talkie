@@ -4,8 +4,9 @@
  */
 #include "driver_camera.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 #include "bsp_i2c.h"
+#include "driver_pca9557.h"
 #include "esp_idf_version.h"
 
 // #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 4, 0)
@@ -36,8 +37,12 @@ static int driver_camera_err_to_int(int ret)
 int driver_camera_init(void)
 {
     if (bsp_i2c_get_bus_handle() == NULL) {
-        BSP_LOGE(TAG, "摄像头初始化失败: I2C 未初始化");
+        DRIVER_LOGE(TAG, "摄像头初始化失败: I2C 未初始化");
         return -1;
+    }
+
+    if (driver_pca9557_is_initialized() != 0) {
+        (void)driver_pca9557_set_camera_pwdn(PCA9557_LEVEL_LOW);
     }
 
     camera_config_t camera_config = {
@@ -71,11 +76,11 @@ int driver_camera_init(void)
 
     int ret = driver_camera_err_to_int(esp_camera_init(&camera_config));
     if (ret != 0) {
-        BSP_LOGE(TAG, "摄像头初始化失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "摄像头初始化失败, ret=%d", ret);
         return ret;
     }
 
-    BSP_LOGI(TAG, "摄像头初始化成功, frame_size=%d, pixel_format=%d",
+    DRIVER_LOGI(TAG, "摄像头初始化成功, frame_size=%d, pixel_format=%d",
              FRAMESIZE_240X240, PIXFORMAT_RGB565);
     return 0;
 }
@@ -84,9 +89,12 @@ int driver_camera_deinit(void)
 {
     int ret = driver_camera_err_to_int(esp_camera_deinit());
     if (ret == 0) {
-        BSP_LOGI(TAG, "摄像头驱动释放成功");
+        if (driver_pca9557_is_initialized() != 0) {
+            (void)driver_pca9557_set_camera_pwdn(PCA9557_LEVEL_HIGH);
+        }
+        DRIVER_LOGI(TAG, "摄像头驱动释放成功");
     } else {
-        BSP_LOGE(TAG, "摄像头驱动释放失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "摄像头驱动释放失败, ret=%d", ret);
     }
 
     return ret;
@@ -96,11 +104,11 @@ camera_fb_t *driver_camera_get_frame(void)
 {
     camera_fb_t *fb = esp_camera_fb_get();
     if (fb == NULL) {
-        BSP_LOGE(TAG, "摄像头取帧失败");
+        DRIVER_LOGE(TAG, "摄像头取帧失败");
         return NULL;
     }
 
-    BSP_LOGI(TAG, "摄像头取帧成功, width=%u, height=%u, len=%u",
+    DRIVER_LOGI(TAG, "摄像头取帧成功, width=%u, height=%u, len=%u",
              (unsigned int)fb->width,
              (unsigned int)fb->height,
              (unsigned int)fb->len);
@@ -110,19 +118,19 @@ camera_fb_t *driver_camera_get_frame(void)
 void driver_camera_return_frame(camera_fb_t *fb)
 {
     if (fb == NULL) {
-        BSP_LOGW(TAG, "摄像头归还空帧，忽略");
+        DRIVER_LOGW(TAG, "摄像头归还空帧，忽略");
         return;
     }
 
     esp_camera_fb_return(fb);
-    BSP_LOGI(TAG, "摄像头帧缓存已归还");
+    DRIVER_LOGI(TAG, "摄像头帧缓存已归还");
 }
 
 sensor_t *driver_camera_get_sensor(void)
 {
     sensor_t *sensor = esp_camera_sensor_get();
     if (sensor == NULL) {
-        BSP_LOGE(TAG, "获取摄像头 sensor 失败");
+        DRIVER_LOGE(TAG, "获取摄像头 sensor 失败");
     }
 
     return sensor;

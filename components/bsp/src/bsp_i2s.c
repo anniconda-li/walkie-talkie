@@ -4,7 +4,7 @@
  */
 #include "bsp_i2s.h"
 
-#include "bsp_common.h"
+#include "bsp_config.h"
 #include "driver/i2s_std.h"
 
 #include <stdbool.h>
@@ -32,9 +32,15 @@ static uint32_t s_i2s_read_log_count = 0;
 static uint32_t s_i2s_write_log_count = 0;
 
 /**
- * @brief Audio I2S controller.
+ * @brief ES 音频 I2S controller.
  */
-#define BSP_I2S_AUDIO_PORT I2S_NUM_0
+#define BSP_I2S_ES_PORT I2S_NUM_0
+
+/**
+ * @brief INMP441/MAX98357A 分离 I2S controller。
+ */
+#define BSP_I2S_INMP441_PORT   I2S_NUM_0
+#define BSP_I2S_MAX98357A_PORT I2S_NUM_1
 
 /**
  * @brief I2S 音频采样率。
@@ -57,7 +63,7 @@ static int bsp_i2s_err_to_int(int ret)
  *
  * @return I2S standard 模式配置。
  */
-static i2s_std_config_t bsp_i2s_get_std_config(void)
+static i2s_std_config_t bsp_i2s_get_es_std_config(void)
 {
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
@@ -86,6 +92,70 @@ static i2s_std_config_t bsp_i2s_get_std_config(void)
 }
 
 /**
+ * @brief 获取 INMP441 RX I2S 标准模式配置。
+ *
+ * @return I2S standard 模式配置。
+ */
+static i2s_std_config_t bsp_i2s_get_inmp441_std_config(void)
+{
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = {
+            .sample_rate_hz = BSP_I2S_SAMPLE_RATE_HZ,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .ext_clk_freq_hz = 0,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+        },
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                        I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = GPIO_NUM_NC,
+            .bclk = BSP_AUDIO_INMP441_BCLK_IO,
+            .ws = BSP_AUDIO_INMP441_WS_IO,
+            .dout = GPIO_NUM_NC,
+            .din = BSP_AUDIO_INMP441_DIN_IO,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+    return std_cfg;
+}
+
+/**
+ * @brief 获取 MAX98357A TX I2S 标准模式配置。
+ *
+ * @return I2S standard 模式配置。
+ */
+static i2s_std_config_t bsp_i2s_get_max98357a_std_config(void)
+{
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = {
+            .sample_rate_hz = BSP_I2S_SAMPLE_RATE_HZ,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .ext_clk_freq_hz = 0,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+        },
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                        I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = GPIO_NUM_NC,
+            .bclk = BSP_AUDIO_MAX98357A_BCLK_IO,
+            .ws = BSP_AUDIO_MAX98357A_WS_IO,
+            .dout = BSP_AUDIO_MAX98357A_DOUT_IO,
+            .din = GPIO_NUM_NC,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            },
+        },
+    };
+    return std_cfg;
+}
+
+/**
  * @brief 创建并配置音频 I2S RX/TX 通道。
  *
  * @return 成功返回 0；失败返回负值。
@@ -102,7 +172,8 @@ static int bsp_i2s_channels_init(void)
         (void)bsp_i2s_deinit();
     }
 
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_AUDIO_PORT,
+#if BSP_AUDIO_BACKEND == BSP_AUDIO_BACKEND_ES
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_ES_PORT,
                                                             I2S_ROLE_MASTER);
     int ret = bsp_i2s_err_to_int(i2s_new_channel(&chan_cfg,
                                                  &s_i2s_tx_handle,
@@ -114,7 +185,7 @@ static int bsp_i2s_channels_init(void)
         return ret;
     }
 
-    i2s_std_config_t std_cfg = bsp_i2s_get_std_config();
+    i2s_std_config_t std_cfg = bsp_i2s_get_es_std_config();
     ret = bsp_i2s_err_to_int(i2s_channel_init_std_mode(s_i2s_tx_handle, &std_cfg));
     if (ret != 0) {
         (void)i2s_del_channel(s_i2s_tx_handle);
@@ -158,13 +229,95 @@ static int bsp_i2s_channels_init(void)
 
     BSP_LOGI(TAG,
              "音频 I2S 初始化成功, port=%d, sample_rate=%u, mclk=%d, bclk=%d, lrck=%d, dout=%d, din=%d",
-             BSP_I2S_AUDIO_PORT,
+             BSP_I2S_ES_PORT,
              (unsigned int)BSP_I2S_SAMPLE_RATE_HZ,
              BSP_AUDIO_MCLK_IO,
              BSP_AUDIO_BCLK_IO,
              BSP_AUDIO_LRCK_IO,
              BSP_AUDIO_DOUT_IO,
              BSP_AUDIO_DIN_IO);
+#elif BSP_AUDIO_BACKEND == BSP_AUDIO_BACKEND_I2S
+    i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_MAX98357A_PORT,
+                                                               I2S_ROLE_MASTER);
+    int ret = bsp_i2s_err_to_int(i2s_new_channel(&tx_chan_cfg,
+                                                 &s_i2s_tx_handle,
+                                                 NULL));
+    if (ret != 0) {
+        s_i2s_tx_handle = NULL;
+        BSP_LOGE(TAG, "MAX98357A I2S TX 通道创建失败, ret=%d", ret);
+        return ret;
+    }
+
+    i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BSP_I2S_INMP441_PORT,
+                                                               I2S_ROLE_MASTER);
+    ret = bsp_i2s_err_to_int(i2s_new_channel(&rx_chan_cfg,
+                                             NULL,
+                                             &s_i2s_rx_handle));
+    if (ret != 0) {
+        (void)i2s_del_channel(s_i2s_tx_handle);
+        s_i2s_tx_handle = NULL;
+        s_i2s_rx_handle = NULL;
+        BSP_LOGE(TAG, "INMP441 I2S RX 通道创建失败, ret=%d", ret);
+        return ret;
+    }
+
+    i2s_std_config_t tx_std_cfg = bsp_i2s_get_max98357a_std_config();
+    ret = bsp_i2s_err_to_int(i2s_channel_init_std_mode(s_i2s_tx_handle, &tx_std_cfg));
+    if (ret != 0) {
+        (void)i2s_del_channel(s_i2s_tx_handle);
+        (void)i2s_del_channel(s_i2s_rx_handle);
+        s_i2s_tx_handle = NULL;
+        s_i2s_rx_handle = NULL;
+        BSP_LOGE(TAG, "MAX98357A I2S TX 标准模式配置失败, ret=%d", ret);
+        return ret;
+    }
+
+    i2s_std_config_t rx_std_cfg = bsp_i2s_get_inmp441_std_config();
+    ret = bsp_i2s_err_to_int(i2s_channel_init_std_mode(s_i2s_rx_handle, &rx_std_cfg));
+    if (ret != 0) {
+        (void)i2s_del_channel(s_i2s_tx_handle);
+        (void)i2s_del_channel(s_i2s_rx_handle);
+        s_i2s_tx_handle = NULL;
+        s_i2s_rx_handle = NULL;
+        BSP_LOGE(TAG, "INMP441 I2S RX 标准模式配置失败, ret=%d", ret);
+        return ret;
+    }
+
+    ret = bsp_i2s_err_to_int(i2s_channel_enable(s_i2s_tx_handle));
+    if (ret != 0) {
+        (void)i2s_del_channel(s_i2s_tx_handle);
+        (void)i2s_del_channel(s_i2s_rx_handle);
+        s_i2s_tx_handle = NULL;
+        s_i2s_rx_handle = NULL;
+        BSP_LOGE(TAG, "MAX98357A I2S TX 通道使能失败, ret=%d", ret);
+        return ret;
+    }
+
+    ret = bsp_i2s_err_to_int(i2s_channel_enable(s_i2s_rx_handle));
+    if (ret != 0) {
+        (void)i2s_channel_disable(s_i2s_tx_handle);
+        (void)i2s_del_channel(s_i2s_tx_handle);
+        (void)i2s_del_channel(s_i2s_rx_handle);
+        s_i2s_tx_handle = NULL;
+        s_i2s_rx_handle = NULL;
+        BSP_LOGE(TAG, "INMP441 I2S RX 通道使能失败, ret=%d", ret);
+        return ret;
+    }
+
+    BSP_LOGI(TAG,
+             "音频 I2S 初始化成功, rx_port=%d, tx_port=%d, rate=%u, inmp_din=%d, inmp_bclk=%d, inmp_ws=%d, max_dout=%d, max_bclk=%d, max_ws=%d",
+             BSP_I2S_INMP441_PORT,
+             BSP_I2S_MAX98357A_PORT,
+             (unsigned int)BSP_I2S_SAMPLE_RATE_HZ,
+             BSP_AUDIO_INMP441_DIN_IO,
+             BSP_AUDIO_INMP441_BCLK_IO,
+             BSP_AUDIO_INMP441_WS_IO,
+             BSP_AUDIO_MAX98357A_DOUT_IO,
+             BSP_AUDIO_MAX98357A_BCLK_IO,
+             BSP_AUDIO_MAX98357A_WS_IO);
+#else
+#error "Unsupported BSP_AUDIO_BACKEND selection"
+#endif
     return 0;
 }
 

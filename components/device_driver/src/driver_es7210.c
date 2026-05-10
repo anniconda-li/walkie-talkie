@@ -4,11 +4,10 @@
  */
 #include "driver_es7210.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 #include "osal_task.h"
 
 #include <string.h>
-#include <stdlib.h>
 
 static const char *TAG = "driver_es7210";
 
@@ -48,22 +47,29 @@ static const char *TAG = "driver_es7210";
 #define DRIVER_ES7210_I2C_ADDR_ALT  0x20u
 #define DRIVER_ES7210_MAX_FRAMES    256u
 
+typedef struct {
+    int (*write_reg)(uint8_t reg, const uint8_t *data, uint16_t len);
+    int (*read_reg)(uint8_t reg, uint8_t *data, uint16_t len);
+    int (*read)(uint8_t *data, uint32_t len, uint32_t timeout_ms);
+} es7210_interface_t;
+
 struct es7210_dev {
     es7210_interface_t itf;
     uint32_t read_log_count;
 };
 
-static es7210_handle_t s_es7210 = NULL;
+static struct es7210_dev s_es7210;
+static uint8_t s_es7210_inited = 0u;
 static driver_es7210_bsp_ops_t s_driver_ops;
 static uint16_t s_driver_addr = DRIVER_ES7210_I2C_ADDR;
 static uint8_t s_driver_raw_buf[DRIVER_ES7210_MAX_FRAMES * 4u];
 
-static int es7210_write_u8(es7210_handle_t dev, uint8_t reg, uint8_t value)
+static int es7210_write_u8(uint8_t reg, uint8_t value)
 {
-    return dev->itf.write_reg(reg, &value, 1u);
+    return s_es7210.itf.write_reg(reg, &value, 1u);
 }
 
-static int es7210_config_default(es7210_handle_t dev)
+static int es7210_config_default(void)
 {
     static const struct {
         uint8_t reg;
@@ -107,9 +113,9 @@ static int es7210_config_default(es7210_handle_t dev)
     };
 
     for (unsigned int i = 0; i < sizeof(init_seq) / sizeof(init_seq[0]); i++) {
-        int ret = es7210_write_u8(dev, init_seq[i].reg, init_seq[i].value);
+        int ret = es7210_write_u8(init_seq[i].reg, init_seq[i].value);
         if (ret != 0) {
-            BSP_LOGE(TAG, "ES7210 寄存器配置失败, reg=0x%02X, ret=%d",
+            DRIVER_LOGE(TAG, "ES7210 寄存器配置失败, reg=0x%02X, ret=%d",
                      (unsigned int)init_seq[i].reg, ret);
             return ret;
         }
@@ -118,65 +124,61 @@ static int es7210_config_default(es7210_handle_t dev)
         }
     }
 
-    BSP_LOGI(TAG, "ES7210 芯片配置完成, sample_rate=16000, bits=16");
+    DRIVER_LOGI(TAG, "ES7210 芯片配置完成, sample_rate=16000, bits=16");
     return 0;
 }
 
-es7210_handle_t es7210_init(es7210_interface_t *itf)
+static int es7210_init(es7210_interface_t *itf)
 {
     if (itf == NULL || itf->write_reg == NULL || itf->read_reg == NULL || itf->read == NULL) {
-        BSP_LOGE(TAG, "ES7210 初始化失败: 底层能力为空");
-        return NULL;
-    }
-
-    es7210_handle_t dev = (es7210_handle_t)calloc(1, sizeof(struct es7210_dev));
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "ES7210 初始化失败: 内存分配失败");
-        return NULL;
-    }
-
-    dev->itf = *itf;
-    if (es7210_config_default(dev) != 0) {
-        free(dev);
-        return NULL;
-    }
-
-    BSP_LOGI(TAG, "ES7210 驱动初始化成功");
-    return dev;
-}
-
-void es7210_deinit(es7210_handle_t dev)
-{
-    if (dev == NULL) {
-        return;
-    }
-
-    (void)es7210_write_u8(dev, ES7210_RESET_REG00, 0xFF);
-    free(dev);
-    BSP_LOGI(TAG, "ES7210 驱动已释放");
-}
-
-int es7210_read(es7210_handle_t dev,
-                uint8_t *data,
-                uint32_t len,
-                uint32_t timeout_ms)
-{
-    if (dev == NULL || data == NULL || len == 0) {
-        BSP_LOGE(TAG, "ES7210 读取参数无效, dev=%p, data=%p, len=%u",
-                 dev, data, (unsigned int)len);
+        DRIVER_LOGE(TAG, "ES7210 初始化失败: 底层能力为空");
         return -1;
     }
 
-    int ret = dev->itf.read(data, len, timeout_ms);
+    memset(&s_es7210, 0, sizeof(s_es7210));
+    s_es7210.itf = *itf;
+    if (es7210_config_default() != 0) {
+        memset(&s_es7210, 0, sizeof(s_es7210));
+        return -2;
+    }
+
+    s_es7210_inited = 1u;
+    DRIVER_LOGI(TAG, "ES7210 驱动初始化成功");
+    return 0;
+}
+
+static void es7210_deinit(void)
+{
+    if (s_es7210_inited == 0u) {
+        return;
+    }
+
+    (void)es7210_write_u8(ES7210_RESET_REG00, 0xFF);
+    memset(&s_es7210, 0, sizeof(s_es7210));
+    s_es7210_inited = 0u;
+    DRIVER_LOGI(TAG, "ES7210 驱动已释放");
+}
+
+static int es7210_read(uint8_t *data,
+                       uint32_t len,
+                       uint32_t timeout_ms)
+{
+    if (s_es7210_inited == 0u || data == NULL || len == 0) {
+        DRIVER_LOGE(TAG, "ES7210 读取参数无效, inited=%u, data=%p, len=%u",
+                 (unsigned int)s_es7210_inited, data, (unsigned int)len);
+        return -1;
+    }
+
+    int ret = s_es7210.itf.read(data, len, timeout_ms);
     if (ret >= 0) {
-        dev->read_log_count++;
-        if ((dev->read_log_count % 100u) != 0u) {
+        s_es7210.read_log_count++;
+        if ((s_es7210.read_log_count % 100u) != 0u) {
             return ret;
         }
-        BSP_LOGI(TAG, "ES7210 读取完成, request=%u, read=%d",
+        DRIVER_LOGI(TAG, "ES7210 读取完成, request=%u, read=%d",
                  (unsigned int)len, ret);
     } else {
-        BSP_LOGE(TAG, "ES7210 读取失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "ES7210 读取失败, ret=%d", ret);
     }
 
     return ret;
@@ -223,14 +225,14 @@ static int16_t driver_es7210_read_i16_le(const uint8_t *data, uint32_t sample_in
 
 int driver_es7210_init(const driver_es7210_bsp_ops_t *ops)
 {
-    if (s_es7210 != NULL) {
+    if (s_es7210_inited != 0u) {
         return 0;
     }
     if (ops == NULL ||
         ops->i2c_write_reg == NULL ||
         ops->i2c_read_reg == NULL ||
         ops->i2s_read == NULL) {
-        BSP_LOGE(TAG, "ES7210 板级初始化失败: BSP 能力无效");
+        DRIVER_LOGE(TAG, "ES7210 板级初始化失败: BSP 能力无效");
         return -1;
     }
 
@@ -242,38 +244,34 @@ int driver_es7210_init(const driver_es7210_bsp_ops_t *ops)
         .read = s_driver_ops.i2s_read,
     };
 
-    s_es7210 = es7210_init(&itf);
-    return s_es7210 != NULL ? 0 : -2;
+    return es7210_init(&itf);
 }
 
 int driver_es7210_deinit(void)
 {
-    if (s_es7210 != NULL) {
-        es7210_deinit(s_es7210);
-        s_es7210 = NULL;
-    }
+    es7210_deinit();
     memset(&s_driver_ops, 0, sizeof(s_driver_ops));
     return 0;
 }
 
 int driver_es7210_is_initialized(void)
 {
-    return s_es7210 != NULL ? 1 : 0;
+    return s_es7210_inited != 0u ? 1 : 0;
 }
 
 int driver_es7210_start_record(void)
 {
-    return s_es7210 != NULL ? 0 : -1;
+    return s_es7210_inited != 0u ? 0 : -1;
 }
 
 int driver_es7210_stop_record(void)
 {
-    return s_es7210 != NULL ? 0 : -1;
+    return s_es7210_inited != 0u ? 0 : -1;
 }
 
 int driver_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 {
-    if (s_es7210 == NULL || pcm == NULL || samples == 0u) {
+    if (s_es7210_inited == 0u || pcm == NULL || samples == 0u) {
         return -1;
     }
 
@@ -285,7 +283,7 @@ int driver_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
         }
 
         uint32_t read_len = frames * 4u;
-        int read_bytes = es7210_read(s_es7210, s_driver_raw_buf, read_len, timeout_ms);
+        int read_bytes = es7210_read(s_driver_raw_buf, read_len, timeout_ms);
         if (read_bytes < 0) {
             return read_bytes;
         }

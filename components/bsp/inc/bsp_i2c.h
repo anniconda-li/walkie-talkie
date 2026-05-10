@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 
-#include "bsp_common.h"
+#include "bsp_config.h"
 
 #ifdef __cplusplus
 extern "C" {

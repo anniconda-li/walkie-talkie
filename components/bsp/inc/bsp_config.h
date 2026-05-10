@@ -1,11 +1,11 @@
 /**
- * @file bsp_common.h
+ * @file bsp_config.h
  * @brief BSP 层公共配置。
  *
  * 本文件集中放置 BSP 组件共用的编译期开关，便于不同外设驱动保持一致的配置入口。
  */
-#ifndef BSP_COMMON_H
-#define BSP_COMMON_H
+#ifndef BSP_CONFIG_H
+#define BSP_CONFIG_H
 
 #include "hal/gpio_types.h"
 #include "osal_log.h"
@@ -36,6 +36,22 @@
 #define BSP_LOGI(tag, fmt, ...) do { (void)(tag); } while (0)
 #define BSP_LOGW(tag, fmt, ...) do { (void)(tag); } while (0)
 #define BSP_LOGE(tag, fmt, ...) do { (void)(tag); } while (0)
+#endif /* BSP_CONFIG_H */
+
+/**
+ * @brief BSP 音频 I2S 方案选择。
+ */
+#define BSP_AUDIO_BACKEND_ES  1 /**< ES7210 + ES8311 共用 I2S 时钟方案。 */
+#define BSP_AUDIO_BACKEND_I2S 2 /**< INMP441 + MAX98357A 分离 I2S 时钟方案。 */
+
+/**
+ * @brief 当前 BSP 音频 I2S 方案。
+ *
+ * 测试阶段按实际接线切换。使用 INMP441 + MAX98357A 时，RX 和 TX 使用不同
+ * BCLK/WS 引脚，因此 BSP 会分别配置 I2S RX/TX 通道。
+ */
+#ifndef BSP_AUDIO_BACKEND
+#define BSP_AUDIO_BACKEND BSP_AUDIO_BACKEND_I2S
 #endif
 
 /**
@@ -47,6 +63,20 @@
 #define BSP_AUDIO_LRCK_IO GPIO_NUM_47 /**< LRCK/WS。 */
 #define BSP_AUDIO_DOUT_IO GPIO_NUM_48 /**< ESP 输出到 ES8311 DSDIN。 */
 #define BSP_AUDIO_DIN_IO  GPIO_NUM_21 /**< ES7210 SDOUT1 输入到 ESP。 */
+
+/**
+ * @brief INMP441 数字麦克风 I2S RX 引脚定义。
+ */
+#define BSP_AUDIO_INMP441_DIN_IO  GPIO_NUM_21 /**< INMP441 SD -> ESP DIN。 */
+#define BSP_AUDIO_INMP441_BCLK_IO GPIO_NUM_14 /**< INMP441 SCK/BCLK。 */
+#define BSP_AUDIO_INMP441_WS_IO   GPIO_NUM_47 /**< INMP441 WS/LRCK。 */
+
+/**
+ * @brief MAX98357A 功放 I2S TX 引脚定义。
+ */
+#define BSP_AUDIO_MAX98357A_DOUT_IO GPIO_NUM_48 /**< ESP DOUT -> MAX98357A DIN。 */
+#define BSP_AUDIO_MAX98357A_BCLK_IO GPIO_NUM_45 /**< MAX98357A BCLK。 */
+#define BSP_AUDIO_MAX98357A_WS_IO   GPIO_NUM_38 /**< MAX98357A LRC/WS。 */
 
 /**
  * @brief ST7789 LCD SPI 引脚定义。

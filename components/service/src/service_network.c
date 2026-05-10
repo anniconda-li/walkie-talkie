@@ -4,7 +4,7 @@
  */
 #include "service_network.h"
 
-#include "service_common.h"
+#include "service_config.h"
 
 #include <stddef.h>
 #include <stdint.h>

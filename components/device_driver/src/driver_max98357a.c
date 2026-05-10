@@ -4,7 +4,7 @@
  */
 #include "driver_max98357a.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 
 #include <string.h>
 
@@ -40,7 +40,7 @@ int driver_max98357a_init(const driver_max98357a_bsp_ops_t *ops)
         return 0;
     }
     if (ops == NULL || ops->i2s_write == NULL) {
-        BSP_LOGE(TAG, "MAX98357A 初始化失败: BSP 能力无效");
+        DRIVER_LOGE(TAG, "MAX98357A 初始化失败: BSP 能力无效");
         return -1;
     }
 
@@ -48,7 +48,7 @@ int driver_max98357a_init(const driver_max98357a_bsp_ops_t *ops)
     s_driver_volume = 80u;
     s_driver_mute = 0u;
     s_driver_inited = 1u;
-    BSP_LOGI(TAG, "MAX98357A 驱动初始化成功");
+    DRIVER_LOGI(TAG, "MAX98357A 驱动初始化成功");
     return 0;
 }
 

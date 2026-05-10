@@ -4,7 +4,7 @@
  */
 #include "driver_inmp441.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 
 #include <string.h>
 
@@ -22,13 +22,13 @@ int driver_inmp441_init(const driver_inmp441_bsp_ops_t *ops)
         return 0;
     }
     if (ops == NULL || ops->i2s_read == NULL) {
-        BSP_LOGE(TAG, "INMP441 初始化失败: BSP 能力无效");
+        DRIVER_LOGE(TAG, "INMP441 初始化失败: BSP 能力无效");
         return -1;
     }
 
     s_driver_ops = *ops;
     s_driver_inited = 1u;
-    BSP_LOGI(TAG, "INMP441 驱动初始化成功");
+    DRIVER_LOGI(TAG, "INMP441 驱动初始化成功");
     return 0;
 }
 

@@ -5,7 +5,8 @@
 #ifndef BSP_AUDIO_H
 #define BSP_AUDIO_H
 
-#include "bsp_common.h"
+#include "driver_config.h"
+#include "bsp_config.h"
 
 #define driver_audio_board_codec_ENABLE_IO BSP_AUDIO_CODEC_ENABLE_IO
 

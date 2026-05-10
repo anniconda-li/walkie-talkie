@@ -5,7 +5,7 @@
 
 #include "driver_ml307c.h"
 
-#include "bsp_common.h"
+#include "driver_config.h"
 #include "osal_mutex.h"
 
 #include <ctype.h>
@@ -36,6 +36,20 @@ static const char *TAG = "driver_ml307c";
 #define ML307C_HTTP_ROUTE           "6[1]"
 #define DRIVER_ML307C_LOCK_TIMEOUT_MS 5000u
 
+typedef struct {
+    int (*uart_write)(uint8_t *data, uint16_t len);
+    int (*uart_read)(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+    void (*delay_ms)(uint32_t ms);
+    uint32_t (*get_tick)(void);
+} ml307c_interface_t;
+
+typedef struct {
+    uint8_t *buf;
+    uint16_t size;
+    uint16_t head;
+    uint16_t tail;
+} ring_buffer_t;
+
 struct ml307c_dev {
     ml307c_config_t config;
     ml307c_interface_t itf;
@@ -44,13 +58,37 @@ struct ml307c_dev {
     uint8_t is_network_ok;
 };
 
-static ml307c_handle_t s_ml307c = NULL;
+static struct ml307c_dev s_ml307c_dev;
+static uint8_t s_ml307c_rx_buf[ML307C_RX_BUFFER_SIZE];
+static struct ml307c_dev *s_ml307c = NULL;
 static osal_mutex_t s_ml307c_mutex = NULL;
 static uint8_t s_ml307c_tcp_connected = 0u;
 static uint8_t s_ml307c_udp_connected = 0u;
 
 static void ml307c_log_response(const char *title, const char *resp);
 static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value);
+static struct ml307c_dev * ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf);
+static void ml307c_deinit(struct ml307c_dev * dev);
+static int ml307c_check_alive(struct ml307c_dev * dev);
+static int ml307c_check_sim(struct ml307c_dev * dev);
+static int ml307c_get_network_state(struct ml307c_dev * dev, int *state);
+static int ml307c_get_signal(struct ml307c_dev * dev, int *rssi);
+static int ml307c_get_link_state(struct ml307c_dev * dev, int *link);
+static int ml307c_tcp_connect(struct ml307c_dev * dev, const char *ip, int port);
+static int ml307c_udp_connect(struct ml307c_dev * dev, const char *ip, int port);
+static int ml307c_tcp_send(struct ml307c_dev * dev, uint8_t *data, int len);
+static int ml307c_udp_send(struct ml307c_dev * dev, uint8_t *data, int len);
+static int ml307c_read_raw(struct ml307c_dev * dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+static int ml307c_http_post(struct ml307c_dev * dev,
+                            uint8_t id,
+                            const char *url,
+                            const char *header,
+                            const uint8_t *body,
+                            uint16_t body_len,
+                            uint8_t *resp,
+                            uint16_t resp_size,
+                            uint16_t *resp_len);
+static int ml307c_tcp_close(struct ml307c_dev * dev);
 
 static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needle)
 {
@@ -72,7 +110,7 @@ static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needl
     return -1;
 }
 
-static uint8_t ml307c_get_socket_id(ml307c_handle_t dev)
+static uint8_t ml307c_get_socket_id(struct ml307c_dev * dev)
 {
     if (dev->config.socket_id >= 1u && dev->config.socket_id <= ML307C_SOCKET_MAX_ID) {
         return dev->config.socket_id;
@@ -81,12 +119,12 @@ static uint8_t ml307c_get_socket_id(ml307c_handle_t dev)
     return ML307C_DEFAULT_SOCKET_ID;
 }
 
-static uint32_t ml307c_get_timeout(ml307c_handle_t dev)
+static uint32_t ml307c_get_timeout(struct ml307c_dev * dev)
 {
     return dev->config.timeout_ms > 0u ? dev->config.timeout_ms : ML307C_DEFAULT_TIMEOUT_MS;
 }
 
-static void ml307c_clear_buffer(ml307c_handle_t dev)
+static void ml307c_clear_buffer(struct ml307c_dev * dev)
 {
     if (dev == NULL || dev->rx_rb.buf == NULL) {
         return;
@@ -97,7 +135,7 @@ static void ml307c_clear_buffer(ml307c_handle_t dev)
     dev->rx_rb.tail = 0;
 }
 
-static void ml307c_drain_uart(ml307c_handle_t dev)
+static void ml307c_drain_uart(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
         return;
@@ -115,7 +153,7 @@ static void ml307c_drain_uart(ml307c_handle_t dev)
     }
 }
 
-static int ml307c_append_response(ml307c_handle_t dev, const uint8_t *data, int len)
+static int ml307c_append_response(struct ml307c_dev * dev, const uint8_t *data, int len)
 {
     if (dev == NULL || data == NULL || len <= 0 || dev->rx_rb.buf == NULL) {
         return -1;
@@ -137,7 +175,7 @@ static int ml307c_append_response(ml307c_handle_t dev, const uint8_t *data, int 
     return copy_len;
 }
 
-static int ml307c_wait_response(ml307c_handle_t dev,
+static int ml307c_wait_response(struct ml307c_dev * dev,
                                 const char *expect,
                                 uint32_t timeout_ms,
                                 char *out,
@@ -181,12 +219,12 @@ static int ml307c_wait_response(ml307c_handle_t dev,
         snprintf(out, out_size, "%s", (const char *)dev->rx_rb.buf);
     }
 
-    BSP_LOGW(TAG, "ML307C 等待响应超时, expect=%s",
+    DRIVER_LOGW(TAG, "ML307C 等待响应超时, expect=%s",
              (expect != NULL && expect[0] != '\0') ? expect : ML307C_OK);
     return -3;
 }
 
-static int ml307c_send_cmd_capture(ml307c_handle_t dev,
+static int ml307c_send_cmd_capture(struct ml307c_dev * dev,
                                    const char *cmd,
                                    const char *expect,
                                    uint32_t timeout_ms,
@@ -194,7 +232,7 @@ static int ml307c_send_cmd_capture(ml307c_handle_t dev,
                                    uint16_t out_size)
 {
     if (dev == NULL || cmd == NULL) {
-        BSP_LOGE(TAG, "ML307C 发送命令参数无效, dev=%p, cmd=%p", dev, cmd);
+        DRIVER_LOGE(TAG, "ML307C 发送命令参数无效, dev=%p, cmd=%p", dev, cmd);
         return -1;
     }
 
@@ -204,12 +242,12 @@ static int ml307c_send_cmd_capture(ml307c_handle_t dev,
     uint16_t len = (uint16_t)strlen(cmd);
     int written = dev->itf.uart_write((uint8_t *)cmd, len);
     if (written < 0 || written != len) {
-        BSP_LOGE(TAG, "ML307C 命令发送失败, written=%d, len=%u",
+        DRIVER_LOGE(TAG, "ML307C 命令发送失败, written=%d, len=%u",
                  written, (unsigned int)len);
         return -2;
     }
 
-    BSP_LOGI(TAG, "ML307C 发送命令: %s", cmd);
+    DRIVER_LOGI(TAG, "ML307C 发送命令: %s", cmd);
 
     return ml307c_wait_response(dev,
                                 expect != NULL ? expect : ML307C_OK,
@@ -218,7 +256,7 @@ static int ml307c_send_cmd_capture(ml307c_handle_t dev,
                                 out_size);
 }
 
-static int ml307c_send_cmd(ml307c_handle_t dev,
+static int ml307c_send_cmd(struct ml307c_dev * dev,
                            const char *cmd,
                            const char *expect,
                            uint32_t timeout_ms)
@@ -243,10 +281,10 @@ static void ml307c_log_response(const char *title, const char *resp)
     }
 
     line[pos] = '\0';
-    BSP_LOGI(TAG, "%s: %s", title, line);
+    DRIVER_LOGI(TAG, "%s: %s", title, line);
 }
 
-static int ml307c_wait_alive(ml307c_handle_t dev, uint32_t timeout_ms)
+static int ml307c_wait_alive(struct ml307c_dev * dev, uint32_t timeout_ms)
 {
     if (dev == NULL) {
         return -1;
@@ -264,7 +302,7 @@ static int ml307c_wait_alive(ml307c_handle_t dev, uint32_t timeout_ms)
     return -2;
 }
 
-static int ml307c_wait_network_link(ml307c_handle_t dev, uint32_t timeout_ms)
+static int ml307c_wait_network_link(struct ml307c_dev * dev, uint32_t timeout_ms)
 {
     if (dev == NULL) {
         return -1;
@@ -294,7 +332,7 @@ static int ml307c_wait_network_link(ml307c_handle_t dev, uint32_t timeout_ms)
             ml307c_log_response("ML307C ISLINK 响应", resp);
             if (ml307c_parse_first_int_after(resp, "+ISLINK", &link) == 0 && link == 1) {
                 dev->is_network_ok = 1u;
-                BSP_LOGI(TAG, "ML307C 蜂窝数据网络已连接");
+                DRIVER_LOGI(TAG, "ML307C 蜂窝数据网络已连接");
                 return 0;
             }
         }
@@ -303,7 +341,7 @@ static int ml307c_wait_network_link(ml307c_handle_t dev, uint32_t timeout_ms)
     }
 
     dev->is_network_ok = 0u;
-    BSP_LOGW(TAG, "ML307C 等待蜂窝数据网络连接超时");
+    DRIVER_LOGW(TAG, "ML307C 等待蜂窝数据网络连接超时");
     return -2;
 }
 
@@ -341,41 +379,6 @@ static int ml307c_parse_first_int_after(const char *resp, const char *prefix, in
     }
 
     *value = atoi(p);
-    return 0;
-}
-
-static int ml307c_parse_quoted_value(const char *resp,
-                                     const char *prefix,
-                                     char *out,
-                                     uint16_t out_size)
-{
-    if (resp == NULL || prefix == NULL || out == NULL || out_size == 0u) {
-        return -1;
-    }
-
-    const char *p = ml307c_find_response_prefix(resp, prefix);
-    if (p == NULL) {
-        return -2;
-    }
-
-    p = strchr(p, '"');
-    if (p == NULL) {
-        return -3;
-    }
-    p++;
-
-    const char *end = strchr(p, '"');
-    if (end == NULL || end <= p) {
-        return -4;
-    }
-
-    uint16_t len = (uint16_t)(end - p);
-    if (len >= out_size) {
-        len = (uint16_t)(out_size - 1u);
-    }
-
-    memcpy(out, p, len);
-    out[len] = '\0';
     return 0;
 }
 
@@ -461,53 +464,44 @@ static int ml307c_parse_dtustate(const char *resp, uint8_t socket_id, int *state
     return 0;
 }
 
-ml307c_handle_t ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
+static struct ml307c_dev * ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
 {
     if (cfg == NULL || itf == NULL) {
-        BSP_LOGE(TAG, "ML307C 初始化失败: 配置或接口为空");
+        DRIVER_LOGE(TAG, "ML307C 初始化失败: 配置或接口为空");
         return NULL;
     }
     if (itf->uart_write == NULL || itf->uart_read == NULL ||
         itf->delay_ms == NULL || itf->get_tick == NULL) {
-        BSP_LOGE(TAG, "ML307C 初始化失败: 必要接口函数为空");
+        DRIVER_LOGE(TAG, "ML307C 初始化失败: 必要接口函数为空");
         return NULL;
     }
 
-    ml307c_handle_t dev = (ml307c_handle_t)calloc(1, sizeof(struct ml307c_dev));
-    if (dev == NULL) {
-        BSP_LOGE(TAG, "ML307C 初始化失败: 设备对象内存分配失败");
-        return NULL;
-    }
-
+    struct ml307c_dev *dev = &s_ml307c_dev;
+    memset(dev, 0, sizeof(*dev));
+    memset(s_ml307c_rx_buf, 0, sizeof(s_ml307c_rx_buf));
     dev->config = *cfg;
     dev->itf = *itf;
-    dev->rx_rb.buf = (uint8_t *)calloc(1, ML307C_RX_BUFFER_SIZE);
-    if (dev->rx_rb.buf == NULL) {
-        free(dev);
-        BSP_LOGE(TAG, "ML307C 初始化失败: 接收缓冲区内存分配失败");
-        return NULL;
-    }
-
+    dev->rx_rb.buf = s_ml307c_rx_buf;
     dev->rx_rb.size = ML307C_RX_BUFFER_SIZE;
 
-    BSP_LOGI(TAG, "ML307C RTU 驱动初始化成功, timeout=%u, socket_id=%u",
+    DRIVER_LOGI(TAG, "ML307C RTU 驱动初始化成功, timeout=%u, socket_id=%u",
              (unsigned int)ml307c_get_timeout(dev),
              (unsigned int)ml307c_get_socket_id(dev));
     return dev;
 }
 
-void ml307c_deinit(ml307c_handle_t dev)
+static void ml307c_deinit(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
         return;
     }
 
-    free(dev->rx_rb.buf);
-    free(dev);
-    BSP_LOGI(TAG, "ML307C 驱动已释放");
+    memset(s_ml307c_rx_buf, 0, sizeof(s_ml307c_rx_buf));
+    memset(dev, 0, sizeof(*dev));
+    DRIVER_LOGI(TAG, "ML307C 驱动已释放");
 }
 
-int ml307c_check_alive(ml307c_handle_t dev)
+static int ml307c_check_alive(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
         return -1;
@@ -521,7 +515,7 @@ int ml307c_check_alive(ml307c_handle_t dev)
     return ret;
 }
 
-int ml307c_check_sim(ml307c_handle_t dev)
+static int ml307c_check_sim(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
         return -1;
@@ -542,24 +536,7 @@ int ml307c_check_sim(ml307c_handle_t dev)
     return ml307c_parse_digits_after(resp, "+ICCID", iccid, sizeof(iccid)) == 0 ? 0 : 1;
 }
 
-int ml307c_check_network(ml307c_handle_t dev)
-{
-    int state = 0;
-    int ret = ml307c_get_network_state(dev, &state);
-    if (ret != 0) {
-        return ret;
-    }
-
-    if (state == 1 || state == 5) {
-        dev->is_network_ok = 1u;
-        return 0;
-    }
-
-    dev->is_network_ok = 0u;
-    return 1;
-}
-
-int ml307c_get_network_state(ml307c_handle_t dev, int *state)
+static int ml307c_get_network_state(struct ml307c_dev * dev, int *state)
 {
     if (dev == NULL || state == NULL) {
         return -1;
@@ -580,7 +557,7 @@ int ml307c_get_network_state(ml307c_handle_t dev, int *state)
     return ml307c_parse_cereg_state(resp, state);
 }
 
-int ml307c_get_signal(ml307c_handle_t dev, int *rssi)
+static int ml307c_get_signal(struct ml307c_dev * dev, int *rssi)
 {
     if (dev == NULL || rssi == NULL) {
         return -1;
@@ -600,44 +577,7 @@ int ml307c_get_signal(ml307c_handle_t dev, int *rssi)
     return ml307c_parse_first_int_after(resp, "+CSQ", rssi);
 }
 
-int ml307c_get_operator(ml307c_handle_t dev, char *buf)
-{
-    if (dev == NULL || buf == NULL) {
-        return -1;
-    }
-
-    char resp[1024];
-    int ret = ml307c_send_cmd_capture(dev,
-                                      "AT+SIMINFO" ML307C_CRLF,
-                                      "OK",
-                                      ml307c_get_timeout(dev) + 5000u,
-                                      resp,
-                                      sizeof(resp));
-    if (ret != 0) {
-        return ret;
-    }
-
-    return ml307c_parse_quoted_value(resp, "carrier:", buf, 32u);
-}
-
-int ml307c_open_net(ml307c_handle_t dev)
-{
-    int link = 0;
-    int ret = ml307c_get_link_state(dev, &link);
-    if (ret != 0) {
-        return ret;
-    }
-
-    if (link != 1) {
-        dev->is_network_ok = 0u;
-        return -2;
-    }
-
-    dev->is_network_ok = 1u;
-    return 0;
-}
-
-int ml307c_get_link_state(ml307c_handle_t dev, int *link)
+static int ml307c_get_link_state(struct ml307c_dev * dev, int *link)
 {
     if (dev == NULL || link == NULL) {
         return -1;
@@ -658,12 +598,7 @@ int ml307c_get_link_state(ml307c_handle_t dev, int *link)
     return ml307c_parse_first_int_after(resp, "+ISLINK", link);
 }
 
-int ml307c_close_net(ml307c_handle_t dev)
-{
-    return ml307c_tcp_close(dev);
-}
-
-static int ml307c_socket_connect(ml307c_handle_t dev, const char *ip, int port, int proto)
+static int ml307c_socket_connect(struct ml307c_dev * dev, const char *ip, int port, int proto)
 {
     if (dev == NULL || ip == NULL || port <= 0 || port > 65535 || proto < 0 || proto > 1) {
         return -1;
@@ -699,13 +634,13 @@ static int ml307c_socket_connect(ml307c_handle_t dev, const char *ip, int port, 
 
     ret = ml307c_send_cmd(dev, "AT+RESET" ML307C_CRLF, ML307C_OK, ml307c_get_timeout(dev));
     if (ret != 0) {
-        BSP_LOGW(TAG, "ML307C 复位命令未收到 OK，继续等待模块重启, ret=%d", ret);
+        DRIVER_LOGW(TAG, "ML307C 复位命令未收到 OK，继续等待模块重启, ret=%d", ret);
     }
 
     dev->itf.delay_ms(ML307C_RESET_WAIT_MS);
     ret = ml307c_wait_alive(dev, ML307C_REBOOT_READY_MS);
     if (ret != 0) {
-        BSP_LOGW(TAG, "ML307C 重启后 AT 未恢复, ret=%d", ret);
+        DRIVER_LOGW(TAG, "ML307C 重启后 AT 未恢复, ret=%d", ret);
         return ret;
     }
 
@@ -733,36 +668,36 @@ static int ml307c_socket_connect(ml307c_handle_t dev, const char *ip, int port, 
             int state = 0;
             ml307c_log_response("ML307C DTUSTATE 响应", resp);
             if (ml307c_parse_dtustate(resp, socket_id, &state) == 0) {
-                BSP_LOGI(TAG, "ML307C socket 通道状态, id=%u, state=%d",
+                DRIVER_LOGI(TAG, "ML307C socket 通道状态, id=%u, state=%d",
                          (unsigned int)socket_id, state);
                 if (state == 1) {
-                    BSP_LOGI(TAG, "ML307C socket 通道已连接, id=%u",
+                    DRIVER_LOGI(TAG, "ML307C socket 通道已连接, id=%u",
                              (unsigned int)socket_id);
                     return 0;
                 }
             } else {
-                BSP_LOGW(TAG, "ML307C DTUSTATE 响应解析失败");
+                DRIVER_LOGW(TAG, "ML307C DTUSTATE 响应解析失败");
             }
         }
 
         dev->itf.delay_ms(ML307C_SOCKET_POLL_MS);
     }
 
-    BSP_LOGW(TAG, "ML307C socket 通道连接超时, id=%u", (unsigned int)socket_id);
+    DRIVER_LOGW(TAG, "ML307C socket 通道连接超时, id=%u", (unsigned int)socket_id);
     return -2;
 }
 
-int ml307c_tcp_connect(ml307c_handle_t dev, const char *ip, int port)
+static int ml307c_tcp_connect(struct ml307c_dev * dev, const char *ip, int port)
 {
     return ml307c_socket_connect(dev, ip, port, 0);
 }
 
-int ml307c_udp_connect(ml307c_handle_t dev, const char *ip, int port)
+static int ml307c_udp_connect(struct ml307c_dev * dev, const char *ip, int port)
 {
     return ml307c_socket_connect(dev, ip, port, 1);
 }
 
-static int ml307c_send_route(ml307c_handle_t dev, const char *route, uint8_t *data, int len)
+static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t *data, int len)
 {
     if (dev == NULL || (data == NULL && len > 0) || len < 0 || len > 65535) {
         return -1;
@@ -812,7 +747,7 @@ static int ml307c_send_route(ml307c_handle_t dev, const char *route, uint8_t *da
     return send_ret == 0 ? 0 : -7;
 }
 
-int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
+static int ml307c_tcp_send(struct ml307c_dev * dev, uint8_t *data, int len)
 {
     uint8_t socket_id = ml307c_get_socket_id(dev);
     char route[8];
@@ -820,7 +755,7 @@ int ml307c_tcp_send(ml307c_handle_t dev, uint8_t *data, int len)
     return ml307c_send_route(dev, route, data, len);
 }
 
-int ml307c_udp_send(ml307c_handle_t dev, uint8_t *data, int len)
+static int ml307c_udp_send(struct ml307c_dev * dev, uint8_t *data, int len)
 {
     uint8_t socket_id = ml307c_get_socket_id(dev);
     char route[8];
@@ -828,7 +763,7 @@ int ml307c_udp_send(ml307c_handle_t dev, uint8_t *data, int len)
     return ml307c_send_route(dev, route, data, len);
 }
 
-int ml307c_read_raw(ml307c_handle_t dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
+static int ml307c_read_raw(struct ml307c_dev * dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     if (dev == NULL || buf == NULL || len == 0u) {
         return -1;
@@ -837,7 +772,7 @@ int ml307c_read_raw(ml307c_handle_t dev, uint8_t *buf, uint16_t len, uint32_t ti
     return dev->itf.uart_read(buf, len, timeout_ms);
 }
 
-static int ml307c_http_capture_response(ml307c_handle_t dev,
+static int ml307c_http_capture_response(struct ml307c_dev * dev,
                                         uint8_t *resp,
                                         uint16_t resp_size,
                                         uint16_t *resp_len,
@@ -888,11 +823,11 @@ static int ml307c_http_capture_response(ml307c_handle_t dev,
     }
 
     *resp_len = total;
-    BSP_LOGW(TAG, "ML307C HTTP 响应等待超时, received=%u", (unsigned int)total);
+    DRIVER_LOGW(TAG, "ML307C HTTP 响应等待超时, received=%u", (unsigned int)total);
     return -1;
 }
 
-int ml307c_http_post(ml307c_handle_t dev,
+static int ml307c_http_post(struct ml307c_dev * dev,
                      uint8_t id,
                      const char *url,
                      const char *header,
@@ -978,7 +913,7 @@ int ml307c_http_post(ml307c_handle_t dev,
                                         ML307C_HTTP_TIMEOUT_MS + 10000u);
 }
 
-int ml307c_tcp_close(ml307c_handle_t dev)
+static int ml307c_tcp_close(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
         return -1;
@@ -988,55 +923,6 @@ int ml307c_tcp_close(ml307c_handle_t dev)
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+DTUTASK=%u,0,\"SOCK\"" ML307C_CRLF, (unsigned int)socket_id);
     return ml307c_send_cmd(dev, cmd, "+DTUTASK", ml307c_get_timeout(dev));
-}
-
-int ml307c_send_sms(ml307c_handle_t dev, const char *num, const char *msg)
-{
-    (void)dev;
-    (void)num;
-    (void)msg;
-    BSP_LOGW(TAG, "当前 ML307C RTU 文档未提供 SMS 指令，本接口暂不支持");
-    return -1;
-}
-
-int ml307c_get_imei(ml307c_handle_t dev, char *buf)
-{
-    if (dev == NULL || buf == NULL) {
-        return -1;
-    }
-
-    char resp[ML307C_LINE_MAX_LEN];
-    int ret = ml307c_send_cmd_capture(dev,
-                                      "AT+IMEI" ML307C_CRLF,
-                                      "+IMEI",
-                                      ml307c_get_timeout(dev),
-                                      resp,
-                                      sizeof(resp));
-    if (ret != 0) {
-        return ret;
-    }
-
-    return ml307c_parse_quoted_value(resp, "+IMEI", buf, 16u);
-}
-
-int ml307c_get_iccid(ml307c_handle_t dev, char *buf)
-{
-    if (dev == NULL || buf == NULL) {
-        return -1;
-    }
-
-    char resp[ML307C_LINE_MAX_LEN];
-    int ret = ml307c_send_cmd_capture(dev,
-                                      "AT+ICCID" ML307C_CRLF,
-                                      "+ICCID",
-                                      ml307c_get_timeout(dev),
-                                      resp,
-                                      sizeof(resp));
-    if (ret != 0) {
-        return ret;
-    }
-
-    return ml307c_parse_digits_after(resp, "+ICCID", buf, 21u);
 }
 
 static int driver_ml307c_reg_ready(int reg_state)
@@ -1203,7 +1089,7 @@ int driver_ml307c_tcp_send(const uint8_t *data, int len)
         return -1;
     }
     if (s_ml307c_tcp_connected == 0u) {
-        BSP_LOGW(TAG, "ML307C TCP 发送时通道未标记为已连接，仍尝试发送");
+        DRIVER_LOGW(TAG, "ML307C TCP 发送时通道未标记为已连接，仍尝试发送");
     }
 
     int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);
@@ -1255,7 +1141,7 @@ int driver_ml307c_udp_send(const uint8_t *data, int len)
         return -1;
     }
     if (s_ml307c_udp_connected == 0u) {
-        BSP_LOGW(TAG, "ML307C UDP 发送时通道未标记为已连接，仍尝试发送");
+        DRIVER_LOGW(TAG, "ML307C UDP 发送时通道未标记为已连接，仍尝试发送");
     }
 
     int ret = driver_ml307c_lock(DRIVER_ML307C_LOCK_TIMEOUT_MS);

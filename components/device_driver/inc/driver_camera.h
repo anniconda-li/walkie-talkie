@@ -8,7 +8,8 @@
 #ifndef driver_camera_H
 #define driver_camera_H
 
-#include "bsp_common.h"
+#include "driver_config.h"
+#include "bsp_config.h"
 #include "esp_camera.h"
 
 #ifdef __cplusplus

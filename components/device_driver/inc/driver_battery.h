@@ -7,7 +7,8 @@
 
 #include <stdint.h>
 
-#include "bsp_common.h"
+#include "driver_config.h"
+#include "bsp_config.h"
 
 #ifdef __cplusplus
 extern "C" {

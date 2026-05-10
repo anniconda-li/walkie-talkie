@@ -2,11 +2,11 @@
  * @file driver_pca9557.h
  * @brief PCA9557 8 位 I2C IO 扩展器驱动接口。
  *
- * PCA9557 提供输入、输出、极性反转和方向配置四个 8 位寄存器。本驱动通过
- * @ref pca9557_interface_t 注入 I2C 访问接口，不直接依赖具体芯片 SDK。
+ * PCA9557 提供输入、输出、极性反转和方向配置四个 8 位寄存器。本驱动作为
+ * 当前板级共享 IO 管理者，对外提供 pin 级和板级语义接口。
  */
-#ifndef BSP_PCA9557_H
-#define BSP_PCA9557_H
+#ifndef DRIVER_PCA9557_H
+#define DRIVER_PCA9557_H
 
 #include <stdint.h>
 
@@ -46,134 +46,89 @@ typedef enum {
 } pca9557_level_t;
 
 /**
- * @brief PCA9557 驱动依赖的 I2C 接口抽象。
- *
- * 用户需提供 PCA9557 寄存器读写函数，驱动不感知底层 I2C 端口、地址和设备句柄。
+ * @brief 本板 PCA9557 驱动依赖的 BSP I2C 能力。
  */
 typedef struct {
-    int (*write_reg)(uint8_t reg,
-                     const uint8_t *data,
-                     uint16_t len);                   /**< 写 I2C 设备寄存器函数。 */
-    int (*read_reg)(uint8_t reg,
-                    uint8_t *data,
-                    uint16_t len);                    /**< 读 I2C 设备寄存器函数。 */
-} pca9557_interface_t;
-
-/**
- * @brief PCA9557 驱动配置参数。
- */
-typedef struct {
-    uint8_t output_init;      /**< 输出寄存器初始值。 */
-    uint8_t polarity_init;    /**< 极性反转寄存器初始值，1 表示对应输入取反。 */
-    uint8_t direction_init;   /**< 方向寄存器初始值，1 输入，0 输出。 */
-} pca9557_config_t;
-
-/**
- * @brief PCA9557 模块句柄。
- */
-typedef struct pca9557_dev *pca9557_handle_t;
-
-/**
- * @brief 初始化 PCA9557 设备。
- *
- * @param[in] config 设备配置；传入 NULL 时使用默认配置。
- * @param[in] itf I2C 接口函数指针集合。
- * @return 成功返回 PCA9557 句柄；失败返回 NULL。
- * @note 调用本函数前应先完成底层 I2C 总线初始化。
- */
-pca9557_handle_t pca9557_init(const pca9557_config_t *config,
-                              pca9557_interface_t *itf);
-
-/**
- * @brief 释放 PCA9557 设备。
- *
- * @param[in] dev PCA9557 句柄。
- */
-void pca9557_deinit(pca9557_handle_t dev);
-
-/**
- * @brief 读取 PCA9557 输入寄存器。
- *
- * @param[in] dev PCA9557 句柄。
- * @param[out] value 输入寄存器值输出地址。
- * @return 成功返回 0；失败返回负值。
- */
-int pca9557_read_input(pca9557_handle_t dev, uint8_t *value);
-
-/**
- * @brief 读取 PCA9557 输出寄存器缓存值。
- *
- * @param[in] dev PCA9557 句柄。
- * @param[out] value 输出寄存器值输出地址。
- * @return 成功返回 0；失败返回负值。
- */
-int pca9557_read_output(pca9557_handle_t dev, uint8_t *value);
-
-/**
- * @brief 写入 PCA9557 输出寄存器。
- *
- * @param[in] dev PCA9557 句柄。
- * @param[in] value 输出寄存器值。
- * @return 成功返回 0；失败返回负值。
- */
-int pca9557_write_output(pca9557_handle_t dev, uint8_t value);
+    void *(*get_i2c_bus_handle)(void);                 /**< 获取 I2C bus 句柄，用于确认 BSP I2C 已初始化。 */
+    int (*i2c_write_reg)(uint16_t address,
+                         uint32_t scl_speed_hz,
+                         uint8_t reg,
+                         const uint8_t *data,
+                         uint16_t len);                /**< 写 I2C 设备寄存器。 */
+    int (*i2c_read_reg)(uint16_t address,
+                        uint32_t scl_speed_hz,
+                        uint8_t reg,
+                        uint8_t *data,
+                        uint16_t len);                 /**< 读 I2C 设备寄存器。 */
+} driver_pca9557_bsp_ops_t;
 
 /**
  * @brief 设置单个 PCA9557 引脚方向。
  *
- * @param[in] dev PCA9557 句柄。
  * @param[in] pin 引脚编号。
  * @param[in] mode 引脚方向。
  * @return 成功返回 0；失败返回负值。
  */
-int pca9557_set_pin_mode(pca9557_handle_t dev,
-                         pca9557_pin_t pin,
-                         pca9557_io_mode_t mode);
+int driver_pca9557_set_pin_mode(pca9557_pin_t pin, pca9557_io_mode_t mode);
 
 /**
- * @brief 设置 PCA9557 方向寄存器。
+ * @brief 设置单个 PCA9557 引脚输出电平。
  *
- * @param[in] dev PCA9557 句柄。
- * @param[in] direction 方向寄存器值，1 输入，0 输出。
- * @return 成功返回 0；失败返回负值。
- */
-int pca9557_set_direction(pca9557_handle_t dev, uint8_t direction);
-
-/**
- * @brief 设置单个 PCA9557 输出引脚电平。
- *
- * @param[in] dev PCA9557 句柄。
  * @param[in] pin 引脚编号。
  * @param[in] level 输出电平。
  * @return 成功返回 0；失败返回负值。
  */
-int pca9557_set_pin_level(pca9557_handle_t dev,
-                          pca9557_pin_t pin,
-                          pca9557_level_t level);
+int driver_pca9557_set_pin_level(pca9557_pin_t pin, pca9557_level_t level);
 
 /**
  * @brief 读取单个 PCA9557 输入引脚电平。
  *
- * @param[in] dev PCA9557 句柄。
  * @param[in] pin 引脚编号。
  * @param[out] level 引脚电平输出地址。
  * @return 成功返回 0；失败返回负值。
  */
-int pca9557_get_pin_level(pca9557_handle_t dev,
-                          pca9557_pin_t pin,
-                          pca9557_level_t *level);
+int driver_pca9557_get_pin_level(pca9557_pin_t pin, pca9557_level_t *level);
 
 /**
- * @brief 设置 PCA9557 极性反转寄存器。
+ * @brief 初始化本板 PCA9557 IO 扩展器。
  *
- * @param[in] dev PCA9557 句柄。
- * @param[in] polarity 极性反转寄存器值，1 表示对应输入取反。
+ * @param[in] ops BSP I2C 能力。
  * @return 成功返回 0；失败返回负值。
  */
-int pca9557_set_polarity(pca9557_handle_t dev, uint8_t polarity);
+int driver_pca9557_init(const driver_pca9557_bsp_ops_t *ops);
+
+/**
+ * @brief 释放本板 PCA9557 IO 扩展器。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int driver_pca9557_deinit(void);
+
+/**
+ * @brief 判断本板 PCA9557 是否已初始化。
+ *
+ * @return 已初始化返回 1；否则返回 0。
+ */
+int driver_pca9557_is_initialized(void);
+
+/**
+ * @brief 设置 LCD 背光开关。
+ *
+ * @param[in] on 0 关闭背光，非 0 打开背光。
+ * @return 成功返回 0；失败返回负值。
+ */
+int driver_pca9557_set_lcd_backlight(int on);
+
+/**
+ * @brief 设置 Camera PWDN 引脚电平。
+ *
+ * @param[in] level PCA9557 输出电平。
+ * @return 成功返回 0；失败返回负值。
+ */
+int driver_pca9557_set_camera_pwdn(pca9557_level_t level);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* BSP_PCA9557_H */
+#endif /* DRIVER_PCA9557_H */

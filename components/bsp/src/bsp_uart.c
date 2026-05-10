@@ -4,7 +4,7 @@
  */
 #include "bsp_uart.h"
 
-#include "bsp_common.h"
+#include "bsp_config.h"
 #include "driver/uart.h"
 #include "osal_queue.h"
 #include "freertos/FreeRTOS.h"
