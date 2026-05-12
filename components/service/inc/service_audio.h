@@ -49,7 +49,10 @@ typedef struct {
 /**
  * @brief 初始化音频服务。
  *
- * @param[in] cfg 初始化配置，可为 NULL。
+ * 初始化时会复制 cfg 中的采集/播放 ops，后续 service_audio API 只调用
+ * 自己保存的函数表，不直接依赖具体 driver。
+ *
+ * @param[in] cfg 初始化配置；为 NULL 时使用已绑定状态检查初始化情况。
  * @return 成功返回 0；失败返回负值。
  */
 int service_audio_init(const service_audio_config_t *cfg);
@@ -64,12 +67,17 @@ int service_audio_deinit(void);
 /**
  * @brief 开始录音。
  *
+ * 清空内部录音缓冲区并唤醒录音任务。录音数据会被写入 service 内部 PSRAM
+ * 缓冲区，直到 stop_record 或达到最大录音时长。
+ *
  * @return 成功返回 0；失败返回负值。
  */
 int service_audio_start_record(void);
 
 /**
  * @brief 停止录音。
+ *
+ * 通知录音任务退出采集循环，并等待当前帧读取结束。
  *
  * @return 成功返回 0；失败返回负值。
  */
@@ -88,6 +96,9 @@ int service_audio_get_record_data(const int16_t **pcm, uint32_t *samples);
 
 /**
  * @brief 开始播放。
+ *
+ * 当前实现只维护播放会话状态，实际硬件播放由 service_audio_play() 转发到
+ * playback driver。
  *
  * @return 成功返回 0；失败返回负值。
  */

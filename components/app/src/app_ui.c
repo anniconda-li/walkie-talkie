@@ -4,7 +4,7 @@
  */
 #include "app_ui.h"
 
-#include "app_common.h"
+#include "app_config.h"
 #include "service_screen.h"
 #include "ui.h"
 #include "ui_shell.h"

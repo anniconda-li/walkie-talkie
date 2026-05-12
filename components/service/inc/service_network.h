@@ -45,7 +45,8 @@ typedef struct {
                          uint16_t wav_len,
                          uint8_t *resp,
                          uint16_t resp_size,
-                         uint16_t *resp_len); /**< HTTP POST WAV 并读取响应。 */
+                         uint16_t *resp_len,
+                         uint32_t timeout_ms); /**< HTTP POST WAV 并读取响应。 */
 } service_network_ops_t;
 
 /**
@@ -58,7 +59,10 @@ struct service_network_config {
 /**
  * @brief 初始化网络服务。
  *
- * @param[in] cfg 初始化配置，可为 NULL。
+ * 初始化时会复制 cfg 中的网络 ops，并检查下层 driver 是否已经初始化。
+ * 后续所有网络 API 都通过 service 内部保存的 ops 调用。
+ *
+ * @param[in] cfg 初始化配置；为 NULL 时仅检查 service 是否已经初始化。
  * @return 成功返回 0；失败返回负值。
  */
 int service_network_init(const service_network_config_t *cfg);
@@ -113,6 +117,9 @@ int service_network_tcp_close(void);
 /**
  * @brief 配置并等待 UDP DTU 通道就绪。
  *
+ * 对 ML307C 后端表示配置 DTU UDP 通道；对 WiFi 后端表示记录 UDP 目标
+ * 并准备 socket 收发。
+ *
  * @param[in] host 服务器 IP 或域名。
  * @param[in] port 服务器端口。
  * @return 成功返回 0；失败返回负值。
@@ -141,12 +148,16 @@ int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_m
 /**
  * @brief HTTP POST 上传 WAV，并返回响应 body。
  *
+ * 第一版只暴露 AI 语音问答所需的 WAV POST 能力，避免 app 直接依赖
+ * 通用 HTTP 客户端细节。
+ *
  * @param[in] url 请求 URL。
  * @param[in] wav WAV 数据缓冲区。
  * @param[in] wav_len WAV 数据长度。
  * @param[out] resp 响应 body 输出缓冲区。
  * @param[in] resp_size 响应缓冲区长度。
  * @param[out] resp_len 实际响应长度。
+ * @param[in] timeout_ms 请求等待响应的超时时间，单位毫秒。
  * @return 成功返回 0；失败返回负值。
  */
 int service_network_http_post_wav(const char *url,
@@ -154,7 +165,8 @@ int service_network_http_post_wav(const char *url,
                                   uint16_t wav_len,
                                   uint8_t *resp,
                                   uint16_t resp_size,
-                                  uint16_t *resp_len);
+                                  uint16_t *resp_len,
+                                  uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

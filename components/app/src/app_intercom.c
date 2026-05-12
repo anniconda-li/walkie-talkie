@@ -1,12 +1,43 @@
 /**
  * @file app_intercom.c
- * @brief UDP 实时对讲业务。
+ * @brief UDP 实时对讲业务——PTT 发送、UDP 接收和心跳保持。
+ *
+ * ## 业务流程概述
+ *
+ * ### PTT 发送（biz_ptt 任务，优先级 6）
+ * 1. 用户长按 UI 上的 PTT 按钮 → 回调 → app_intercom_ptt_start()
+ * 2. 检查音频会话是否被 AI 占用 → 若空闲则置 s_ptt_active = 1
+ * 3. notify_give(biz_ptt) → 唤醒 PTT 任务
+ * 4. PTT 任务抢占音频会话锁 → 发 PTT_START 控制包
+ * 5. 循环：读麦克风 320 samples(20ms) → 封装协议头 → UDP 发送
+ * 6. 用户松手 → s_ptt_active = 0 → 循环退出 → 发 PTT_STOP
+ * 7. 释放音频会话锁 → notify_take 阻塞等待下次
+ *
+ * ### UDP 接收（biz_udp_rx 任务，优先级 5）
+ * 1. 轮询 UART 下行数据（80ms 超时）
+ * 2. 按 WTK1 魔数定位完整包 → 解析 → 若为音频包且非本机 → 播放
+ *
+ * ### 心跳（biz_heartbeat 任务，优先级 4）
+ * 1. 每 10 秒发一次 HEARTBEAT 包
+ * 2. 检测到网络断开后自动重建 UDP DTU 通道
+ *
+ * ## 自定义应用层协议（基于 WTK1 魔数）
+ * ```
+ * Byte 0-3:  "WTK1" 魔数
+ * Byte 4:    包类型（1=REGISTER, 2=CHANNEL, 3=PTT_START, 4=AUDIO, 5=PTT_STOP, 6=HEARTBEAT）
+ * Byte 5:    头长度（固定 34）
+ * Byte 6-7:  频道号（uint16 LE）
+ * Byte 8-11: 序列号（uint32 LE）
+ * Byte 12-15: 时间戳（uint32 LE, ms）
+ * Byte 16-31: 设备名（16 字节，不足补 0）
+ * Byte 32-33: payload 长度（uint16 LE）
+ * Byte 34+:  payload（仅 AUDIO 包有，PCM 16bit 单声道）
+ * ```
  */
 #include "app_intercom.h"
 
 #include "app_business.h"
-#include "app_business_config.h"
-#include "app_common.h"
+#include "app_config.h"
 #include "app_status_monitor.h"
 #include "osal_task.h"
 #include "service_audio.h"
@@ -18,55 +49,90 @@
 
 static const char *TAG = "app_intercom";
 
+/* 协议常量 */
 #define APP_INTERCOM_PACKET_MAGIC       "WTK1"
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES
+#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES   /* 640 字节 = 320 samples × 2 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
+
+/* 各任务栈大小——PTT 发送栈最大，因为需要构造协议包 + 调用 service_audio_read */
 #define APP_INTERCOM_PTT_TASK_STACK     6144u
 #define APP_INTERCOM_RX_TASK_STACK      4096u
 #define APP_INTERCOM_HEARTBEAT_STACK    3072u
 
+/** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
-    APP_INTERCOM_PKT_REGISTER = 1,
-    APP_INTERCOM_PKT_CHANNEL = 2,
-    APP_INTERCOM_PKT_PTT_START = 3,
-    APP_INTERCOM_PKT_AUDIO = 4,
-    APP_INTERCOM_PKT_PTT_STOP = 5,
-    APP_INTERCOM_PKT_HEARTBEAT = 6,
+    APP_INTERCOM_PKT_REGISTER = 1,  /**< 设备注册（上报设备名到服务器） */
+    APP_INTERCOM_PKT_CHANNEL = 2,   /**< 频道切换 */
+    APP_INTERCOM_PKT_PTT_START = 3, /**< PTT 开始（对讲键按下） */
+    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（20ms PCM） */
+    APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
+    APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（10s 间隔） */
 } app_intercom_packet_type_t;
 
+/**
+ * @brief 解析后的数据包视图——零拷贝设计。
+ *
+ * 解析时不复制 payload，直接指向原始 buffer 中的偏移位置，
+ * 减少 20ms 音频帧的处理开销。
+ */
 typedef struct {
-    uint8_t type;
-    uint16_t channel;
-    uint32_t seq;
-    const uint8_t *payload;
-    uint16_t payload_len;
-    const uint8_t *packet;
-    uint16_t packet_len;
+    uint8_t type;           /**< 包类型（见 app_intercom_packet_type_t） */
+    uint16_t channel;       /**< 目标频道号 */
+    uint32_t seq;           /**< 发送序列号（每包递增） */
+    const uint8_t *payload; /**< payload 指针（指向原始 buffer 内部） */
+    uint16_t payload_len;   /**< payload 长度（字节） */
+    const uint8_t *packet;  /**< 完整包起始指针 */
+    uint16_t packet_len;    /**< 完整包长度（头 + payload） */
 } app_intercom_packet_view_t;
 
+/* ==========================================================================
+ * 全局状态变量
+ * ========================================================================== */
+
+/** @brief PTT 发送任务句柄，优先级 6（高于 biz_ai 和 svc_audio_rec），
+ *  确保 PTT 实时音频采集不被 AI 任务抢占。 */
 static osal_task_t s_ptt_task = NULL;
+
+/** @brief 对讲模块是否已启动。 */
 static volatile int s_started = 0;
+
+/** @brief UDP DTU 通道是否已连接就绪。
+ *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
+ *  底层 driver 会返回错误但不阻塞。 */
 static volatile int s_udp_ready = 0;
+
+/** @brief 当前是否处于 PTT 按下状态。
+ *  PTT 任务在 while(s_ptt_active) 循环中采集+发送，此标志为 0 时退出循环。 */
 static volatile int s_ptt_active = 0;
+
+/** @brief 当前对讲频道号（1-32），默认频道 1。
+ *  由 UI 频道切换或 PTT 按下时携带的频道号更新。 */
 static int32_t s_current_channel = APP_BUSINESS_DEFAULT_CHANNEL;
+
+/** @brief 全局 UDP 包序列号，每发一个包自增 1。
+ *  用于服务器端去重和排序。 */
 static uint32_t s_udp_seq = 0u;
 
-/** @brief 写入对讲协议 little-endian uint16 字段。 */
+/* ==========================================================================
+ * 协议编解码
+ * ========================================================================== */
+
+/** @brief 写入协议 little-endian uint16 字段。 */
 static void app_intercom_write_u16(uint8_t *buf, uint16_t value)
 {
     buf[0] = (uint8_t)(value & 0xffu);
     buf[1] = (uint8_t)((value >> 8) & 0xffu);
 }
 
-/** @brief 读取对讲协议 little-endian uint16 字段。 */
+/** @brief 读取协议 little-endian uint16 字段。 */
 static uint16_t app_intercom_read_u16(const uint8_t *buf)
 {
     return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
 }
 
-/** @brief 写入对讲协议 little-endian uint32 字段。 */
+/** @brief 写入协议 little-endian uint32 字段。 */
 static void app_intercom_write_u32(uint8_t *buf, uint32_t value)
 {
     buf[0] = (uint8_t)(value & 0xffu);
@@ -75,7 +141,7 @@ static void app_intercom_write_u32(uint8_t *buf, uint32_t value)
     buf[3] = (uint8_t)((value >> 24) & 0xffu);
 }
 
-/** @brief 读取对讲协议 little-endian uint32 字段。 */
+/** @brief 读取协议 little-endian uint32 字段。 */
 static uint32_t app_intercom_read_u32(const uint8_t *buf)
 {
     return (uint32_t)buf[0] |
@@ -84,6 +150,25 @@ static uint32_t app_intercom_read_u32(const uint8_t *buf)
            ((uint32_t)buf[3] << 24);
 }
 
+/**
+ * @brief 构建一个完整的 WTK1 协议包。
+ *
+ * 固定 34 字节头：
+ * - 魔数 "WTK1"（4B）
+ * - 类型（1B）
+ * - 头长度（1B）= 34
+ * - 频道号（2B LE）
+ * - 序列号（4B LE，自动递增）
+ * - 时间戳（4B LE，osal_get_tick_ms）
+ * - 设备名（16B，短名补 0）
+ * - payload 长度（2B LE）
+ *
+ * @param[out] out         输出缓冲区，至少 34 + payload_len 字节。
+ * @param[in]  type        包类型。
+ * @param[in]  payload     payload 数据（可为 NULL）。
+ * @param[in]  payload_len payload 长度（可为 0）。
+ * @return 实际包长度（头+payload）；失败返回 0。
+ */
 static uint16_t app_intercom_build_packet(uint8_t *out,
                                           uint8_t type,
                                           const uint8_t *payload,
@@ -111,6 +196,16 @@ static uint16_t app_intercom_build_packet(uint8_t *out,
     return (uint16_t)(APP_INTERCOM_PACKET_HEADER_LEN + payload_len);
 }
 
+/**
+ * @brief 解析原始字节流为数据包视图（零拷贝）。
+ *
+ * 只做校验和建立 view 结构体，不复制 payload 数据。
+ *
+ * @param[in]  packet 原始数据包缓冲区。
+ * @param[in]  len    缓冲区长度。
+ * @param[out] view   解析结果输出。
+ * @return 0=成功；-1=参数无效；-2=魔数不匹配；-3=长度校验失败。
+ */
 static int app_intercom_parse_packet(const uint8_t *packet,
                                      uint16_t len,
                                      app_intercom_packet_view_t *view)
@@ -140,6 +235,14 @@ static int app_intercom_parse_packet(const uint8_t *packet,
     return 0;
 }
 
+/**
+ * @brief 判断数据包是否来自本机。
+ *
+ * 服务器会原样转发所有音频包（包括本机的），
+ * 客户端通过比较设备名字段来过滤掉自己的包，避免回声。
+ *
+ * @return 1=是本机发出的包；0=非本机。
+ */
 static int app_intercom_packet_is_own(const uint8_t *packet)
 {
     char name[APP_INTERCOM_DEVICE_FIELD_LEN + 1u];
@@ -153,6 +256,12 @@ static int app_intercom_packet_is_own(const uint8_t *packet)
     return strncmp(name, APP_BUSINESS_DEVICE_NAME, APP_INTERCOM_DEVICE_FIELD_LEN) == 0;
 }
 
+/**
+ * @brief 发送无 payload 的控制包（注册/频道/PTT_START/PTT_STOP/心跳）。
+ *
+ * @param type 包类型。
+ * @return 成功返回 0；UDP 未就绪返回 -1。
+ */
 static int app_intercom_send_control(uint8_t type)
 {
     if (!s_udp_ready) {
@@ -165,6 +274,26 @@ static int app_intercom_send_control(uint8_t type)
     return service_network_udp_send(packet, len);
 }
 
+/* ==========================================================================
+ * 心跳任务 —— 保持服务器在线状态 + 断线自动重连
+ * ========================================================================== */
+
+/**
+ * @brief 心跳任务入口。
+ *
+ * ## 功能
+ * 1. 启动时发送 REGISTER + CHANNEL 包（注册设备到服务器）
+ * 2. 每 10 秒发送 HEARTBEAT 保活
+ * 3. 检测网络断开（app_status_monitor_network_ready()）后自动重连 UDP DTU
+ * 4. 重连后重新发送 REGISTER + CHANNEL，恢复在线状态
+ *
+ * ## 重连机制
+ * - biz_network 任务（app_status_monitor.c, 3s 周期）持续更新 s_network_ready
+ * - 心跳任务每 10s 检查 s_network_ready 和 s_udp_ready
+ * - 若网络已恢复但 UDP 通道未建立 → 调用 service_network_udp_connect() 重建
+ *
+ * @param arg 未使用。
+ */
 static void app_intercom_heartbeat_task(void *arg)
 {
     (void)arg;
@@ -186,6 +315,24 @@ static void app_intercom_heartbeat_task(void *arg)
     }
 }
 
+/* ==========================================================================
+ * UDP 接收任务
+ * ========================================================================== */
+
+/**
+ * @brief 处理接收到的单帧完整 UDP 包。
+ *
+ * ## 过滤规则
+ * 1. 包频道 != 当前频道 → 忽略（不同频道的人说话听不到）
+ * 2. 包来自本机 → 忽略（服务器会原样转发，过滤掉自己的回声）
+ * 3. 包类型 != AUDIO → 忽略（控制包不需要本地处理）
+ *
+ * ## 播放
+ * 如果是有效的音频包，将 payload（PCM 16bit）通过 service_audio_play() 播放。
+ *
+ * @param packet 完整包数据。
+ * @param len    包长度。
+ */
 static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 {
     app_intercom_packet_view_t view;
@@ -211,6 +358,26 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
     }
 }
 
+/**
+ * @brief UDP 接收任务入口。
+ *
+ * ## 粘包/半包处理
+ * UART 透传（ML307C DTU 模式）的数据可能粘包或半包：
+ * - 粘包：一次 UART read 可能返回多个完整包
+ * - 半包：一个完整包可能跨两次 UART read
+ *
+ * ## 处理策略
+ * 1. 维护一个内部接收环形缓冲区 rx[1348]（= 最大包长 × 2）
+ * 2. 每次读取追加到 used 之后
+ * 3. 从 pos 开始扫描 WTK1 魔数
+ * 4. 找到魔数 → 解析头长度和 payload 长度 → 判断是否完整包
+ * 5. 完整包 → 调用 handle_udp_packet() → pos 后移
+ * 6. 半包 → break 等待下次读取
+ * 7. 非魔数字节 → pos++ 继续扫描
+ * 8. 消费完后 memmove 剩余数据到缓冲区头部
+ *
+ * @param arg 未使用。
+ */
 static void app_intercom_udp_rx_task(void *arg)
 {
     (void)arg;
@@ -257,11 +424,40 @@ static void app_intercom_udp_rx_task(void *arg)
     }
 }
 
+/* ==========================================================================
+ * PTT 发送任务 —— 按键 → 采集 → 封装 → 发送
+ * ========================================================================== */
+
+/**
+ * @brief PTT 发送任务入口。
+ *
+ * ## 执行流程（每次被 notify 唤醒一次 = 一次完整的"按下到松开"）
+ *
+ * 1. 阻塞等待 notify（来自 app_intercom_ptt_start()）
+ * 2. 检查 s_ptt_active 是否为 1 + 抢占音频会话锁（try_begin）
+ * 3. 发送 PTT_START 控制包（通知服务器和同频道其他人）
+ * 4. 循环（while (s_ptt_active)）：
+ *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
+ *    b. app_intercom_build_packet(packet, AUDIO, pcm, 640)
+ *    c. service_network_udp_send(packet, len) —— 发给服务器
+ *    d. 服务器收到后原样转发给同频道所有其他客户端
+ * 5. 用户松手 → s_ptt_active = 0 → 退出循环
+ * 6. 发送 PTT_STOP 控制包
+ * 7. 打印发送统计（成功/失败帧数）
+ * 8. 释放音频会话锁 → notify_take 阻塞等待下次
+ *
+ * ## 性能约束
+ * - 每帧 20ms (320 samples × 16bit = 640 字节)
+ * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
+ * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
+ *
+ * @param arg 未使用。
+ */
 static void app_intercom_ptt_task(void *arg)
 {
     (void)arg;
-    int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];
-    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];
+    int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
+    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
         (void)osal_task_notify_take(OSAL_WAIT_FOREVER);
@@ -317,6 +513,22 @@ static void app_intercom_ptt_task(void *arg)
     }
 }
 
+/* ==========================================================================
+ * 公开接口
+ * ========================================================================== */
+
+/**
+ * @brief 启动对讲模块（开机时由 app_business_start 调用）。
+ *
+ * ## 创建的任务
+ * - biz_ptt（优先级 6, 栈 6144）—— PTT 发送
+ * - biz_udp_rx（优先级 5, 栈 4096）—— UDP 接收
+ * - biz_heartbeat（优先级 4, 栈 3072）—— 心跳 + 重连
+ *
+ * 同时尝试首次 UDP 连接。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
 int app_intercom_start(void)
 {
     if (s_started) {
@@ -367,6 +579,14 @@ int app_intercom_start(void)
     return 0;
 }
 
+/**
+ * @brief 切换对讲频道。
+ *
+ * 更新 s_current_channel → 立即发送 CHANNEL 控制包通知服务器。
+ * 之后收到的 UDP 音频包只有匹配当前频道的才会被播放。
+ *
+ * @param channel 新频道号（1-32），非法值会被钳位到默认频道。
+ */
 void app_intercom_set_channel(int32_t channel)
 {
     if (channel <= 0) {
@@ -376,6 +596,21 @@ void app_intercom_set_channel(int32_t channel)
     (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 }
 
+/**
+ * @brief PTT 按下——启动对讲发送。
+ *
+ * ## 流程
+ * 1. 更新频道号（如果有传入）
+ * 2. 检查音频会话是否被 AI 占用
+ * 3. 设置 s_ptt_active = 1
+ * 4. notify_give(s_ptt_task) → 唤醒 biz_ptt 任务开始采集+发送
+ *
+ * ## 与 AI 互斥
+ * 如果 AI 正在录音（s_audio_session_busy == 1），则 is_busy() 返回 1，
+ * 本函数直接 return，本次 PTT 操作被忽略。用户需要等 AI 处理完成后再按。
+ *
+ * @param channel 当前对讲频道号。
+ */
 void app_intercom_ptt_start(int32_t channel)
 {
     s_current_channel = channel > 0 ? channel : s_current_channel;
@@ -389,6 +624,12 @@ void app_intercom_ptt_start(int32_t channel)
     }
 }
 
+/**
+ * @brief PTT 松开——停止对讲发送。
+ *
+ * 清零 s_ptt_active，PTT 任务在下次循环迭代时检测到此标志为 0，
+ * 退出内层 while 循环，发送 PTT_STOP 并释放音频会话锁。
+ */
 void app_intercom_ptt_stop(void)
 {
     s_ptt_active = 0;

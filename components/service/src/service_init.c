@@ -1,6 +1,10 @@
 /**
  * @file service_init.c
  * @brief Driver 与 Service 初始化装配实现。
+ *
+ * 本文件是 service 与具体 driver 的唯一装配点。service_xxx.c 不包含
+ * driver 头文件，只知道自己定义的 ops；这里根据 service_config.h 中的
+ * 选择宏，把已初始化 driver 暴露的函数填入对应 service 的配置结构。
  */
 #include "service_init.h"
 
@@ -22,6 +26,15 @@
 static const char *TAG = "service_init";
 
 #if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_ML307C
+/**
+ * @brief 将 ML307C driver 状态转换为通用 service_network_status_t。
+ *
+ * ML307C 的状态字段来自 AT、SIM、CEREG、ISLINK、CSQ 等蜂窝链路概念。
+ * service 层只关心通用字段，因此在装配层完成一次字段映射。
+ *
+ * @param[out] status 通用网络状态输出。
+ * @return 成功返回 0；失败返回负值。
+ */
 static int service_init_network_ml307c_get_status(service_network_status_t *status)
 {
     if (status == NULL) {
@@ -45,6 +58,16 @@ static int service_init_network_ml307c_get_status(service_network_status_t *stat
 #endif
 
 #if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
+/**
+ * @brief 将 WiFi driver 状态转换为通用 service_network_status_t。
+ *
+ * WiFi 没有 SIM/AT/CEREG 概念，因此将 sim_ready/at_ready 固定映射为 1，
+ * link_ready 同时作为 reg_state 和 link_state 使用，保证 UI 和业务层可复用
+ * 同一套网络状态判断。
+ *
+ * @param[out] status 通用网络状态输出。
+ * @return 成功返回 0；失败返回负值。
+ */
 static int service_init_network_wifi_get_status(service_network_status_t *status)
 {
     if (status == NULL) {
@@ -69,6 +92,10 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
 
 int service_init_network(void)
 {
+    /*
+     * 局部 cfg 是安全的：service_network_init() 会复制 ops 到自身静态变量。
+     * 初始化返回后 cfg 生命周期结束，不影响后续 service 调用。
+     */
     service_network_config_t network_cfg = {
         .ops = {
 #if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
@@ -106,6 +133,10 @@ int service_init_network(void)
 
 int service_init_audio(void)
 {
+    /*
+     * 音频 service 只需要“读 PCM”和“播 PCM/音量/静音”能力。
+     * 具体装配 ES7210+ES8311 还是 INMP441+MAX98357A 由 SERVICE_INIT_AUDIO 决定。
+     */
     service_audio_config_t audio_cfg = {
         .capture_ops = {
 #if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
@@ -142,6 +173,11 @@ int service_init_audio(void)
 
 int service_init(void)
 {
+    /*
+     * 总装配顺序与 app 依赖一致：
+     * screen 先初始化，app_business_start() 才能创建 UI；
+     * battery/status/audio/network 之后由 app 后台任务持续使用。
+     */
     service_screen_config_t screen_cfg = {
         .device_ops = {
             .is_initialized = driver_lcd_is_initialized,

@@ -1,6 +1,9 @@
 /**
  * @file service_battery.h
  * @brief 电池电量服务接口。
+ *
+ * 下层 driver 只提供分压后的 ADC 电压采样；service 负责滤波、
+ * 电压到百分比曲线映射和 UI 友好的百分比取整。
  */
 #ifndef SERVICE_BATTERY_H
 #define SERVICE_BATTERY_H
@@ -27,6 +30,9 @@ typedef struct {
 /**
  * @brief 初始化电池电量服务。
  *
+ * 初始化时会复制 cfg 中的采样能力函数表，并检查下层 driver 是否已初始化。
+ *
+ * @param[in] cfg 电池 service 初始化配置；为 NULL 时仅检查 service 是否已初始化。
  * @return 成功返回 0；失败返回负值。
  */
 int service_battery_init(const service_battery_config_t *cfg);
@@ -40,6 +46,8 @@ int service_battery_deinit(void);
 
 /**
  * @brief 获取电池电量百分比。
+ *
+ * 内部会读取一次 ADC 电压并经过滤波/曲线映射，返回 5% 步进后的百分比。
  *
  * @param[out] percent 电量百分比，范围 0 到 100。
  * @return 成功返回 0；失败返回负值。
@@ -56,6 +64,8 @@ int service_battery_get_adc_voltage_mv(int *voltage_mv);
 
 /**
  * @brief 获取同一次采样对应的 ADC 电压和电量百分比。
+ *
+ * 推荐 UI 状态任务使用该接口，保证电压和百分比来自同一次采样链路。
  *
  * @param[out] voltage_mv ADC 引脚电压，单位 mV。
  * @param[out] percent 电量百分比，范围 0 到 100。

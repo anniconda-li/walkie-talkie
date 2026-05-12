@@ -1,21 +1,62 @@
+/**
+ * @file ui_app_settings.c
+ * @brief 设置页面 UI——亮度、音量、语言、服务器信息。
+ *
+ * ## 页面布局（240×280 屏幕）
+ * ```
+ * ┌──────────────────────────┐
+ * │    状态栏（shell 管理）    │  y=0..30
+ * ├──────────────────────────┤
+ * │  ┌────────────────────┐  │
+ * │  │ 屏幕亮度            │  │  y=48
+ * │  │ [═══════●══════] 72%│  │  滑块: y=78
+ * │  │                    │  │
+ * │  │ 音量大小            │  │  y=103
+ * │  │ [══════●═══════] 56%│  │  滑块: y=132
+ * │  │                    │  │
+ * │  │ 语言          [v]  │  │  y=154, 下拉框: y=178
+ * │  │                    │  │
+ * │  │ 服务器              │  │  y=216
+ * │  │ IP   10.212.141.251│  │
+ * │  │ 端口 9000           │  │
+ * │  └────────────────────┘  │
+ * └──────────────────────────┘
+ * ```
+ *
+ * ## 交互
+ * - 亮度/音量滑块：LV_EVENT_VALUE_CHANGED → 回调到 app_business
+ * - 语言下拉框：选择中文/English → 更新所有页面文字
+ * - 自定义箭头符号（"v"/"^"）替代 LVGL 默认下拉图标，因为 ESP32-S3 的中文字体
+ *   可能缺少 LVGL 内置图标字形
+ *
+ * ## 动画说明
+ * - 入场：面板整体从上方滑入
+ * - 退场：面板向上滑出 → 删除 root → 调用 done_cb
+ */
 #include "ui_app_settings.h"
 #include "ui.h"
 #include "ui_event.h"
 #include "ui_i18n.h"
 
+/** @brief 页面退场上下文——动画完成后清理 root 并触发回调。 */
 typedef struct {
     lv_anim_completed_cb_t done_cb;
     lv_obj_t * root;
 } app_exit_ctx_t;
 
+/** @brief 设置页面全局视图对象。 */
 static ui_settings_view_t g_settings_view;
+
+/** @brief 设置面板（深灰圆角矩形）。 */
 static lv_obj_t *g_settings_panel;
 
+/** @brief LVGL 动画回调：设置对象 y 坐标。 */
 static void anim_set_y(void *obj, int32_t y)
 {
     lv_obj_set_y((lv_obj_t *)obj, y);
 }
 
+/** @brief 启动 Y 轴位移动画。 */
 static void start_y_anim(lv_obj_t *obj,
                          int32_t from,
                          int32_t to,
@@ -40,6 +81,7 @@ static void start_y_anim(lv_obj_t *obj,
     lv_anim_start(&anim);
 }
 
+/** @brief 退场动画完成回调：删除 root → 释放上下文 → 调用上层回调。 */
 static void app_exit_done_cb(lv_anim_t *a)
 {
     app_exit_ctx_t *ctx = (app_exit_ctx_t *)lv_anim_get_user_data(a);
@@ -55,6 +97,12 @@ static void app_exit_done_cb(lv_anim_t *a)
     lv_free(ctx);
 }
 
+/**
+ * @brief 创建设置面板（深灰圆角矩形容器）。
+ *
+ * @param parent 父容器。
+ * @return 面板 LVGL 对象。
+ */
 static lv_obj_t *create_panel(lv_obj_t *parent)
 {
     lv_obj_t *panel = lv_obj_create(parent);
@@ -70,6 +118,14 @@ static lv_obj_t *create_panel(lv_obj_t *parent)
     return panel;
 }
 
+/**
+ * @brief 创建标签文字（浅灰色标题）。
+ *
+ * @param parent 父容器。
+ * @param text   显示文本。
+ * @param y      垂直位置。
+ * @return 标签 LVGL 对象。
+ */
 static lv_obj_t *create_caption(lv_obj_t *parent, const char *text, int32_t y)
 {
     lv_obj_t *label = lv_label_create(parent);
@@ -79,6 +135,16 @@ static lv_obj_t *create_caption(lv_obj_t *parent, const char *text, int32_t y)
     return label;
 }
 
+/**
+ * @brief 创建范围滑块（0-100）。
+ *
+ * 主轨道深灰(#454545)，已选部分橙色(#FF6600)，滑块白色。
+ *
+ * @param parent 父容器。
+ * @param y      垂直位置。
+ * @param value  初始值。
+ * @return 滑块 LVGL 对象。
+ */
 static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
 {
     lv_obj_t *slider = lv_slider_create(parent);
@@ -92,6 +158,14 @@ static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
     return slider;
 }
 
+/**
+ * @brief 创建设置页面完整 UI。
+ *
+ * 控件创建顺序与视觉布局一致（从上到下）。
+ *
+ * @param parent 挂载的父容器（g_app_content_root）。
+ * @return 设置页面根对象。
+ */
 lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 {
     lv_obj_t *root = lv_obj_create(parent);
@@ -105,12 +179,15 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 
     g_settings_panel = create_panel(root);
 
+    /* 亮度行：标签 + 滑块 */
     g_settings_view.brightness_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_BRIGHTNESS), 0);
     g_settings_view.brightness_slider = create_slider(g_settings_panel, 30, 72);
 
+    /* 音量行 */
     g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 55);
     g_settings_view.volume_slider = create_slider(g_settings_panel, 84, 56);
 
+    /* 语言行：标签 + 下拉框 + 自定义箭头 */
     g_settings_view.language_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_LANGUAGE), 106);
     g_settings_view.language_dropdown = lv_dropdown_create(g_settings_panel);
     lv_obj_set_pos(g_settings_view.language_dropdown, 2, 130);
@@ -127,6 +204,7 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
     lv_obj_set_style_pad_left(g_settings_view.language_dropdown, 14, 0);
     lv_obj_set_style_pad_right(g_settings_view.language_dropdown, 30, 0);
 
+    /* 自定义下拉箭头（"v" 收起 / "^" 展开） */
     g_settings_view.language_symbol_label = lv_label_create(g_settings_panel);
     lv_label_set_text(g_settings_view.language_symbol_label, "v");
     lv_obj_set_style_text_color(g_settings_view.language_symbol_label, lv_color_white(), 0);
@@ -134,6 +212,7 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
     lv_obj_add_flag(g_settings_view.language_symbol_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(g_settings_view.language_symbol_label, LV_OBJ_FLAG_EVENT_BUBBLE);
 
+    /* 服务器信息行（只读标签） */
     g_settings_view.server_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_SERVER), 168);
 
     g_settings_view.ip_label = lv_label_create(g_settings_panel);
@@ -150,6 +229,13 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
     return root;
 }
 
+/**
+ * @brief 播放设置页面入场动画。
+ *
+ * 面板从上方(-260)滑入到 y=48（300ms, ease_out）。
+ *
+ * @param root 设置页面根对象（未使用）。
+ */
 void ui_app_settings_enter(lv_obj_t * root)
 {
     (void)root;
@@ -158,6 +244,15 @@ void ui_app_settings_enter(lv_obj_t * root)
     start_y_anim(g_settings_panel, -260, 48, 300, 0, lv_anim_path_ease_out, NULL, NULL);
 }
 
+/**
+ * @brief 播放设置页面退场动画并在完成后删除 root。
+ *
+ * 面板向上滑出到 y=-260（240ms, ease_in）。
+ * 动画完成 → 删除 root → 调用 done_cb。
+ *
+ * @param root    设置页面根对象。
+ * @param done_cb 退场完成回调。
+ */
 void ui_app_settings_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
     app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));

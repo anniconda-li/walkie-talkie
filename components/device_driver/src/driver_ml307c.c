@@ -87,7 +87,8 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                             uint16_t body_len,
                             uint8_t *resp,
                             uint16_t resp_size,
-                            uint16_t *resp_len);
+                            uint16_t *resp_len,
+                            uint32_t timeout_ms);
 static int ml307c_tcp_close(struct ml307c_dev * dev);
 
 static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needle)
@@ -835,7 +836,8 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                      uint16_t body_len,
                      uint8_t *resp,
                      uint16_t resp_size,
-                     uint16_t *resp_len)
+                     uint16_t *resp_len,
+                     uint32_t timeout_ms)
 {
     if (dev == NULL || url == NULL || body == NULL || body_len == 0u ||
         resp == NULL || resp_size == 0u || resp_len == NULL) {
@@ -844,6 +846,9 @@ static int ml307c_http_post(struct ml307c_dev * dev,
 
     if (id == 0u) {
         id = ML307C_HTTP_TASK_ID;
+    }
+    if (timeout_ms == 0u) {
+        timeout_ms = ML307C_HTTP_TIMEOUT_MS;
     }
 
     const char *safe_header = header != NULL ? header : "";
@@ -891,7 +896,7 @@ static int ml307c_http_post(struct ml307c_dev * dev,
              "AT+HTTP=%u,%u,%u,%u" ML307C_CRLF,
              (unsigned int)id,
              (unsigned int)body_len,
-             (unsigned int)ML307C_HTTP_TIMEOUT_MS,
+             (unsigned int)timeout_ms,
              (unsigned int)ML307C_HTTP_LATENCY_MS);
 
     ml307c_drain_uart(dev);
@@ -910,7 +915,7 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                                         resp,
                                         resp_size,
                                         resp_len,
-                                        ML307C_HTTP_TIMEOUT_MS + 10000u);
+                                        timeout_ms + 10000u);
 }
 
 static int ml307c_tcp_close(struct ml307c_dev * dev)
@@ -1172,13 +1177,17 @@ int driver_ml307c_http_post_wav(const char *url,
                                 uint16_t wav_len,
                                 uint8_t *resp,
                                 uint16_t resp_size,
-                                uint16_t *resp_len)
+                                uint16_t *resp_len,
+                                uint32_t timeout_ms)
 {
     if (s_ml307c == NULL || url == NULL || wav == NULL || resp == NULL || resp_len == NULL) {
         return -1;
     }
+    if (timeout_ms == 0u) {
+        timeout_ms = ML307C_HTTP_TIMEOUT_MS;
+    }
 
-    int ret = driver_ml307c_lock(60000u);
+    int ret = driver_ml307c_lock(timeout_ms + 15000u);
     if (ret != 0) {
         return ret;
     }
@@ -1190,7 +1199,8 @@ int driver_ml307c_http_post_wav(const char *url,
                            wav_len,
                            resp,
                            resp_size,
-                           resp_len);
+                           resp_len,
+                           timeout_ms);
     driver_ml307c_unlock();
     return ret;
 }

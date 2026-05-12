@@ -72,6 +72,7 @@ int driver_ml307c_http_post_wav(const char *url,
                                 uint16_t wav_len,
                                 uint8_t *resp,
                                 uint16_t resp_size,
-                                uint16_t *resp_len);
+                                uint16_t *resp_len,
+                                uint32_t timeout_ms);
 
 #endif /* ML307C_H */

@@ -327,7 +327,8 @@ int driver_wifi_http_post_wav(const char *url,
                               uint16_t wav_len,
                               uint8_t *resp,
                               uint16_t resp_size,
-                              uint16_t *resp_len)
+                              uint16_t *resp_len,
+                              uint32_t timeout_ms)
 {
     if (!s_wifi_got_ip || url == NULL || wav == NULL || resp == NULL || resp_len == NULL) {
         return -1;
@@ -335,7 +336,7 @@ int driver_wifi_http_post_wav(const char *url,
 
     esp_http_client_config_t cfg = {
         .url = url,
-        .timeout_ms = 30000,
+        .timeout_ms = (int)(timeout_ms == 0u ? 30000u : timeout_ms),
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {

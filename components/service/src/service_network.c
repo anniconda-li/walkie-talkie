@@ -1,6 +1,10 @@
 /**
  * @file service_network.c
- * @brief Network service capability facade.
+ * @brief 网络服务能力门面实现。
+ *
+ * service_network 只保存一份由 service_init 传入的网络能力函数表，
+ * 对 app 层提供稳定的网络 API。这里不包含 ML307C AT 指令或 WiFi socket
+ * 细节，具体差异全部由下层 driver 的 ops 实现承担。
  */
 #include "service_network.h"
 
@@ -11,9 +15,22 @@
 
 static const char *TAG = "service_network";
 
+/** @brief 当前绑定的网络 driver 能力函数表。 */
 static service_network_ops_t s_network_ops;
+
+/** @brief 网络 ops 是否已经完成绑定并通过初始化检查。 */
 static uint8_t s_network_ops_ready = 0u;
 
+/**
+ * @brief 检查网络服务所需的下层能力是否完整。
+ *
+ * 这里校验的是 service 运行所需的最小能力集合：状态查询、TCP、UDP、
+ * 下行读取和 HTTP WAV 上传。只要任一函数为空，service 就不允许初始化，
+ * 避免运行时空函数指针崩溃。
+ *
+ * @param[in] ops 待检查的网络能力函数表。
+ * @return 有效返回 0；无效返回 -1。
+ */
 static int service_network_ops_is_valid(const service_network_ops_t *ops)
 {
     if (ops == NULL ||
@@ -35,6 +52,10 @@ static int service_network_ops_is_valid(const service_network_ops_t *ops)
 
 int service_network_init(const service_network_config_t *cfg)
 {
+    /*
+     * cfg == NULL 表示“只检查当前 service 是否已经初始化”。
+     * 状态监控任务掉线重试时会调用这个路径，不重新选择 driver。
+     */
     if (cfg == NULL) {
         return s_network_ops_ready != 0u ? 0 : -1;
     }
@@ -58,6 +79,7 @@ int service_network_init(const service_network_config_t *cfg)
 
 int service_network_deinit(void)
 {
+    /* 清空函数表后，所有公开 API 都会先被 s_network_ops_ready 拦住。 */
     s_network_ops = (service_network_ops_t){0};
     s_network_ops_ready = 0u;
     return 0;
@@ -65,6 +87,7 @@ int service_network_deinit(void)
 
 int service_network_get_status(service_network_status_t *status)
 {
+    /* service 层不解释具体状态来源，只转发给已绑定的 driver 适配函数。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }
@@ -74,6 +97,7 @@ int service_network_get_status(service_network_status_t *status)
 
 int service_network_is_ready(void)
 {
+    /* ready 判断由 driver 定义，WiFi 表示 got IP，ML307C 表示数据链路可用。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }
@@ -83,6 +107,7 @@ int service_network_is_ready(void)
 
 int service_network_tcp_connect(const char *host, int port)
 {
+    /* TCP 接口保留给简单连通性测试和后续业务扩展。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }
@@ -110,6 +135,7 @@ int service_network_tcp_close(void)
 
 int service_network_udp_connect(const char *host, int port)
 {
+    /* 对 WiFi 是创建/记录 UDP 目标；对 ML307C 是配置 DTU UDP 通道。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }
@@ -128,6 +154,7 @@ int service_network_udp_send(const uint8_t *data, int len)
 
 int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
+    /* 下行读取为轮询式接口，app_intercom 的 UDP 接收任务负责包重组。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }
@@ -140,11 +167,13 @@ int service_network_http_post_wav(const char *url,
                                   uint16_t wav_len,
                                   uint8_t *resp,
                                   uint16_t resp_size,
-                                  uint16_t *resp_len)
+                                  uint16_t *resp_len,
+                                  uint32_t timeout_ms)
 {
+    /* AI 问答第一版只暴露 WAV POST，避免把通用 HTTP 细节扩散到 app。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }
 
-    return s_network_ops.http_post_wav(url, wav, wav_len, resp, resp_size, resp_len);
+    return s_network_ops.http_post_wav(url, wav, wav_len, resp, resp_size, resp_len, timeout_ms);
 }

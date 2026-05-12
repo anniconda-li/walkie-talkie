@@ -43,6 +43,10 @@ typedef struct {
 /**
  * @brief 初始化屏幕服务。
  *
+ * 初始化时会复制下层屏幕能力函数表，并把 driver 已创建的 LCD panel/touch
+ * 句柄接入 LVGL port。service 不负责初始化具体 LCD 或触摸芯片。
+ *
+ * @param[in] cfg 屏幕 service 初始化配置。
  * @return 成功返回 0；失败返回负值。
  */
 int service_screen_init(const service_screen_config_t *cfg);
@@ -56,6 +60,9 @@ int service_screen_deinit(void);
 
 /**
  * @brief 获取屏幕 UI 互斥锁。
+ *
+ * app/UI 线程在访问 LVGL 对象树前应先加锁，访问完成后调用
+ * service_screen_unlock() 释放。
  *
  * @param[in] timeout_ms 等待超时时间，0 表示一直等待。
  * @return 成功返回 0；失败返回负值。

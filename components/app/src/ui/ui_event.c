@@ -1,3 +1,23 @@
+/**
+ * @file ui_event.c
+ * @brief UI 事件桥接——LVGL 控件事件到业务回调的转换层。
+ *
+ * ## 设计原则
+ * UI 层只负责控件创建、动画和用户交互检测，不感知任何硬件和业务逻辑。
+ * 所有"用户做了什么"都通过 ui_event_callbacks_t 回调函数指针桥接到 app_business 层，
+ * 由 app_business 转发给具体的 app 模块。
+ *
+ * ## 回调注册流程
+ * 1. app_business.c 在启动时调用 ui_event_set_callbacks(&callbacks) 注册全局回调
+ * 2. 各 UI 页面（ui_app_*.c）在创建控件后调用 ui_event_register_*() 绑定 LVGL 事件
+ * 3. 用户操作 → LVGL 事件 → 本文件的事件处理函数 → 调用 g_callbacks.xxx()
+ *
+ * ## 当前支持的事件
+ * - 对讲：频道切换（+/- 按钮）、PTT 按下/松开（长按/释放）
+ * - 相机：拍照、上传、重拍
+ * - AI：提问开始/停止（长按/释放）
+ * - 设置：亮度/音量滑块变化、语言切换
+ */
 #include "ui_event.h"
 #include "ui_i18n.h"
 #include "ui_shell.h"
@@ -9,8 +29,19 @@
 #define PTT_RING_MAX_SIZE 132
 #define AI_BAR_BASE_H 12
 
+/**
+ * @brief 全局 UI 事件回调集合。
+ *
+ * 由 app_business.c 在启动时通过 ui_event_set_callbacks() 注册。
+ * UI 控件的 LVGL 事件处理函数通过此结构体调用业务回调。
+ */
 static ui_event_callbacks_t g_callbacks;
 
+/* ==========================================================================
+ * 通用 UI 工具函数
+ * ========================================================================== */
+
+/** @brief 设置 LVGL 对象的隐藏/可见状态。 */
 static void set_obj_hidden(lv_obj_t *obj, bool hidden)
 {
     if(obj == NULL) {
@@ -25,6 +56,11 @@ static void set_obj_hidden(lv_obj_t *obj, bool hidden)
     }
 }
 
+/* ==========================================================================
+ * 对讲页面事件处理
+ * ========================================================================== */
+
+/** @brief 刷新频道标签文字（"CH 01" ~ "CH 32" 格式）。 */
 static void refresh_intercom_channel(ui_intercom_view_t *view)
 {
     char text[16];
@@ -37,22 +73,34 @@ static void refresh_intercom_channel(ui_intercom_view_t *view)
     lv_label_set_text(view->channel_label, text);
 }
 
+/* ---- 动画回调函数（由 LVGL 动画引擎调用） ---- */
+
+/** @brief LVGL 动画回调：设置对象尺寸（用于 PTT 波纹效果）。 */
 static void anim_set_ring_size(void *obj, int32_t size)
 {
     lv_obj_set_size((lv_obj_t *)obj, size, size);
     lv_obj_center((lv_obj_t *)obj);
 }
 
+/** @brief LVGL 动画回调：设置对象透明度（用于 PTT 波纹渐隐效果）。 */
 static void anim_set_opa(void *obj, int32_t opa)
 {
     lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)opa, 0);
 }
 
+/** @brief LVGL 动画回调：设置 AI 录音柱高度（用于录音动效）。 */
 static void anim_set_ai_bar_h(void *obj, int32_t h)
 {
     lv_obj_set_height((lv_obj_t *)obj, h);
 }
 
+/**
+ * @brief 启动 PTT 波纹动画。
+ *
+ * 3 个同心圆从 48px 扩张到 132px 同时透明→不透明，
+ * 每层延迟 240ms 依次启动，产生涟漪效果。
+ * LV_ANIM_REPEAT_INFINITE 表示无限循环。
+ */
 static void start_ptt_ring_anim(lv_obj_t *ring, uint32_t delay)
 {
     lv_anim_t size_anim;
@@ -89,6 +137,7 @@ static void start_ptt_ring_anim(lv_obj_t *ring, uint32_t delay)
     lv_anim_start(&opa_anim);
 }
 
+/** @brief 停止 PTT 波纹动画，恢复默认状态。 */
 static void stop_ptt_ring_anim(lv_obj_t *ring, int32_t index)
 {
     int32_t size = 58 + index * 24;
@@ -104,6 +153,12 @@ static void stop_ptt_ring_anim(lv_obj_t *ring, int32_t index)
     anim_set_ring_size(ring, size);
 }
 
+/**
+ * @brief 切换对讲页面的"说话中"视觉状态。
+ *
+ * PTT 按下时：显示 3 层涟漪波纹 + 隐藏频道标签 + 按钮变橙色
+ * PTT 松开时：停止波纹 + 显示频道标签 + 按钮恢复灰色
+ */
 static void set_intercom_talking(ui_intercom_view_t *view, bool talking)
 {
     if(view == NULL) {
@@ -129,6 +184,7 @@ static void set_intercom_talking(ui_intercom_view_t *view, bool talking)
     }
 }
 
+/** @brief 切换频道（delta = +1 或 -1），钳位到 1-32 范围并触发回调。 */
 static void intercom_change_channel(ui_intercom_view_t *view, int32_t delta)
 {
     if(view == NULL) {
@@ -150,6 +206,9 @@ static void intercom_change_channel(ui_intercom_view_t *view, int32_t delta)
     }
 }
 
+/* ---- LVGL 事件回调（注册到具体控件上） ---- */
+
+/** @brief 频道减少按钮事件：单击或长按连续减频道。 */
 static void intercom_dec_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -159,6 +218,7 @@ static void intercom_dec_event_cb(lv_event_t *e)
     }
 }
 
+/** @brief 频道增加按钮事件：单击或长按连续加频道。 */
 static void intercom_inc_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -168,6 +228,13 @@ static void intercom_inc_event_cb(lv_event_t *e)
     }
 }
 
+/**
+ * @brief PTT 按钮事件：长按开始说话，松开停止。
+ *
+ * LV_EVENT_LONG_PRESSED —— 用户按住不放（LVGL 内部计时约 400ms 触发）
+ * LV_EVENT_RELEASED —— 用户松手
+ * LV_EVENT_PRESS_LOST —— 手指滑出按钮区域
+ */
 static void intercom_ptt_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -187,6 +254,11 @@ static void intercom_ptt_event_cb(lv_event_t *e)
     }
 }
 
+/* ==========================================================================
+ * 相机页面事件处理
+ * ========================================================================== */
+
+/** @brief 拍照按钮：冻结预览画面，启用上传和重拍按钮。 */
 static void camera_capture_event_cb(lv_event_t *e)
 {
     ui_camera_view_t *view = (ui_camera_view_t *)lv_event_get_user_data(e);
@@ -207,6 +279,7 @@ static void camera_capture_event_cb(lv_event_t *e)
     }
 }
 
+/** @brief 上传按钮：触发上传回调。 */
 static void camera_upload_event_cb(lv_event_t *e)
 {
     if(lv_event_get_code(e) == LV_EVENT_CLICKED && g_callbacks.camera_upload_requested != NULL) {
@@ -214,6 +287,7 @@ static void camera_upload_event_cb(lv_event_t *e)
     }
 }
 
+/** @brief 重拍按钮：恢复实时预览状态，重新启用拍照。 */
 static void camera_retake_event_cb(lv_event_t *e)
 {
     ui_camera_view_t *view = (ui_camera_view_t *)lv_event_get_user_data(e);
@@ -234,6 +308,28 @@ static void camera_retake_event_cb(lv_event_t *e)
     }
 }
 
+/* ==========================================================================
+ * AI 页面事件处理
+ * ========================================================================== */
+
+/**
+ * @brief 切换 AI 页面的"说话中/空闲"视觉状态。
+ *
+ * 说话中：
+ * - 按钮变橙色（#FF6600）
+ * - 显示 4 根录音柱，每根做上下伸缩动画（循环往复，模拟音量波形）
+ * - 标签改为"正在聆听..."
+ *
+ * 空闲：
+ * - 按钮恢复深灰色
+ * - 隐藏录音柱
+ * - 标签恢复"按住提问"
+ *
+ * 录音柱动画参数：
+ * - 基础高度 12px，伸缩到 24/36px（奇偶交替）
+ * - 周期 220ms-340ms（各柱有相位差，产生波浪效果）
+ * - LV_ANIM_REPEAT_INFINITE 无限循环
+ */
 static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
 {
     if(view == NULL) {
@@ -280,6 +376,13 @@ static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
                       speaking ? ui_i18n_text(UI_TEXT_AI_LISTENING) : ui_i18n_text(UI_TEXT_AI_IDLE));
 }
 
+/**
+ * @brief AI 提问按钮事件：长按开始录音，松开停止并触发问答。
+ *
+ * 与 PTT 相同的事件机制：
+ * - LV_EVENT_LONG_PRESSED → 触发录音开始
+ * - LV_EVENT_RELEASED / LV_EVENT_PRESS_LOST → 触发录音停止
+ */
 static void ai_ask_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -299,6 +402,17 @@ static void ai_ask_event_cb(lv_event_t *e)
     }
 }
 
+/* ==========================================================================
+ * 设置页面事件处理
+ * ========================================================================== */
+
+/**
+ * @brief 滑块事件：亮度或音量滑块值变化。
+ *
+ * 通过 user_data 区分亮度和音量滑块：
+ * - user_data == brightness_slider → 调亮度
+ * - user_data != brightness_slider → 调音量
+ */
 static void settings_slider_event_cb(lv_event_t *e)
 {
     lv_obj_t *slider = lv_event_get_target(e);
@@ -319,6 +433,7 @@ static void settings_slider_event_cb(lv_event_t *e)
     }
 }
 
+/** @brief 刷新设置页面所有标签文字（语言切换时调用）。 */
 static void refresh_settings_language(ui_settings_view_t *view)
 {
     if(view == NULL) {
@@ -334,6 +449,7 @@ static void refresh_settings_language(ui_settings_view_t *view)
     lv_dropdown_set_selected(view->language_dropdown, ui_i18n_is_english() ? 1 : 0);
 }
 
+/** @brief 语言下拉框事件：切换中英文。 */
 static void settings_language_event_cb(lv_event_t *e)
 {
     lv_obj_t *dropdown = lv_event_get_target(e);
@@ -354,6 +470,7 @@ static void settings_language_event_cb(lv_event_t *e)
     }
 }
 
+/** @brief 更新语言下拉框右侧的自定义箭头符号（"v" 展开 / "^" 收起）。 */
 static void refresh_language_symbol(ui_settings_view_t *view)
 {
     if(view == NULL || view->language_symbol_label == NULL || view->language_dropdown == NULL) {
@@ -370,6 +487,7 @@ static void refresh_language_symbol(ui_settings_view_t *view)
     }
 }
 
+/** @brief 下拉框展开/收起状态变化时更新箭头。 */
 static void settings_language_dropdown_state_event_cb(lv_event_t *e)
 {
     ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
@@ -379,6 +497,7 @@ static void settings_language_dropdown_state_event_cb(lv_event_t *e)
     }
 }
 
+/** @brief 点击自定义箭头符号 → 切换下拉框展开/收起。 */
 static void settings_language_symbol_event_cb(lv_event_t *e)
 {
     lv_obj_t *dropdown = (lv_obj_t *)lv_event_get_user_data(e);
@@ -395,6 +514,10 @@ static void settings_language_symbol_event_cb(lv_event_t *e)
     }
 }
 
+/* ==========================================================================
+ * 公开接口
+ * ========================================================================== */
+
 void ui_event_set_callbacks(const ui_event_callbacks_t *callbacks)
 {
     if(callbacks == NULL) {
@@ -405,6 +528,17 @@ void ui_event_set_callbacks(const ui_event_callbacks_t *callbacks)
     g_callbacks = *callbacks;
 }
 
+/**
+ * @brief 注册对讲页面的 LVGL 控件事件。
+ *
+ * 绑定：
+ * - channel_dec_button → intercom_dec_event_cb（LV_EVENT_ALL）
+ * - channel_inc_button → intercom_inc_event_cb（LV_EVENT_ALL）
+ * - ptt_button → intercom_ptt_event_cb（LV_EVENT_ALL）
+ *
+ * 全事件类型注册（LV_EVENT_ALL）是为了同时捕获
+ * CLICKED、LONG_PRESSED、LONG_PRESSED_REPEAT、RELEASED 等。
+ */
 void ui_event_register_intercom(ui_intercom_view_t *view)
 {
     if(view == NULL || view->ptt_button == NULL) {

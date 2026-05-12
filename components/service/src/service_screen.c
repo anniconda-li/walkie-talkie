@@ -1,6 +1,9 @@
 /**
  * @file service_screen.c
  * @brief ESP 平台屏幕服务实现。
+ *
+ * 屏幕 driver 负责初始化 LCD panel 和 touch 设备，service_screen 只负责把
+ * 这些 driver 句柄接入 esp_lvgl_port，并向 app/UI 层提供 LVGL 加锁接口。
  */
 #include "service_screen.h"
 
@@ -34,7 +37,11 @@ static lv_indev_t *s_screen_touch = NULL;
  * @brief LVGL port 是否已初始化。
  */
 static bool s_lvgl_port_inited = false;
+
+/** @brief 当前绑定的屏幕 driver 能力函数表。 */
 static service_screen_device_ops_t s_screen_ops;
+
+/** @brief 屏幕 ops 是否已绑定成功。 */
 static uint8_t s_screen_ops_ready = 0u;
 
 /**
@@ -48,8 +55,15 @@ static int service_screen_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
+/**
+ * @brief 检查屏幕 service 所需的显示/触摸能力是否完整。
+ *
+ * @param[in] ops 待检查的屏幕能力函数表。
+ * @return 有效返回 0；无效返回 -1。
+ */
 static int service_screen_ops_is_valid(const service_screen_device_ops_t *ops)
 {
+    /* 必须同时具备 panel IO、panel、touch 和分辨率，LVGL port 才能创建显示输入设备。 */
     if (ops == NULL ||
         ops->is_initialized == NULL ||
         ops->get_panel_io == NULL ||
@@ -82,6 +96,7 @@ int service_screen_init(const service_screen_config_t *cfg)
     if (cfg->device_ops.get_panel_io() == NULL ||
         cfg->device_ops.get_panel() == NULL ||
         cfg->device_ops.get_touch() == NULL) {
+        /* driver 已初始化但关键句柄为空时，说明底层 LCD/touch 初始化不完整。 */
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕句柄无效");
         return -5;
     }
@@ -99,6 +114,10 @@ int service_screen_init(const service_screen_config_t *cfg)
     s_lvgl_port_inited = true;
 
     lvgl_port_display_cfg_t display_cfg = {
+        /*
+         * 使用 driver 已创建的 panel 句柄接入 LVGL。
+         * buffer_size 按固定行数计算，避免在 service 层硬编码屏幕分辨率。
+         */
         .io_handle = s_screen_ops.get_panel_io(),
         .panel_handle = s_screen_ops.get_panel(),
         .control_handle = NULL,
@@ -132,6 +151,7 @@ int service_screen_init(const service_screen_config_t *cfg)
     }
 
     lvgl_port_touch_cfg_t touch_cfg = {
+        /* touch 绑定到同一个 display，坐标变换由 LVGL port 和屏幕旋转参数处理。 */
         .disp = s_screen_display,
         .handle = s_screen_ops.get_touch(),
         .scale = {
@@ -158,6 +178,7 @@ int service_screen_deinit(void)
     int ret = 0;
 
     if (s_screen_touch != NULL) {
+        /* 释放顺序与创建顺序相反：先 touch，再 display，最后 LVGL port。 */
         int del_ret = service_screen_err_to_int(lvgl_port_remove_touch(s_screen_touch));
         s_screen_touch = NULL;
         if (ret == 0) {
@@ -191,6 +212,7 @@ int service_screen_deinit(void)
 
 int service_screen_lock(uint32_t timeout_ms)
 {
+    /* 所有 app/UI 修改 LVGL 对象前都应通过该接口加锁。 */
     if (!s_lvgl_port_inited) {
         SERVICE_LOGE(TAG, "屏幕加锁失败: 服务未初始化");
         return -1;
