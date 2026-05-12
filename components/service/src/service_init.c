@@ -108,6 +108,7 @@ int service_init_network(void)
             .udp_connect = driver_wifi_udp_connect,
             .udp_send = driver_wifi_udp_send,
             .read_downlink = driver_wifi_read_downlink,
+            .http_post = driver_wifi_http_post,
             .http_post_wav = driver_wifi_http_post_wav,
 #else
             .is_initialized = driver_ml307c_is_initialized,
@@ -119,6 +120,7 @@ int service_init_network(void)
             .udp_connect = driver_ml307c_udp_connect,
             .udp_send = driver_ml307c_udp_send,
             .read_downlink = driver_ml307c_read_downlink,
+            .http_post = driver_ml307c_http_post,
             .http_post_wav = driver_ml307c_http_post_wav,
 #endif
         },

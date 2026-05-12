@@ -2,7 +2,7 @@
  * @file service_network.h
  * @brief 网络能力服务接口。
  *
- * 本服务对上提供网络状态查询、TCP/UDP 和 HTTP WAV 上传能力。底层网络链路
+ * 本服务对上提供网络状态查询、TCP/UDP 和 HTTP POST 能力。底层网络链路
  * 通过能力接口绑定，app 层只需要面向网络能力编排业务。
  */
 #ifndef SERVICE_NETWORK_H
@@ -40,6 +40,14 @@ typedef struct {
     int (*udp_connect)(const char *host, int port);   /**< 建立或配置 UDP 通道。 */
     int (*udp_send)(const uint8_t *data, int len);    /**< 发送 UDP 数据。 */
     int (*read_downlink)(uint8_t *buf, uint16_t len, uint32_t timeout_ms); /**< 读取下行数据。 */
+    int (*http_post)(const char *url,
+                     const char *content_type,
+                     const uint8_t *body,
+                     uint32_t body_len,
+                     uint8_t *resp,
+                     uint32_t resp_size,
+                     uint32_t *resp_len,
+                     uint32_t timeout_ms); /**< HTTP POST 二进制数据并读取响应。 */
     int (*http_post_wav)(const char *url,
                          const uint8_t *wav,
                          uint16_t wav_len,
@@ -144,6 +152,31 @@ int service_network_udp_send(const uint8_t *data, int len);
  * @return 读取字节数；超时返回 0；失败返回负值。
  */
 int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+
+/**
+ * @brief HTTP POST 上传二进制数据，并返回响应 body。
+ *
+ * App 层的 AI 分片协议使用该接口上传 WAV 分片、查询状态和拉取回复分片。
+ * 具体网络后端负责处理 WiFi HTTP client 或 ML307C AT+HTTP 差异。
+ *
+ * @param[in] url 请求 URL。
+ * @param[in] content_type 请求 Content-Type；为 NULL 时由后端使用默认值。
+ * @param[in] body 请求体缓冲区；body_len 为 0 时允许为 NULL。
+ * @param[in] body_len 请求体长度。
+ * @param[out] resp 响应 body 输出缓冲区。
+ * @param[in] resp_size 响应缓冲区长度。
+ * @param[out] resp_len 实际响应长度。
+ * @param[in] timeout_ms 请求等待响应的超时时间，单位毫秒。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_network_http_post(const char *url,
+                              const char *content_type,
+                              const uint8_t *body,
+                              uint32_t body_len,
+                              uint8_t *resp,
+                              uint32_t resp_size,
+                              uint32_t *resp_len,
+                              uint32_t timeout_ms);
 
 /**
  * @brief HTTP POST 上传 WAV，并返回响应 body。

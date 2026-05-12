@@ -3,7 +3,7 @@
  * @brief AI 语音问答业务。
  *
  * 对外只暴露“启动模块、开始录音、停止录音”三个动作。录音结束后的
- * WAV 打包、HTTP 上传、响应 WAV 解析和播放都在模块内部后台任务完成。
+ * WAV 打包、HTTP 分片上传、响应 WAV 分片拉取和播放都在模块内部后台任务完成。
  */
 #ifndef APP_AI_VOICE_H
 #define APP_AI_VOICE_H
@@ -34,7 +34,7 @@ void app_ai_voice_record_start(void);
 /**
  * @brief 停止 AI 问答录音。
  *
- * UI 松开 AI 按钮时调用；后台任务会把已录 PCM 打包成 WAV 并上传。
+ * UI 松开 AI 按钮时调用；后台任务会把已录 PCM 打包成 WAV 并分片上传。
  * 上传和播放在后台异步完成，调用方不需要等待 HTTP 返回。
  */
 void app_ai_voice_record_stop(void);

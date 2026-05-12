@@ -90,6 +90,8 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                             uint16_t *resp_len,
                             uint32_t timeout_ms);
 static int ml307c_tcp_close(struct ml307c_dev * dev);
+static int driver_ml307c_lock(uint32_t timeout_ms);
+static void driver_ml307c_unlock(void);
 
 static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needle)
 {
@@ -781,6 +783,8 @@ static int ml307c_http_capture_response(struct ml307c_dev * dev,
 {
     uint32_t start = dev->itf.get_tick();
     uint16_t total = 0u;
+    uint8_t trailer[256];
+    uint16_t trailer_len = 0u;
     int http_pos = -1;
 
     while ((dev->itf.get_tick() - start) < timeout_ms) {
@@ -794,6 +798,19 @@ static int ml307c_http_capture_response(struct ml307c_dev * dev,
             if (copy_len > 0u) {
                 memcpy(&resp[total], tmp, copy_len);
                 total = (uint16_t)(total + copy_len);
+            }
+            if (copy_len < (uint16_t)rlen) {
+                uint16_t extra_len = (uint16_t)rlen - copy_len;
+                if (extra_len > sizeof(trailer)) {
+                    extra_len = sizeof(trailer);
+                }
+                if ((uint16_t)(trailer_len + extra_len) > sizeof(trailer)) {
+                    uint16_t drop = (uint16_t)(trailer_len + extra_len - sizeof(trailer));
+                    memmove(trailer, &trailer[drop], (size_t)(trailer_len - drop));
+                    trailer_len = (uint16_t)(trailer_len - drop);
+                }
+                memcpy(&trailer[trailer_len], &tmp[copy_len], extra_len);
+                trailer_len = (uint16_t)(trailer_len + extra_len);
             }
 
             http_pos = ml307c_find_bytes(resp, total, "\r\n+HTTP:");
@@ -818,6 +835,12 @@ static int ml307c_http_capture_response(struct ml307c_dev * dev,
                 *resp_len = (uint16_t)body_len;
                 return 0;
             }
+            if (total >= resp_size &&
+                ml307c_find_bytes(trailer, trailer_len, "+HTTP:") >= 0 &&
+                ml307c_find_bytes(trailer, trailer_len, "\r\nOK") >= 0) {
+                *resp_len = resp_size;
+                return 0;
+            }
         }
 
         dev->itf.delay_ms(10u);
@@ -839,7 +862,7 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                      uint16_t *resp_len,
                      uint32_t timeout_ms)
 {
-    if (dev == NULL || url == NULL || body == NULL || body_len == 0u ||
+    if (dev == NULL || url == NULL || (body_len > 0u && body == NULL) ||
         resp == NULL || resp_size == 0u || resp_len == NULL) {
         return -1;
     }
@@ -906,7 +929,7 @@ static int ml307c_http_post(struct ml307c_dev * dev,
     if (dev->itf.uart_write((uint8_t *)cmd, cmd_len) != cmd_len) {
         return -2;
     }
-    if (dev->itf.uart_write((uint8_t *)body, body_len) != body_len) {
+    if (body_len > 0u && dev->itf.uart_write((uint8_t *)body, body_len) != body_len) {
         return -3;
     }
 
@@ -916,6 +939,57 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                                         resp_size,
                                         resp_len,
                                         timeout_ms + 10000u);
+}
+
+int driver_ml307c_http_post(const char *url,
+                            const char *content_type,
+                            const uint8_t *body,
+                            uint32_t body_len,
+                            uint8_t *resp,
+                            uint32_t resp_size,
+                            uint32_t *resp_len,
+                            uint32_t timeout_ms)
+{
+    if (s_ml307c == NULL || url == NULL || resp == NULL || resp_len == NULL ||
+        (body_len > 0u && body == NULL)) {
+        return -1;
+    }
+    if (body_len > 65535u || resp_size > 65535u) {
+        DRIVER_LOGW(TAG,
+                    "ML307C HTTP 单次数据超限, body=%u, resp=%u",
+                    (unsigned int)body_len,
+                    (unsigned int)resp_size);
+        return -2;
+    }
+    if (timeout_ms == 0u) {
+        timeout_ms = ML307C_HTTP_TIMEOUT_MS;
+    }
+
+    char header[96];
+    snprintf(header,
+             sizeof(header),
+             "Content-Type: %s",
+             content_type != NULL ? content_type : "application/octet-stream");
+
+    uint16_t local_resp_len = 0u;
+    int ret = driver_ml307c_lock(timeout_ms + 15000u);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = ml307c_http_post(s_ml307c,
+                           ML307C_HTTP_TASK_ID,
+                           url,
+                           header,
+                           body_len > 0u ? body : (const uint8_t *)"",
+                           (uint16_t)body_len,
+                           resp,
+                           (uint16_t)resp_size,
+                           &local_resp_len,
+                           timeout_ms);
+    driver_ml307c_unlock();
+
+    *resp_len = local_resp_len;
+    return ret;
 }
 
 static int ml307c_tcp_close(struct ml307c_dev * dev)

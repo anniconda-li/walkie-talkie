@@ -25,7 +25,7 @@ static uint8_t s_network_ops_ready = 0u;
  * @brief 检查网络服务所需的下层能力是否完整。
  *
  * 这里校验的是 service 运行所需的最小能力集合：状态查询、TCP、UDP、
- * 下行读取和 HTTP WAV 上传。只要任一函数为空，service 就不允许初始化，
+ * 下行读取和 HTTP POST。只要任一函数为空，service 就不允许初始化，
  * 避免运行时空函数指针崩溃。
  *
  * @param[in] ops 待检查的网络能力函数表。
@@ -43,6 +43,7 @@ static int service_network_ops_is_valid(const service_network_ops_t *ops)
         ops->udp_connect == NULL ||
         ops->udp_send == NULL ||
         ops->read_downlink == NULL ||
+        ops->http_post == NULL ||
         ops->http_post_wav == NULL) {
         return -1;
     }
@@ -160,6 +161,29 @@ int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_m
     }
 
     return s_network_ops.read_downlink(buf, len, timeout_ms);
+}
+
+int service_network_http_post(const char *url,
+                              const char *content_type,
+                              const uint8_t *body,
+                              uint32_t body_len,
+                              uint8_t *resp,
+                              uint32_t resp_size,
+                              uint32_t *resp_len,
+                              uint32_t timeout_ms)
+{
+    if (s_network_ops_ready == 0u) {
+        return -1;
+    }
+
+    return s_network_ops.http_post(url,
+                                   content_type,
+                                   body,
+                                   body_len,
+                                   resp,
+                                   resp_size,
+                                   resp_len,
+                                   timeout_ms);
 }
 
 int service_network_http_post_wav(const char *url,

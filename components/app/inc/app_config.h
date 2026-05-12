@@ -43,9 +43,15 @@ extern "C" {
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           9000
 /** @brief AI WAV 问答 HTTP 上传地址。 */
-#define APP_BUSINESS_AI_HTTP_URL        "http://10.212.141.28:8000/voice_chat_binary_with_audio?language=zh"
-/** @brief AI HTTP 请求等待响应的超时时间，单位 ms。 */
-#define APP_AI_HTTP_RESPONSE_TIMEOUT_MS 50000u
+#define APP_BUSINESS_AI_HTTP_URL        "http://10.212.141.251:8000/voice_chat_binary_with_audio?language=zh"
+/** @brief AI HTTP 单片请求等待响应的超时时间，单位 ms。 */
+#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    30000u
+/** @brief AI 服务器处理等待总超时时间，单位 ms。 */
+#define APP_AI_PROCESS_TIMEOUT_MS       120000u
+/** @brief AI 结果轮询间隔，单位 ms。 */
+#define APP_AI_RESULT_POLL_MS           1000u
+/** @brief AI HTTP 分片大小，需小于 ML307C AT+HTTP body_size 65535 限制。 */
+#define APP_AI_HTTP_CHUNK_BYTES         32768u
 /** @brief 开机默认频道号。 */
 #define APP_BUSINESS_DEFAULT_CHANNEL    1
 /** @brief 业务统一 PCM 采样率，单位 Hz。 */
@@ -59,13 +65,24 @@ extern "C" {
 /** @brief UDP 对讲单包 PCM 字节数。 */
 #define APP_BUSINESS_FRAME_BYTES        (APP_BUSINESS_FRAME_SAMPLES * sizeof(int16_t))
 /** @brief AI 单次录音最长时长，单位 ms。 */
-#define APP_BUSINESS_AI_MAX_MS          2000u
+#define APP_BUSINESS_AI_MAX_MS          60000u
+/** @brief AI 回复音频最长时长，单位 ms。 */
+#define APP_BUSINESS_AI_REPLY_MAX_MS    120000u
 /** @brief AI 单次录音最大样本数。 */
 #define APP_BUSINESS_AI_MAX_SAMPLES     ((APP_BUSINESS_AUDIO_SAMPLE_RATE * APP_BUSINESS_AI_MAX_MS) / 1000u)
+/** @brief AI 回复最大样本数。 */
+#define APP_BUSINESS_AI_REPLY_MAX_SAMPLES \
+    ((APP_BUSINESS_AUDIO_SAMPLE_RATE * APP_BUSINESS_AI_REPLY_MAX_MS) / 1000u)
 /** @brief 标准 PCM WAV 文件头长度。 */
 #define APP_BUSINESS_WAV_HEADER_LEN     44u
-/** @brief AI 录音 WAV 请求和响应复用缓冲区最大字节数。 */
-#define APP_BUSINESS_AI_WAV_MAX_BYTES   (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_MAX_SAMPLES * sizeof(int16_t)))
+/** @brief AI 上传请求 WAV 最大字节数。 */
+#define APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES \
+    (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_MAX_SAMPLES * sizeof(int16_t)))
+/** @brief AI 回复 WAV 最大字节数。 */
+#define APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES \
+    (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_REPLY_MAX_SAMPLES * sizeof(int16_t)))
+/** @brief AI 请求/回复复用 WAV 缓冲区字节数，按回复最大值分配。 */
+#define APP_BUSINESS_AI_WAV_BUF_BYTES   APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES
 
 #ifdef __cplusplus
 }

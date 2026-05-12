@@ -13,6 +13,7 @@
 #include "osal_task.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <netdb.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -322,16 +323,21 @@ int driver_wifi_tcp_close(void)
     return 0;
 }
 
-int driver_wifi_http_post_wav(const char *url,
-                              const uint8_t *wav,
-                              uint16_t wav_len,
-                              uint8_t *resp,
-                              uint16_t resp_size,
-                              uint16_t *resp_len,
-                              uint32_t timeout_ms)
+int driver_wifi_http_post(const char *url,
+                          const char *content_type,
+                          const uint8_t *body,
+                          uint32_t body_len,
+                          uint8_t *resp,
+                          uint32_t resp_size,
+                          uint32_t *resp_len,
+                          uint32_t timeout_ms)
 {
-    if (!s_wifi_got_ip || url == NULL || wav == NULL || resp == NULL || resp_len == NULL) {
+    if (!s_wifi_got_ip || url == NULL || resp == NULL || resp_len == NULL ||
+        (body_len > 0u && body == NULL)) {
         return -1;
+    }
+    if (body_len > (uint32_t)INT32_MAX || resp_size > (uint32_t)INT32_MAX) {
+        return -2;
     }
 
     esp_http_client_config_t cfg = {
@@ -340,19 +346,24 @@ int driver_wifi_http_post_wav(const char *url,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
-        return -2;
+        return -3;
     }
 
     int ret = 0;
     *resp_len = 0u;
     (void)esp_http_client_set_method(client, HTTP_METHOD_POST);
-    (void)esp_http_client_set_header(client, "Content-Type", "audio/wav");
+    (void)esp_http_client_set_header(client,
+                                     "Content-Type",
+                                     content_type != NULL ? content_type : "application/octet-stream");
 
-    ret = device_wifi_err_to_int(esp_http_client_open(client, wav_len));
+    ret = device_wifi_err_to_int(esp_http_client_open(client, (int)body_len));
     if (ret == 0) {
-        int written = esp_http_client_write(client, (const char *)wav, wav_len);
-        if (written != wav_len) {
-            ret = -3;
+        int written = 0;
+        if (body_len > 0u) {
+            written = esp_http_client_write(client, (const char *)body, (int)body_len);
+        }
+        if (written != (int)body_len) {
+            ret = -4;
         }
     }
     if (ret == 0) {
@@ -362,14 +373,37 @@ int driver_wifi_http_post_wav(const char *url,
         }
     }
     if (ret == 0) {
-        int read_len = esp_http_client_read_response(client, (char *)resp, resp_size);
+        int read_len = esp_http_client_read_response(client, (char *)resp, (int)resp_size);
         if (read_len < 0) {
             ret = read_len;
         } else {
-            *resp_len = (uint16_t)read_len;
+            *resp_len = (uint32_t)read_len;
         }
     }
 
     esp_http_client_cleanup(client);
+    return ret;
+}
+
+int driver_wifi_http_post_wav(const char *url,
+                              const uint8_t *wav,
+                              uint16_t wav_len,
+                              uint8_t *resp,
+                              uint16_t resp_size,
+                              uint16_t *resp_len,
+                              uint32_t timeout_ms)
+{
+    uint32_t post_resp_len = 0u;
+    int ret = driver_wifi_http_post(url,
+                                    "audio/wav",
+                                    wav,
+                                    wav_len,
+                                    resp,
+                                    resp_size,
+                                    &post_resp_len,
+                                    timeout_ms);
+    if (resp_len != NULL) {
+        *resp_len = (uint16_t)post_resp_len;
+    }
     return ret;
 }

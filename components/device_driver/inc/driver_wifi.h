@@ -38,6 +38,14 @@ int driver_wifi_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
 int driver_wifi_tcp_connect(const char *host, int port);
 int driver_wifi_tcp_send(const uint8_t *data, int len);
 int driver_wifi_tcp_close(void);
+int driver_wifi_http_post(const char *url,
+                          const char *content_type,
+                          const uint8_t *body,
+                          uint32_t body_len,
+                          uint8_t *resp,
+                          uint32_t resp_size,
+                          uint32_t *resp_len,
+                          uint32_t timeout_ms);
 int driver_wifi_http_post_wav(const char *url,
                               const uint8_t *wav,
                               uint16_t wav_len,

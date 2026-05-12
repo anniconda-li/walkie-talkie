@@ -28,7 +28,7 @@ static const char *TAG = "service_audio";
 /** @brief AI 录音固定采样率，需与业务 WAV 配置一致。 */
 #define SERVICE_AUDIO_RECORD_SAMPLE_RATE_HZ    16000u
 /** @brief 单次 AI 录音最大时长。 */
-#define SERVICE_AUDIO_RECORD_MAX_SECONDS       2u
+#define SERVICE_AUDIO_RECORD_MAX_SECONDS       60u
 /** @brief 录音任务每次从下层读取 20ms PCM。 */
 #define SERVICE_AUDIO_RECORD_FRAME_SAMPLES     320u
 /** @brief 单次录音最大样本数。 */
@@ -120,7 +120,7 @@ static int service_audio_alloc_record_buffer(void)
 
     size_t bytes = SERVICE_AUDIO_RECORD_MAX_SAMPLES * sizeof(int16_t);
     /*
-     * 2 秒 16kHz/16bit/mono 录音约 64KB，放 PSRAM 避免占用内部 SRAM，
+     * 60 秒 16kHz/16bit/mono 录音约 1.92MB，放 PSRAM 避免占用内部 SRAM，
      * 给 OSAL task stack、WiFi/LVGL 等内部内存留空间。
      */
     s_record_buf = (int16_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -155,7 +155,7 @@ static void service_audio_record_task(void *arg)
                 osal_mutex_unlock(s_record_mutex);
             }
             if (room == 0u) {
-                /* 缓冲区写满后自动停止，AI 单次录音最长 2 秒。 */
+                /* 缓冲区写满后自动停止，AI 单次录音最长 60 秒。 */
                 s_recording = 0u;
                 break;
             }
