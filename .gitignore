@@ -1,54 +1,54 @@
-# macOS
+# macOS 系统文件 / macOS system files
 .DS_Store
 .AppleDouble
 .LSOverride
 
-# Directory metadata
+# 目录元数据 / Directory metadata
 .directory
 
-# Temporary files
+# 临时文件 / Temporary files
 *~
 *.swp
 *.swo
 *.bak
 *.tmp
 
-# Log files
+# 日志文件 / Log files
 *.log
 
-# Build artifacts and directories
-**/build/
+# 构建产物 / Build artifacts
 build/
 *.o
 *.a
 *.out
-*.exe # For any host-side utilities compiled on Windows
+*.exe
 
-# ESP-IDF specific build outputs
+# ESP-IDF 生成的输出文件 / ESP-IDF generated outputs
 *.bin
 *.elf
 *.map
-flasher_args.json # Generated in build directory
-sdkconfig.old
-sdkconfig
+flasher_args.json
 
-# ESP-IDF dependencies
-# For older versions or manual component management
-/components/.idf/
-**/components/.idf/
-# For modern ESP-IDF component manager
+# ESP-IDF 本地配置（保留 sdkconfig.defaults）/ ESP-IDF local config (keep sdkconfig.defaults)
+sdkconfig
+sdkconfig.old
+sdkconfig.old.*
+
+# ESP-IDF 组件管理器缓存 / ESP-IDF component manager cache
 managed_components/
-# If ESP-IDF tools are installed/referenced locally to the project
+dependencies.lock.changes
+
+# ESP-IDF 工具链（本地安装时）/ ESP-IDF tools (if installed locally)
 .espressif/
 
-# CMake generated files
+# CMake 生成文件 / CMake generated files
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 install_manifest.txt
 CTestTestfile.cmake
 
-# Python environment files
+# Python 缓存 / Python cache
 *.pyc
 *.pyo
 *.pyd
@@ -56,23 +56,22 @@ __pycache__/
 *.egg-info/
 dist/
 
-# Virtual environment folders
+# 虚拟环境 / Virtual environment
 venv/
 .venv/
 env/
 
-# Language Servers
+# 语言服务器 / Language servers
 .clangd/
 .ccls-cache/
 compile_commands.json
 
-# Windows specific
+# Windows 系统文件 / Windows system files
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# User-specific configuration files
+# IDE 配置文件 / IDE config files
 *.user
-*.workspace # General workspace files, can be from various tools
-*.suo       # Visual Studio Solution User Options
-*.sln.docstates # Visual Studio
+*.suo
+*.workspace
