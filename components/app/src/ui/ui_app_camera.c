@@ -142,6 +142,8 @@ void ui_app_camera_enter(lv_obj_t * root)
 {
     (void)root;
 
+    ui_event_notify_camera_entered();
+
     lv_obj_set_y(g_camera_view.preview, -250);
     lv_obj_set_y(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10);
     lv_obj_set_y(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10);
@@ -155,6 +157,8 @@ void ui_app_camera_enter(lv_obj_t * root)
 
 void ui_app_camera_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
+    ui_event_notify_camera_exited();
+
     app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));
     if(ctx == NULL) {
         lv_obj_delete(root);

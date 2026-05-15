@@ -47,6 +47,27 @@ int driver_camera_init(void);
 int driver_camera_deinit(void);
 
 /**
+ * @brief 切换摄像头到 RGB565 预览模式。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int driver_camera_set_rgb565_mode(void);
+
+/**
+ * @brief 切换摄像头到 JPEG 拍照模式。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int driver_camera_set_jpeg_mode(void);
+
+/**
+ * @brief 判断摄像头驱动是否已经初始化。
+ *
+ * @return 已初始化返回 1；未初始化返回 0。
+ */
+int driver_camera_is_initialized(void);
+
+/**
  * @brief 获取一帧摄像头图像。
  *
  * @return 成功返回帧缓存指针；失败返回 NULL。

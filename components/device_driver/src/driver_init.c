@@ -9,6 +9,7 @@
 #include "bsp_uart.h"
 #include "driver_audio_board.h"
 #include "driver_battery.h"
+#include "driver_camera.h"
 #include "driver_es7210.h"
 #include "driver_es8311.h"
 #include "driver_lcd.h"
@@ -153,6 +154,18 @@ int driver_init(void)
         DRIVER_LOGE(TAG, "LCD/Touch 初始化失败, ret=%d", ret);
         return ret;
     }
+
+#if DRIVER_INIT_ENABLE_CAMERA
+    /*
+     * 摄像头依赖 I2C 和 PCA9557 camera power-down 控制，因此放在 PCA9557
+     * 初始化之后。默认关闭，避免未接摄像头或测试阶段引脚未固定时影响主业务。
+     */
+    ret = driver_camera_init();
+    if (ret != 0) {
+        DRIVER_LOGE(TAG, "摄像头驱动初始化失败, ret=%d", ret);
+        return ret;
+    }
+#endif
 
     ret = driver_battery_init();
     if (ret != 0) {

@@ -29,6 +29,7 @@
 #include "app_business.h"
 
 #include "app_ai_voice.h"
+#include "app_camera.h"
 #include "app_config.h"
 #include "app_intercom.h"
 #include "app_status_monitor.h"
@@ -211,6 +212,36 @@ static void app_business_on_ai_stopped(void)
     app_ai_voice_record_stop();
 }
 
+/** @brief 相机页进入 → 启动预览。 */
+static void app_business_on_camera_entered(void)
+{
+    app_camera_enter();
+}
+
+/** @brief 相机页退出 → 停止预览并清理暂存图像。 */
+static void app_business_on_camera_exited(void)
+{
+    app_camera_exit();
+}
+
+/** @brief 相机拍照按钮 → 后台拍 JPEG 并暂存。 */
+static void app_business_on_camera_capture(void)
+{
+    app_camera_capture();
+}
+
+/** @brief 相机上传按钮 → HTTP POST 上传暂存 JPEG。 */
+static void app_business_on_camera_upload(void)
+{
+    app_camera_upload();
+}
+
+/** @brief 相机重拍按钮 → 清理 JPEG 并恢复预览。 */
+static void app_business_on_camera_retake(void)
+{
+    app_camera_retake();
+}
+
 /** @brief 音量滑块变化 → 设置硬件音量（0-100）。 */
 static void app_business_on_volume_changed(int32_t value)
 {
@@ -236,6 +267,11 @@ static void app_business_register_ui_callbacks(void)
         .intercom_channel_changed = app_business_on_channel_changed,
         .intercom_ptt_started = app_business_on_ptt_started,
         .intercom_ptt_stopped = app_business_on_ptt_stopped,
+        .camera_entered = app_business_on_camera_entered,
+        .camera_exited = app_business_on_camera_exited,
+        .camera_capture_requested = app_business_on_camera_capture,
+        .camera_upload_requested = app_business_on_camera_upload,
+        .camera_retake_requested = app_business_on_camera_retake,
         .ai_question_started = app_business_on_ai_started,
         .ai_question_stopped = app_business_on_ai_stopped,
         .settings_volume_changed = app_business_on_volume_changed,
@@ -296,6 +332,11 @@ int app_business_start(void)
     }
 
     ret = app_ai_voice_start();
+    if (ret != 0) {
+        return ret;
+    }
+
+    ret = app_camera_start();
     if (ret != 0) {
         return ret;
     }

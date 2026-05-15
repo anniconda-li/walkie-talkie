@@ -566,6 +566,20 @@ void ui_event_register_camera(ui_camera_view_t *view)
     lv_obj_add_state(view->retake_button, LV_STATE_DISABLED);
 }
 
+void ui_event_notify_camera_entered(void)
+{
+    if(g_callbacks.camera_entered != NULL) {
+        g_callbacks.camera_entered();
+    }
+}
+
+void ui_event_notify_camera_exited(void)
+{
+    if(g_callbacks.camera_exited != NULL) {
+        g_callbacks.camera_exited();
+    }
+}
+
 void ui_event_register_ai(ui_ai_view_t *view)
 {
     if(view == NULL || view->ask_button == NULL) {

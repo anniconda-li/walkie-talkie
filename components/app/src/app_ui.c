@@ -25,7 +25,7 @@ int app_ui_create(void)
         return 0;
     }
 
-    if (service_screen_get_display() == NULL) {
+    if (service_screen_is_initialized() != 1) {
         APP_LOGE(TAG, "UI 创建失败: 屏幕服务未初始化");
         return -1;
     }

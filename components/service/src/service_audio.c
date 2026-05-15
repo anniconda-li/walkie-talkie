@@ -9,10 +9,9 @@
 #include "service_audio.h"
 
 #include "service_config.h"
+#include "osal_heap.h"
 #include "osal_mutex.h"
 #include "osal_task.h"
-
-#include "esp_heap_caps.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -123,12 +122,12 @@ static int service_audio_alloc_record_buffer(void)
      * 60 秒 16kHz/16bit/mono 录音约 1.92MB，放 PSRAM 避免占用内部 SRAM，
      * 给 OSAL task stack、WiFi/LVGL 等内部内存留空间。
      */
-    s_record_buf = (int16_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_record_buf = (int16_t *)osal_heap_alloc_external(bytes);
     if (s_record_buf == NULL) {
         SERVICE_LOGE(TAG,
                      "录音缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
                      (unsigned int)bytes,
-                     (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                     (unsigned int)osal_heap_get_external_free_size());
         return -1;
     }
 
@@ -273,7 +272,7 @@ int service_audio_deinit(void)
     s_capture_ops = (service_audio_capture_ops_t){0};
     s_playback_ops = (service_audio_playback_ops_t){0};
     if (s_record_buf != NULL) {
-        heap_caps_free(s_record_buf);
+        osal_heap_free(s_record_buf);
         s_record_buf = NULL;
     }
     SERVICE_LOGI(TAG, "音频服务已释放");

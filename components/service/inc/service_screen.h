@@ -9,11 +9,6 @@
 
 #include <stdint.h>
 
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_touch.h"
-#include "lvgl.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,9 +18,14 @@ extern "C" {
  */
 typedef struct {
     int (*is_initialized)(void); /**< 判断下层屏幕 driver 是否已初始化。 */
-    esp_lcd_panel_io_handle_t (*get_panel_io)(void); /**< 获取显示 panel IO 句柄。 */
-    esp_lcd_panel_handle_t (*get_panel)(void);       /**< 获取显示 panel 句柄。 */
-    esp_lcd_touch_handle_t (*get_touch)(void);       /**< 获取触摸控制器句柄。 */
+    void *(*get_panel_io)(void); /**< 获取下层显示 IO 不透明句柄，仅供 service 内部接入 UI runtime。 */
+    void *(*get_panel)(void);    /**< 获取下层显示 panel 不透明句柄，仅供 service 内部接入 UI runtime。 */
+    void *(*get_touch)(void);    /**< 获取下层触摸不透明句柄，仅供 service 内部接入 UI runtime。 */
+    int (*draw_rgb565)(int x,
+                       int y,
+                       int w,
+                       int h,
+                       const void *data); /**< 绘制 RGB565 位图到屏幕指定区域。 */
     uint16_t hres;          /**< 水平分辨率。 */
     uint16_t vres;          /**< 垂直分辨率。 */
     uint8_t swap_xy;        /**< 显示方向 swap_xy 配置。 */
@@ -75,6 +75,32 @@ int service_screen_lock(uint32_t timeout_ms);
 void service_screen_unlock(void);
 
 /**
+ * @brief 判断屏幕服务是否已初始化。
+ *
+ * @return 已初始化返回 1；未初始化返回 0。
+ */
+int service_screen_is_initialized(void);
+
+/**
+ * @brief 绘制 RGB565 位图到屏幕指定区域。
+ *
+ * 本接口用于摄像头预览等高频原始图像显示场景。App 层只调用 screen service，
+ * 不直接访问 LCD driver 或 ESP LCD panel。函数内部会完成屏幕范围检查，并
+ * 通过 LVGL port 锁保护 LCD 访问，避免与普通 UI flush 并发。
+ *
+ * @param[in] x 起始 X 坐标。
+ * @param[in] y 起始 Y 坐标。
+ * @param[in] w 绘制宽度，单位像素。
+ * @param[in] h 绘制高度，单位像素。
+ * @param[in] data RGB565 原始像素数据，长度至少为 w * h * 2 字节。
+ * @return 成功返回 0；失败返回负值。
+ *
+ * @note 调用方不应在已经持有 service_screen_lock() 的情况下再调用本接口，
+ *       避免重复加锁造成阻塞。
+ */
+int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data);
+
+/**
  * @brief 获取屏幕水平分辨率。
  *
  * @return 水平分辨率。
@@ -87,20 +113,6 @@ uint16_t service_screen_get_hres(void);
  * @return 垂直分辨率。
  */
 uint16_t service_screen_get_vres(void);
-
-/**
- * @brief 获取 LVGL 显示对象。
- *
- * @return 已初始化时返回显示对象，否则返回 NULL。
- */
-lv_display_t *service_screen_get_display(void);
-
-/**
- * @brief 获取 LVGL 触摸输入对象。
- *
- * @return 已初始化时返回输入对象，否则返回 NULL。
- */
-lv_indev_t *service_screen_get_touch_indev(void);
 
 #ifdef __cplusplus
 }

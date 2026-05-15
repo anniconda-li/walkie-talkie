@@ -9,6 +9,7 @@
 #include "service_init.h"
 
 #include "driver_battery.h"
+#include "driver_camera.h"
 #include "driver_es8311.h"
 #include "driver_es7210.h"
 #include "driver_inmp441.h"
@@ -18,12 +19,101 @@
 #include "driver_wifi.h"
 #include "service_audio.h"
 #include "service_battery.h"
+#include "service_camera.h"
 #include "service_network.h"
 #include "service_screen.h"
 
 #include <stddef.h>
 
 static const char *TAG = "service_init";
+
+/**
+ * @brief 将 LCD driver 的坐标接口适配为 service_screen 的 x/y/w/h 接口。
+ *
+ * App 只看到 service_screen_draw_rgb565(x, y, w, h)，不直接依赖 driver_lcd。
+ */
+static int service_init_screen_draw_rgb565(int x, int y, int w, int h, const void *data)
+{
+    return driver_lcd_draw_bitmap(x, y, x + w, y + h, data);
+}
+
+/**
+ * @brief 获取 LCD panel IO 不透明句柄。
+ *
+ * service_screen.h 不暴露 ESP LCD 类型，装配层把具体 driver 句柄转成 void *，
+ * service_screen.c 内部再按平台实现转换回 ESP 类型。
+ */
+static void *service_init_screen_get_panel_io(void)
+{
+    return (void *)driver_lcd_get_panel_io_handle();
+}
+
+/**
+ * @brief 获取 LCD panel 不透明句柄。
+ */
+static void *service_init_screen_get_panel(void)
+{
+    return (void *)driver_lcd_get_panel_handle();
+}
+
+/**
+ * @brief 获取触摸控制器不透明句柄。
+ */
+static void *service_init_screen_get_touch(void)
+{
+    return (void *)driver_lcd_get_touch_handle();
+}
+
+/**
+ * @brief 将 esp32-camera 的帧格式映射到 service_camera 的通用格式。
+ */
+static service_camera_format_t service_init_camera_map_format(pixformat_t format)
+{
+    if (format == PIXFORMAT_RGB565) {
+        return SERVICE_CAMERA_FORMAT_RGB565;
+    }
+    if (format == PIXFORMAT_JPEG) {
+        return SERVICE_CAMERA_FORMAT_JPEG;
+    }
+
+    return SERVICE_CAMERA_FORMAT_UNKNOWN;
+}
+
+/**
+ * @brief 获取一帧 camera driver 图像并包装成 service_camera_frame_t。
+ *
+ * camera_fb_t 只在装配层出现，service_camera 和 app 都不需要包含 esp_camera.h。
+ * opaque 保存原始 fb 指针，后续 return wrapper 用它归还底层帧缓存。
+ */
+static int service_init_camera_get_frame(service_camera_frame_t *frame)
+{
+    if (frame == NULL) {
+        return -1;
+    }
+
+    camera_fb_t *fb = driver_camera_get_frame();
+    if (fb == NULL) {
+        return -2;
+    }
+
+    frame->data = fb->buf;
+    frame->len = fb->len;
+    frame->width = (uint16_t)fb->width;
+    frame->height = (uint16_t)fb->height;
+    frame->format = service_init_camera_map_format(fb->format);
+    frame->opaque = fb;
+    return 0;
+}
+
+/**
+ * @brief 归还 service_camera_frame_t 中保存的底层 camera frame。
+ */
+static void service_init_camera_return_frame(void *opaque)
+{
+    if (opaque != NULL) {
+        driver_camera_return_frame((camera_fb_t *)opaque);
+    }
+}
 
 #if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_ML307C
 /**
@@ -173,6 +263,26 @@ int service_init_audio(void)
     return ret;
 }
 
+int service_init_camera(void)
+{
+    service_camera_config_t camera_cfg = {
+        .ops = {
+            .is_initialized = driver_camera_is_initialized,
+            .set_rgb565_mode = driver_camera_set_rgb565_mode,
+            .set_jpeg_mode = driver_camera_set_jpeg_mode,
+            .get_frame = service_init_camera_get_frame,
+            .return_frame = service_init_camera_return_frame,
+        },
+    };
+
+    int ret = service_camera_init(&camera_cfg);
+    if (ret != 0) {
+        SERVICE_LOGW(TAG, "摄像头服务初始化失败或未启用, ret=%d", ret);
+    }
+
+    return ret;
+}
+
 int service_init(void)
 {
     /*
@@ -183,9 +293,10 @@ int service_init(void)
     service_screen_config_t screen_cfg = {
         .device_ops = {
             .is_initialized = driver_lcd_is_initialized,
-            .get_panel_io = driver_lcd_get_panel_io_handle,
-            .get_panel = driver_lcd_get_panel_handle,
-            .get_touch = driver_lcd_get_touch_handle,
+            .get_panel_io = service_init_screen_get_panel_io,
+            .get_panel = service_init_screen_get_panel,
+            .get_touch = service_init_screen_get_touch,
+            .draw_rgb565 = service_init_screen_draw_rgb565,
             .hres = driver_lcd_H_RES,
             .vres = driver_lcd_V_RES,
             .swap_xy = driver_lcd_SWAP_XY,
@@ -217,5 +328,18 @@ int service_init(void)
         return ret;
     }
 
-    return service_init_network();
+    ret = service_init_network();
+    if (ret != 0) {
+        return ret;
+    }
+
+#if DRIVER_INIT_ENABLE_CAMERA
+    /*
+     * 摄像头当前仍是可选业务：只有 driver 层明确启用 camera 初始化时，
+     * 才在总 service_init() 中装配 camera service。这样未接摄像头时不会
+     * 影响对讲、AI、UI 等主业务启动。
+     */
+    (void)service_init_camera();
+#endif
+    return 0;
 }

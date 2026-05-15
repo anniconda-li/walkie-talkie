@@ -21,11 +21,10 @@
 
 #include "app_business.h"
 #include "app_config.h"
+#include "osal_heap.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
-
-#include "esp_heap_caps.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -647,13 +646,12 @@ int app_ai_voice_start(void)
         return 0;
     }
 
-    s_ai_wav_buf = (uint8_t *)heap_caps_malloc(APP_BUSINESS_AI_WAV_BUF_BYTES,
-                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_ai_wav_buf = (uint8_t *)osal_heap_alloc_external(APP_BUSINESS_AI_WAV_BUF_BYTES);
     if (s_ai_wav_buf == NULL) {
         APP_LOGE(TAG,
                  "AI WAV 缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
                  (unsigned int)APP_BUSINESS_AI_WAV_BUF_BYTES,
-                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                 (unsigned int)osal_heap_get_external_free_size());
         return -1;
     }
 
@@ -664,7 +662,7 @@ int app_ai_voice_start(void)
     int ret = osal_task_create("biz_ai", app_ai_voice_task, NULL, 4096u, 5u, &s_ai_task);
     if (ret != 0) {
         APP_LOGE(TAG, "AI 语音任务启动失败, ret=%d", ret);
-        heap_caps_free(s_ai_wav_buf);
+        osal_heap_free(s_ai_wav_buf);
         s_ai_wav_buf = NULL;
         return ret;
     }

@@ -19,6 +19,8 @@ typedef struct {
     void (*intercom_channel_changed)(int32_t channel); /**< 对讲频道变化回调。 */
     void (*intercom_ptt_started)(int32_t channel);     /**< PTT 按下回调。 */
     void (*intercom_ptt_stopped)(int32_t channel);     /**< PTT 松开回调。 */
+    void (*camera_entered)(void);                      /**< 相机页面进入回调。 */
+    void (*camera_exited)(void);                       /**< 相机页面退出回调。 */
     void (*camera_capture_requested)(void);            /**< 相机拍照请求回调。 */
     void (*camera_upload_requested)(void);             /**< 相机上传请求回调。 */
     void (*camera_retake_requested)(void);             /**< 相机重拍请求回调。 */
@@ -104,6 +106,16 @@ void ui_event_register_intercom(ui_intercom_view_t *view);
  * @param[in] view 相机页面视图对象集合。
  */
 void ui_event_register_camera(ui_camera_view_t *view);
+
+/**
+ * @brief 通知业务层相机页面已进入。
+ */
+void ui_event_notify_camera_entered(void);
+
+/**
+ * @brief 通知业务层相机页面已退出。
+ */
+void ui_event_notify_camera_exited(void);
 
 /**
  * @brief 注册 AI 页面视图对象。

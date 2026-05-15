@@ -8,6 +8,10 @@
 #include "service_screen.h"
 
 #include "esp_lvgl_port.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_touch.h"
+#include "lvgl.h"
 #include "service_config.h"
 
 #include <stdbool.h>
@@ -69,6 +73,7 @@ static int service_screen_ops_is_valid(const service_screen_device_ops_t *ops)
         ops->get_panel_io == NULL ||
         ops->get_panel == NULL ||
         ops->get_touch == NULL ||
+        ops->draw_rgb565 == NULL ||
         ops->hres == 0u ||
         ops->vres == 0u) {
         return -1;
@@ -93,9 +98,10 @@ int service_screen_init(const service_screen_config_t *cfg)
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕 driver 未初始化");
         return -4;
     }
-    if (cfg->device_ops.get_panel_io() == NULL ||
-        cfg->device_ops.get_panel() == NULL ||
-        cfg->device_ops.get_touch() == NULL) {
+    void *panel_io = cfg->device_ops.get_panel_io();
+    void *panel = cfg->device_ops.get_panel();
+    void *touch = cfg->device_ops.get_touch();
+    if (panel_io == NULL || panel == NULL || touch == NULL) {
         /* driver 已初始化但关键句柄为空时，说明底层 LCD/touch 初始化不完整。 */
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕句柄无效");
         return -5;
@@ -118,8 +124,8 @@ int service_screen_init(const service_screen_config_t *cfg)
          * 使用 driver 已创建的 panel 句柄接入 LVGL。
          * buffer_size 按固定行数计算，避免在 service 层硬编码屏幕分辨率。
          */
-        .io_handle = s_screen_ops.get_panel_io(),
-        .panel_handle = s_screen_ops.get_panel(),
+        .io_handle = (esp_lcd_panel_io_handle_t)panel_io,
+        .panel_handle = (esp_lcd_panel_handle_t)panel,
         .control_handle = NULL,
         .buffer_size = s_screen_ops.hres * SERVICE_SCREEN_DRAW_BUF_LINES,
         .double_buffer = false,
@@ -153,7 +159,7 @@ int service_screen_init(const service_screen_config_t *cfg)
     lvgl_port_touch_cfg_t touch_cfg = {
         /* touch 绑定到同一个 display，坐标变换由 LVGL port 和屏幕旋转参数处理。 */
         .disp = s_screen_display,
-        .handle = s_screen_ops.get_touch(),
+        .handle = (esp_lcd_touch_handle_t)touch,
         .scale = {
             .x = 1.0f,
             .y = 1.0f,
@@ -228,6 +234,49 @@ void service_screen_unlock(void)
     }
 }
 
+int service_screen_is_initialized(void)
+{
+    return s_screen_display != NULL ? 1 : 0;
+}
+
+int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data)
+{
+    /*
+     * 摄像头预览会绕开 LVGL image 对象直接推 RGB565 到 LCD。这里把直绘
+     * 收敛在 screen service：app 不接触 LCD driver，同时 LCD 访问仍由
+     * LVGL port 锁串行化，避免和 UI flush 同时操作 panel。
+     */
+    if (s_screen_ops_ready == 0u || s_screen_ops.draw_rgb565 == NULL) {
+        SERVICE_LOGE(TAG, "RGB565 绘制失败: 屏幕服务未初始化");
+        return -1;
+    }
+    if (data == NULL || x < 0 || y < 0 || w <= 0 || h <= 0) {
+        SERVICE_LOGE(TAG, "RGB565 绘制参数无效, data=%p, area=(%d,%d,%d,%d)",
+                     data, x, y, w, h);
+        return -2;
+    }
+    if ((x + w) > (int)s_screen_ops.hres || (y + h) > (int)s_screen_ops.vres) {
+        SERVICE_LOGE(TAG, "RGB565 绘制区域越界, area=(%d,%d,%d,%d), res=%ux%u",
+                     x,
+                     y,
+                     w,
+                     h,
+                     (unsigned int)s_screen_ops.hres,
+                     (unsigned int)s_screen_ops.vres);
+        return -3;
+    }
+
+    int ret = service_screen_lock(100u);
+    if (ret != 0) {
+        SERVICE_LOGE(TAG, "RGB565 绘制失败: 获取屏幕锁超时");
+        return -4;
+    }
+
+    ret = s_screen_ops.draw_rgb565(x, y, w, h, data);
+    service_screen_unlock();
+    return ret;
+}
+
 uint16_t service_screen_get_hres(void)
 {
     return s_screen_ops_ready != 0u ? s_screen_ops.hres : 0u;
@@ -236,14 +285,4 @@ uint16_t service_screen_get_hres(void)
 uint16_t service_screen_get_vres(void)
 {
     return s_screen_ops_ready != 0u ? s_screen_ops.vres : 0u;
-}
-
-lv_display_t *service_screen_get_display(void)
-{
-    return s_screen_display;
-}
-
-lv_indev_t *service_screen_get_touch_indev(void)
-{
-    return s_screen_touch;
 }

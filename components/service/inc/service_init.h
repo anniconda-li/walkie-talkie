@@ -32,6 +32,13 @@ int service_init_audio(void);
  */
 int service_init_network(void);
 
+/**
+ * @brief 仅完成摄像头 service 能力绑定并初始化摄像头 service。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_init_camera(void);
+
 #ifdef __cplusplus
 }
 #endif

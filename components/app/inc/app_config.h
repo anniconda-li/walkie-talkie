@@ -44,6 +44,22 @@ extern "C" {
 #define APP_BUSINESS_UDP_PORT           9000
 /** @brief AI WAV 问答 HTTP 上传地址。 */
 #define APP_BUSINESS_AI_HTTP_URL        "http://10.212.141.251:8000/voice_chat_binary_with_audio?language=zh"
+/** @brief 相机 JPEG 上传 HTTP 地址。 */
+#define APP_BUSINESS_CAMERA_UPLOAD_URL  "http://10.212.141.251:8000/camera/upload"
+/** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
+#define APP_CAMERA_UPLOAD_TIMEOUT_MS    30000u
+/** @brief 相机 JPEG 上传响应临时缓冲大小。 */
+#define APP_CAMERA_UPLOAD_RESP_BYTES    512u
+/** @brief 相机预览区域 X 坐标。 */
+#define APP_CAMERA_PREVIEW_X            0
+/** @brief 相机预览区域 Y 坐标。 */
+#define APP_CAMERA_PREVIEW_Y            30
+/** @brief 相机预览区域宽度。 */
+#define APP_CAMERA_PREVIEW_W            240
+/** @brief 相机预览区域高度。 */
+#define APP_CAMERA_PREVIEW_H            240
+/** @brief 相机预览帧间隔，约 15 FPS。 */
+#define APP_CAMERA_PREVIEW_INTERVAL_MS  66u
 /** @brief AI HTTP 单片请求等待响应的超时时间，单位 ms。 */
 #define APP_AI_HTTP_CHUNK_TIMEOUT_MS    30000u
 /** @brief AI 服务器处理等待总超时时间，单位 ms。 */

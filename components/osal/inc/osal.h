@@ -8,6 +8,7 @@
 #define OSAL_H
 
 #include "osal_log.h"
+#include "osal_heap.h"
 #include "osal_mutex.h"
 #include "osal_queue.h"
 #include "osal_task.h"

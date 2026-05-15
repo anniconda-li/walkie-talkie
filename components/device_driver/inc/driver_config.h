@@ -32,6 +32,11 @@
 /** @brief 初始化 INMP441 + MAX98357A 音频驱动。 */
 #define DRIVER_INIT_AUDIO_I2S 2
 
+/** @brief 是否初始化摄像头驱动，0=关闭，1=开启。 */
+#ifndef DRIVER_INIT_ENABLE_CAMERA
+#define DRIVER_INIT_ENABLE_CAMERA 0
+#endif
+
 /** @brief 当前 driver 网络初始化方案，默认 ML307C。 */
 #ifndef DRIVER_INIT_NETWORK
 #define DRIVER_INIT_NETWORK DRIVER_INIT_NETWORK_WIFI
