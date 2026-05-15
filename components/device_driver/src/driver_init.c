@@ -162,8 +162,7 @@ int driver_init(void)
      */
     ret = driver_camera_init();
     if (ret != 0) {
-        DRIVER_LOGE(TAG, "摄像头驱动初始化失败, ret=%d", ret);
-        return ret;
+        DRIVER_LOGW(TAG, "摄像头驱动初始化失败，摄像头业务将不可用, ret=%d", ret);
     }
 #endif
 

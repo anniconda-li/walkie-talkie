@@ -34,7 +34,7 @@
 
 /** @brief 是否初始化摄像头驱动，0=关闭，1=开启。 */
 #ifndef DRIVER_INIT_ENABLE_CAMERA
-#define DRIVER_INIT_ENABLE_CAMERA 0
+#define DRIVER_INIT_ENABLE_CAMERA 1
 #endif
 
 /** @brief 当前 driver 网络初始化方案，默认 ML307C。 */

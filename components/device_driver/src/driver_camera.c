@@ -7,13 +7,8 @@
 #include "driver_config.h"
 #include "bsp_i2c.h"
 #include "driver_pca9557.h"
-#include "esp_idf_version.h"
 
 #include <stdint.h>
-
-// #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 4, 0)
-// #error "bsp_camera requires ESP-IDF >= 5.4 so esp32-camera uses the new SCCB I2C driver and can reuse bsp_i2c."
-// #endif
 
 /**
  * @brief 摄像头日志标签。
@@ -71,6 +66,11 @@ int driver_camera_init(void)
         .pin_pwdn = driver_camera_PWDN_IO,
         .pin_reset = driver_camera_RESET_IO,
         .pin_xclk = driver_camera_XCLK_IO,
+        /*
+         * 摄像头挂在 BSP 已初始化的共享 I2C 总线上。按 esp-camera 的
+         * camera_config_t 约定，SDA 传 -1 时会使用 sccb_i2c_port 指定的
+         * 已配置 I2C bus，避免 camera 再次安装同一个 I2C driver。
+         */
         .pin_sccb_sda = -1,
         .pin_sccb_scl = -1,
         .pin_d7 = driver_camera_D7_IO,

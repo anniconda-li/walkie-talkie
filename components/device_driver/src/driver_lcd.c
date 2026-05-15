@@ -8,7 +8,6 @@
 #include "bsp_i2c.h"
 #include "driver_pca9557.h"
 #include "bsp_spi.h"
-#include "driver/i2c_master.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
@@ -16,8 +15,10 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_ft5x06.h"
+#include "esp_heap_caps.h"
 
 #include <stdbool.h>
+#include <string.h>
 
 /**
  * @brief LCD 日志标签。
@@ -33,6 +34,19 @@ static const char *TAG = "driver_lcd";
  * @brief LCD SPI 事务队列深度。
  */
 #define driver_lcd_SPI_TRANS_QUEUE_DEPTH 10
+
+/**
+ * @brief ST7789 NOP 命令。
+ */
+#define DRIVER_LCD_CMD_NOP 0x00
+
+/**
+ * @brief 摄像头预览直绘 DMA 中转缓冲行数。
+ *
+ * camera frame 在 PSRAM，SPI LCD IO 在当前配置下不能直接拿 PSRAM 指针排队。
+ * 每块发送完成后会同步等待，因此这里只需要一块内部 DMA buffer。
+ */
+#define DRIVER_LCD_DMA_BOUNCE_LINES 8u
 
 /**
  * @brief LCD 显示面板 IO 句柄。
@@ -53,6 +67,64 @@ static esp_lcd_panel_io_handle_t s_lcd_touch_io = NULL;
  * @brief LCD 触摸控制器句柄。
  */
 static esp_lcd_touch_handle_t s_lcd_touch = NULL;
+
+/** @brief 摄像头预览直绘使用的内部 DMA 中转缓冲。 */
+static uint8_t *s_lcd_dma_bounce_buf = NULL;
+
+/** @brief 内部 DMA 中转缓冲大小。 */
+static size_t s_lcd_dma_bounce_size = 0u;
+
+static int driver_lcd_err_to_int(int ret);
+
+/**
+ * @brief 确保摄像头预览直绘 DMA 中转缓冲可用。
+ *
+ * @param[in] min_bytes 本次至少需要的字节数。
+ * @return 成功返回 0；失败返回负值。
+ */
+static int driver_lcd_ensure_dma_bounce(size_t min_bytes)
+{
+    if (s_lcd_dma_bounce_buf != NULL && s_lcd_dma_bounce_size >= min_bytes) {
+        return 0;
+    }
+
+    if (s_lcd_dma_bounce_buf != NULL) {
+        heap_caps_free(s_lcd_dma_bounce_buf);
+        s_lcd_dma_bounce_buf = NULL;
+        s_lcd_dma_bounce_size = 0u;
+    }
+
+    s_lcd_dma_bounce_buf = (uint8_t *)heap_caps_malloc(min_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (s_lcd_dma_bounce_buf == NULL) {
+        DRIVER_LOGE(TAG, "LCD DMA 中转缓冲分配失败, bytes=%u", (unsigned int)min_bytes);
+        return -1;
+    }
+
+    s_lcd_dma_bounce_size = min_bytes;
+    DRIVER_LOGI(TAG, "LCD DMA 中转缓冲已分配, bytes=%u", (unsigned int)s_lcd_dma_bounce_size);
+    return 0;
+}
+
+/**
+ * @brief 等待 LCD SPI 颜色事务完成。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+static int driver_lcd_wait_color_done(void)
+{
+    if (s_lcd_panel_io == NULL) {
+        return 0;
+    }
+
+    /*
+     * esp_lcd SPI IO 在发送命令前会回收已排队的颜色事务。发送 NOP 不改变
+     * ST7789 状态，但可以把异步颜色发送收敛成同步完成语义。
+     */
+    return driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                           DRIVER_LCD_CMD_NOP,
+                                                           NULL,
+                                                           0));
+}
 
 /**
  * @brief 将底层驱动错误码转换为 BSP 通用 int 返回值。
@@ -173,14 +245,19 @@ int driver_lcd_touch_init(void)
         return 0;
     }
 
-    i2c_master_bus_handle_t i2c_bus = (i2c_master_bus_handle_t)bsp_i2c_get_bus_handle();
-    if (i2c_bus == NULL) {
+    if (bsp_i2c_get_bus_handle() == NULL) {
         DRIVER_LOGE(TAG, "LCD 触摸初始化失败: I2C 未初始化");
         return -1;
     }
 
     esp_lcd_panel_io_i2c_config_t touch_io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    int ret = driver_lcd_err_to_int(esp_lcd_new_panel_io_i2c(i2c_bus,
+    /*
+     * 当前工程为了兼容 ESP-IDF 5.3.x 的 esp-camera SCCB，BSP I2C 使用
+     * legacy driver/i2c.h。legacy esp_lcd I2C IO 的总线频率来自已经安装的
+     * I2C driver，不允许在 panel IO config 里再次设置 scl_speed_hz。
+     */
+    touch_io_cfg.scl_speed_hz = 0;
+    int ret = driver_lcd_err_to_int(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)BSP_I2C_PORT,
                                                           &touch_io_cfg,
                                                           &s_lcd_touch_io));
     if (ret != 0) {
@@ -279,6 +356,13 @@ int driver_lcd_deinit(void)
         DRIVER_LOGI(TAG, "LCD 显示 IO 已释放, ret=%d", del_ret);
     }
 
+    if (s_lcd_dma_bounce_buf != NULL) {
+        heap_caps_free(s_lcd_dma_bounce_buf);
+        s_lcd_dma_bounce_buf = NULL;
+        s_lcd_dma_bounce_size = 0u;
+        DRIVER_LOGI(TAG, "LCD DMA 中转缓冲已释放");
+    }
+
     if (driver_pca9557_is_initialized() != 0) {
         int bl_ret = driver_pca9557_set_lcd_backlight(0);
         if (ret == 0) {
@@ -339,19 +423,65 @@ int driver_lcd_draw_bitmap(int x_start,
         return -1;
     }
 
-    int ret = driver_lcd_err_to_int(esp_lcd_panel_draw_bitmap(s_lcd_panel,
-                                                           x_start,
-                                                           y_start,
-                                                           x_end,
-                                                           y_end,
-                                                           color_data));
-    if (ret == 0) {
-        DRIVER_LOGI(TAG, "LCD 画图成功, area=(%d,%d)-(%d,%d)", x_start, y_start, x_end, y_end);
-    } else {
-        DRIVER_LOGE(TAG, "LCD 画图失败, ret=%d", ret);
+    const int width = x_end - x_start;
+    const int height = y_end - y_start;
+    const size_t line_bytes = (size_t)width * sizeof(uint16_t);
+    size_t chunk_lines = DRIVER_LCD_DMA_BOUNCE_LINES;
+    if (chunk_lines > (size_t)height) {
+        chunk_lines = (size_t)height;
+    }
+    if (chunk_lines == 0u) {
+        return -2;
     }
 
-    return ret;
+    int ret = driver_lcd_ensure_dma_bounce(line_bytes * chunk_lines);
+    if (ret != 0) {
+        return ret;
+    }
+
+    /*
+     * 预览帧来自 PSRAM，当前 SPI LCD IO 不能直接使用 PSRAM 指针排队发送。
+     * 因此按几行一块拷贝到内部 DMA buffer。每块发送后都等待颜色事务完成，
+     * 再复用同一块 buffer，避免异步 SPI 还没读完数据就被下一块覆盖。
+     */
+    const uint8_t *src = (const uint8_t *)color_data;
+    int y = y_start;
+    while (y < y_end) {
+        const int remain_lines = y_end - y;
+        const int draw_lines = remain_lines > (int)chunk_lines ? (int)chunk_lines : remain_lines;
+        const size_t draw_bytes = line_bytes * (size_t)draw_lines;
+
+        memcpy(s_lcd_dma_bounce_buf,
+               src + ((size_t)(y - y_start) * line_bytes),
+               draw_bytes);
+
+        ret = driver_lcd_err_to_int(esp_lcd_panel_draw_bitmap(s_lcd_panel,
+                                                              x_start,
+                                                              y,
+                                                              x_end,
+                                                              y + draw_lines,
+                                                              s_lcd_dma_bounce_buf));
+        if (ret != 0) {
+            DRIVER_LOGE(TAG,
+                        "LCD 画图失败, ret=%d, area=(%d,%d)-(%d,%d)",
+                        ret,
+                        x_start,
+                        y,
+                        x_end,
+                        y + draw_lines);
+            return ret;
+        }
+
+        ret = driver_lcd_wait_color_done();
+        if (ret != 0) {
+            DRIVER_LOGE(TAG, "LCD 画图同步失败, ret=%d", ret);
+            return ret;
+        }
+
+        y += draw_lines;
+    }
+
+    return 0;
 }
 
 int driver_lcd_fill_screen(uint16_t color)

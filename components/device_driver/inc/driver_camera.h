@@ -3,7 +3,8 @@
  * @brief BSP 摄像头驱动接口。
  *
  * 本驱动基于 espressif/esp32-camera 组件封装摄像头初始化、取帧和释放。
- * 摄像头 SCCB 复用 BSP I2C 已初始化的新 I2C 总线，不在摄像头层创建或释放 I2C。
+ * 摄像头 SCCB 使用板级 I2C 引脚，初始化参数按 esp-camera 的 camera_config_t
+ * 填充；摄像头层不释放 BSP I2C，避免影响同总线的 PCA9557 和 LCD touch。
  */
 #ifndef driver_camera_H
 #define driver_camera_H
@@ -27,6 +28,8 @@ extern "C" {
 #define driver_camera_D5_IO BSP_CAMERA_D5_IO
 #define driver_camera_D6_IO BSP_CAMERA_D6_IO
 #define driver_camera_D7_IO BSP_CAMERA_D7_IO
+#define driver_camera_SIOD_IO BSP_CAMERA_SIOD_IO
+#define driver_camera_SIOC_IO BSP_CAMERA_SIOC_IO
 #define driver_camera_PWDN_IO BSP_CAMERA_PWDN_IO
 #define driver_camera_RESET_IO BSP_CAMERA_RESET_IO
 #define driver_camera_XCLK_IO BSP_CAMERA_XCLK_IO

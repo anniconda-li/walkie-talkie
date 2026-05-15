@@ -4,7 +4,8 @@
  */
 #include "bsp_i2c.h"
 
-#include "driver/i2c_master.h"
+#include "driver/i2c.h"
+#include "freertos/FreeRTOS.h"
 #include "hal/gpio_types.h"
 
 #include <stdlib.h>
@@ -12,69 +13,63 @@
 
 static const char *TAG = "bsp_i2c";
 
-static i2c_master_bus_handle_t s_i2c_bus = NULL;
+/** @brief legacy I2C driver 是否已经安装。 */
+static uint8_t s_i2c_inited = 0u;
 
 static int bsp_i2c_err_to_int(int ret)
 {
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-static int bsp_i2c_add_temp_device(uint16_t address,
-                                   uint32_t scl_speed_hz,
-                                   i2c_master_dev_handle_t *out_handle)
-{
-    if (s_i2c_bus == NULL || out_handle == NULL) {
-        return -1;
-    }
-
-    i2c_device_config_t dev_config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = address,
-        .scl_speed_hz = scl_speed_hz,
-        .scl_wait_us = 0,
-        .flags.disable_ack_check = 0,
-    };
-
-    return bsp_i2c_err_to_int(i2c_master_bus_add_device(s_i2c_bus, &dev_config, out_handle));
-}
-
 int bsp_i2c_init(void)
 {
-    if (s_i2c_bus != NULL) {
+    if (s_i2c_inited != 0u) {
         BSP_LOGI(TAG, "I2C 已初始化");
         return 0;
     }
 
-    i2c_master_bus_config_t bus_config = {
-        .i2c_port = (i2c_port_num_t)BSP_I2C_PORT,
-        .sda_io_num = (gpio_num_t)BSP_I2C_SDA_IO,
-        .scl_io_num = (gpio_num_t)BSP_I2C_SCL_IO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .intr_priority = 0,
-        .trans_queue_depth = 0,
-        .flags.enable_internal_pullup = 1,
+    /*
+     * ESP-IDF 5.3.x 的 esp32-camera SCCB 仍基于 legacy I2C driver。
+     * 为了让 camera、PCA9557、FT5x06 共享同一条 I2C 总线，这里统一使用
+     * legacy driver/i2c.h，避免和 new driver/i2c_master.h 混用触发 abort。
+     */
+    i2c_config_t bus_config = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = BSP_I2C_SDA_IO,
+        .scl_io_num = BSP_I2C_SCL_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = BSP_I2C_SCL_SPEED_HZ,
+        .clk_flags = 0,
     };
 
-    int ret = bsp_i2c_err_to_int(i2c_new_master_bus(&bus_config, &s_i2c_bus));
+    int ret = bsp_i2c_err_to_int(i2c_param_config((i2c_port_t)BSP_I2C_PORT, &bus_config));
+    if (ret == 0) {
+        ret = bsp_i2c_err_to_int(i2c_driver_install((i2c_port_t)BSP_I2C_PORT,
+                                                    I2C_MODE_MASTER,
+                                                    0,
+                                                    0,
+                                                    0));
+    }
     if (ret != 0) {
         BSP_LOGE(TAG, "I2C 总线初始化失败, ret=%d", ret);
         return ret;
     }
 
+    s_i2c_inited = 1u;
     BSP_LOGI(TAG, "I2C 总线初始化成功, sda=%d, scl=%d", BSP_I2C_SDA_IO, BSP_I2C_SCL_IO);
     return 0;
 }
 
 int bsp_i2c_deinit(void)
 {
-    if (s_i2c_bus == NULL) {
+    if (s_i2c_inited == 0u) {
         return 0;
     }
 
-    int ret = bsp_i2c_err_to_int(i2c_del_master_bus(s_i2c_bus));
+    int ret = bsp_i2c_err_to_int(i2c_driver_delete((i2c_port_t)BSP_I2C_PORT));
     if (ret == 0) {
-        s_i2c_bus = NULL;
+        s_i2c_inited = 0u;
         BSP_LOGI(TAG, "I2C 总线释放成功");
     } else {
         BSP_LOGE(TAG, "I2C 总线释放失败, ret=%d", ret);
@@ -85,7 +80,7 @@ int bsp_i2c_deinit(void)
 
 void *bsp_i2c_get_bus_handle(void)
 {
-    return (void *)s_i2c_bus;
+    return (s_i2c_inited != 0u) ? (void *)1 : NULL;
 }
 
 int bsp_i2c_write_reg(uint16_t address,
@@ -94,19 +89,12 @@ int bsp_i2c_write_reg(uint16_t address,
                       const uint8_t *data,
                       uint16_t len)
 {
-    if (s_i2c_bus == NULL || (data == NULL && len > 0u)) {
+    if (s_i2c_inited == 0u || (data == NULL && len > 0u)) {
         return -1;
-    }
-
-    i2c_master_dev_handle_t dev = NULL;
-    int ret = bsp_i2c_add_temp_device(address, scl_speed_hz, &dev);
-    if (ret != 0) {
-        return ret;
     }
 
     uint8_t *write_buf = (uint8_t *)calloc((size_t)len + 1u, sizeof(uint8_t));
     if (write_buf == NULL) {
-        (void)i2c_master_bus_rm_device(dev);
         return -2;
     }
 
@@ -115,12 +103,13 @@ int bsp_i2c_write_reg(uint16_t address,
         memcpy(&write_buf[1], data, len);
     }
 
-    ret = bsp_i2c_err_to_int(i2c_master_transmit(dev,
-                                                 write_buf,
-                                                 (size_t)len + 1u,
-                                                 BSP_I2C_XFER_TIMEOUT_MS));
+    (void)scl_speed_hz;
+    int ret = bsp_i2c_err_to_int(i2c_master_write_to_device((i2c_port_t)BSP_I2C_PORT,
+                                                            (uint8_t)address,
+                                                            write_buf,
+                                                            (size_t)len + 1u,
+                                                            pdMS_TO_TICKS(BSP_I2C_XFER_TIMEOUT_MS)));
     free(write_buf);
-    (void)i2c_master_bus_rm_device(dev);
     return ret;
 }
 
@@ -130,22 +119,16 @@ int bsp_i2c_read_reg(uint16_t address,
                      uint8_t *data,
                      uint16_t len)
 {
-    if (s_i2c_bus == NULL || data == NULL || len == 0u) {
+    if (s_i2c_inited == 0u || data == NULL || len == 0u) {
         return -1;
     }
 
-    i2c_master_dev_handle_t dev = NULL;
-    int ret = bsp_i2c_add_temp_device(address, scl_speed_hz, &dev);
-    if (ret != 0) {
-        return ret;
-    }
-
-    ret = bsp_i2c_err_to_int(i2c_master_transmit_receive(dev,
-                                                         &reg,
-                                                         sizeof(reg),
-                                                         data,
-                                                         len,
-                                                         BSP_I2C_XFER_TIMEOUT_MS));
-    (void)i2c_master_bus_rm_device(dev);
-    return ret;
+    (void)scl_speed_hz;
+    return bsp_i2c_err_to_int(i2c_master_write_read_device((i2c_port_t)BSP_I2C_PORT,
+                                                           (uint8_t)address,
+                                                           &reg,
+                                                           sizeof(reg),
+                                                           data,
+                                                           len,
+                                                           pdMS_TO_TICKS(BSP_I2C_XFER_TIMEOUT_MS)));
 }

@@ -122,6 +122,13 @@ lv_obj_t * ui_app_camera_create(lv_obj_t * parent)
     lv_label_set_text(g_camera_view.status_label, ui_i18n_text(UI_TEXT_CAMERA_LIVE));
     lv_obj_set_style_text_color(g_camera_view.status_label, lv_color_make(0xB7, 0xC4, 0xD2), 0);
     lv_obj_align(g_camera_view.status_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+    /*
+     * 预览画面由 app_camera 通过 service_screen_draw_rgb565() 直接绘制到 LCD。
+     * 这里的 LVGL preview 对象只保留给事件状态机使用，不参与实际渲染；
+     * 否则 LVGL 周期 flush 会和 camera 直绘交替覆盖同一块屏幕区域，表现为
+     * 预览偶发闪烁、颜色混乱。
+     */
+    lv_obj_add_flag(g_camera_view.preview, LV_OBJ_FLAG_HIDDEN);
 
     g_camera_view.capture_button = create_button(root, 8, 278, 68, 34,
                                                  ui_i18n_text(UI_TEXT_CAMERA_CAPTURE),
@@ -144,12 +151,10 @@ void ui_app_camera_enter(lv_obj_t * root)
 
     ui_event_notify_camera_entered();
 
-    lv_obj_set_y(g_camera_view.preview, -250);
     lv_obj_set_y(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10);
     lv_obj_set_y(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10);
     lv_obj_set_y(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10);
 
-    start_y_anim(g_camera_view.preview, -250, 30, 280, 0, lv_anim_path_ease_out, NULL, NULL);
     start_y_anim(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10, 278, 240, 40, lv_anim_path_ease_out, NULL, NULL);
     start_y_anim(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10, 278, 240, 65, lv_anim_path_ease_out, NULL, NULL);
     start_y_anim(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10, 278, 240, 90, lv_anim_path_ease_out, NULL, NULL);
@@ -170,7 +175,6 @@ void ui_app_camera_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
     ctx->done_cb = done_cb;
     ctx->root = root;
 
-    start_y_anim(g_camera_view.preview, lv_obj_get_y(g_camera_view.preview), -250, 220, 0, lv_anim_path_ease_in, NULL, NULL);
     start_y_anim(g_camera_view.capture_button,
                  lv_obj_get_y(g_camera_view.capture_button),
                  UI_SCREEN_HEIGHT + 10,

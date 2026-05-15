@@ -110,6 +110,8 @@
 /**
  * @brief OV5640 摄像头并口和控制引脚定义。
  */
+#define BSP_CAMERA_SIOD_IO  BSP_I2C_SDA_IO /**< SCCB/I2C 数据线，复用项目 I2C SDA。 */
+#define BSP_CAMERA_SIOC_IO  BSP_I2C_SCL_IO /**< SCCB/I2C 时钟线，复用项目 I2C SCL。 */
 #define BSP_CAMERA_VSYNC_IO GPIO_NUM_4  /**< 场同步。 */
 #define BSP_CAMERA_HREF_IO  GPIO_NUM_5  /**< 行同步。 */
 #define BSP_CAMERA_PCLK_IO  GPIO_NUM_16 /**< 像素时钟。 */

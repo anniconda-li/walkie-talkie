@@ -43,7 +43,7 @@ extern "C" {
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           9000
 /** @brief AI WAV 问答 HTTP 上传地址。 */
-#define APP_BUSINESS_AI_HTTP_URL        "http://10.212.141.251:8000/voice_chat_binary_with_audio?language=zh"
+#define APP_BUSINESS_AI_HTTP_URL        "http://10.212.141.28:8000/voice_chat_binary_with_audio?language=zh"
 /** @brief 相机 JPEG 上传 HTTP 地址。 */
 #define APP_BUSINESS_CAMERA_UPLOAD_URL  "http://10.212.141.251:8000/camera/upload"
 /** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
