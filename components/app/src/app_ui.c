@@ -7,6 +7,7 @@
 #include "app_config.h"
 #include "service_screen.h"
 #include "ui.h"
+#include "ui_event.h"
 #include "ui_shell.h"
 
 #include <stdint.h>
@@ -36,8 +37,16 @@ int app_ui_create(void)
     }
 
     ui_init();
-    s_ui_created = 1;
+
+    int ret = service_screen_display_on(1);
+    if (ret != 0) {
+        APP_LOGE(TAG, "UI 创建失败: 屏幕显示打开失败, ret=%d", ret);
+        service_screen_unlock();
+        return -3;
+    }
+
     service_screen_unlock();
+    s_ui_created = 1;
 
     APP_LOGI(TAG, "应用 UI 创建完成");
     return 0;
@@ -105,6 +114,38 @@ int app_ui_set_record_state(int state)
     }
 
     ui_shell_set_battery_level((uint8_t)(20 + ((state & 0x03) * 20)));
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_set_ai_waiting(int waiting)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "AI 等待动画设置失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_set_ai_waiting(waiting != 0);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_set_ai_message(ui_text_id_t text_id)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "AI 提示文本设置失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_set_ai_message(text_id);
     service_screen_unlock();
     return 0;
 }

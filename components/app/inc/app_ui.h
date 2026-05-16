@@ -7,6 +7,8 @@
 #ifndef APP_UI_H
 #define APP_UI_H
 
+#include "ui_i18n.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +51,22 @@ int app_ui_set_intercom_state(int state);
  * @return 成功返回 0；失败返回负值。
  */
 int app_ui_set_record_state(int state);
+
+/**
+ * @brief 设置 AI 回答框等待动画。
+ *
+ * @param[in] waiting 非 0 开启等待动画，0 关闭并恢复空闲文本。
+ * @return 成功返回 0；失败返回负值。
+ */
+int app_ui_set_ai_waiting(int waiting);
+
+/**
+ * @brief 设置 AI 回答框提示文本。
+ *
+ * @param[in] text_id UI 文本 ID。
+ * @return 成功返回 0；失败返回负值。
+ */
+int app_ui_set_ai_message(ui_text_id_t text_id);
 
 #ifdef __cplusplus
 }

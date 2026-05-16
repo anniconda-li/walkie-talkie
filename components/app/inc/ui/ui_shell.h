@@ -38,6 +38,13 @@ void ui_shell_init(void);
 void ui_shell_refresh_language(void);
 
 /**
+ * @brief 切换到指定应用页面。
+ *
+ * @param[in] app 目标应用。
+ */
+void ui_shell_switch_to(ui_app_id_t app);
+
+/**
  * @brief 设置状态栏电量显示。
  *
  * @param[in] percent 电量百分比，范围 0-100。大于 100 会按 100 显示。

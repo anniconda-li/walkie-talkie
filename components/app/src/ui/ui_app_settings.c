@@ -37,6 +37,7 @@
 #include "ui.h"
 #include "ui_event.h"
 #include "ui_i18n.h"
+#include "ui_theme.h"
 
 /** @brief 页面退场上下文——动画完成后清理 root 并触发回调。 */
 typedef struct {
@@ -153,7 +154,7 @@ static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
     lv_slider_set_range(slider, 0, 100);
     lv_slider_set_value(slider, value, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(slider, lv_color_make(0x45, 0x45, 0x45), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(slider, lv_color_make(0xFF, 0x66, 0x00), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
     return slider;
 }

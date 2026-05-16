@@ -21,6 +21,7 @@ typedef struct {
     void *(*get_panel_io)(void); /**< 获取下层显示 IO 不透明句柄，仅供 service 内部接入 UI runtime。 */
     void *(*get_panel)(void);    /**< 获取下层显示 panel 不透明句柄，仅供 service 内部接入 UI runtime。 */
     void *(*get_touch)(void);    /**< 获取下层触摸不透明句柄，仅供 service 内部接入 UI runtime。 */
+    int (*display_on)(int on);    /**< 设置下层显示和背光开关。 */
     int (*draw_rgb565)(int x,
                        int y,
                        int w,
@@ -99,6 +100,14 @@ int service_screen_is_initialized(void);
  *       避免重复加锁造成阻塞。
  */
 int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data);
+
+/**
+ * @brief 设置屏幕显示和背光开关。
+ *
+ * @param[in] on 0 关闭显示，非 0 打开显示。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_screen_display_on(int on);
 
 /**
  * @brief 获取屏幕水平分辨率。

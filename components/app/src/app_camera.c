@@ -10,6 +10,7 @@
  */
 #include "app_camera.h"
 
+#include "app_ui.h"
 #include "app_config.h"
 #include "osal_heap.h"
 #include "osal_mutex.h"
@@ -350,20 +351,30 @@ static void app_camera_do_capture(void)
  */
 static void app_camera_do_upload(void)
 {
+    int ret = 0;
+
     if (s_jpeg_buf == NULL || s_jpeg_len == 0u) {
         APP_LOGW(TAG, "相机上传失败: 没有可上传的 JPEG");
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        return;
+    }
+
+    if (service_network_is_ready() != 1) {
+        APP_LOGW(TAG, "相机上传失败: 网络未就绪");
+        app_camera_clear_jpeg();
+        (void)app_ui_set_ai_message(UI_TEXT_AI_NO_NETWORK);
         return;
     }
 
     uint32_t resp_len = 0u;
-    int ret = service_network_http_post(APP_BUSINESS_CAMERA_UPLOAD_URL,
-                                        "image/jpeg",
-                                        s_jpeg_buf,
-                                        s_jpeg_len,
-                                        s_upload_resp,
-                                        sizeof(s_upload_resp) - 1u,
-                                        &resp_len,
-                                        APP_CAMERA_UPLOAD_TIMEOUT_MS);
+    ret = service_network_http_post(APP_BUSINESS_CAMERA_UPLOAD_URL,
+                                    "image/jpeg",
+                                    s_jpeg_buf,
+                                    s_jpeg_len,
+                                    s_upload_resp,
+                                    sizeof(s_upload_resp) - 1u,
+                                    &resp_len,
+                                    APP_CAMERA_UPLOAD_TIMEOUT_MS);
     if (ret == 0) {
         s_upload_resp[resp_len < sizeof(s_upload_resp) ? resp_len : (sizeof(s_upload_resp) - 1u)] = '\0';
         APP_LOGI(TAG, "相机 JPEG 上传成功, len=%u, resp_len=%u",
@@ -373,6 +384,12 @@ static void app_camera_do_upload(void)
         APP_LOGW(TAG, "相机 JPEG 上传失败, ret=%d, len=%u",
                  ret,
                  (unsigned int)s_jpeg_len);
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+    }
+
+    app_camera_clear_jpeg();
+    if (ret == 0) {
+        (void)app_ui_set_ai_waiting(0);
     }
 }
 
@@ -517,13 +534,14 @@ void app_camera_exit(void)
     s_preview_active = 0;
     s_frozen = 0;
     if (app_camera_lock() == 0) {
-        s_capture_req = 0;
-        s_upload_req = 0;
         /*
-         * 退出页面时让后台任务负责释放 JPEG。这样即使当前正在上传，也不会
-         * 在 UI 线程里等待 HTTP，也不会边上传边释放缓冲。
+         * 如果用户点击上传后立即跳到 AI 页面，保留 upload 请求和 JPEG 缓冲，
+         * 让后台任务继续完成上传；普通退出则清理暂存图像。
          */
-        s_retake_req = 1;
+        if (s_upload_req == 0) {
+            s_capture_req = 0;
+            s_retake_req = 1;
+        }
         app_camera_unlock();
     }
     app_camera_notify_task();

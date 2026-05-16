@@ -311,6 +311,7 @@ int service_init(void)
             .get_panel_io = service_init_screen_get_panel_io,
             .get_panel = service_init_screen_get_panel,
             .get_touch = service_init_screen_get_touch,
+            .display_on = driver_lcd_display_on,
             .draw_rgb565 = service_init_screen_draw_rgb565,
             .hres = driver_lcd_H_RES,
             .vres = driver_lcd_V_RES,

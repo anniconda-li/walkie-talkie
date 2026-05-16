@@ -21,6 +21,7 @@
 #include "ui_event.h"
 #include "ui_i18n.h"
 #include "ui_shell.h"
+#include "ui_theme.h"
 #include <string.h>
 
 #define INTERCOM_CHANNEL_MIN 1
@@ -36,6 +37,11 @@
  * UI 控件的 LVGL 事件处理函数通过此结构体调用业务回调。
  */
 static ui_event_callbacks_t g_callbacks;
+static ui_ai_view_t *g_ai_view = NULL;
+static lv_timer_t *g_ai_wait_timer = NULL;
+static uint8_t g_ai_waiting = 0u;
+static uint8_t g_ai_wait_dot_count = 0u;
+static ui_text_id_t g_ai_message_id = UI_TEXT_AI_IDLE;
 
 /* ==========================================================================
  * 通用 UI 工具函数
@@ -179,7 +185,7 @@ static void set_intercom_talking(ui_intercom_view_t *view, bool talking)
 
     if(view->ptt_button != NULL) {
         lv_obj_set_style_bg_color(view->ptt_button,
-                                  talking ? lv_color_make(0xFF, 0x66, 0x00) : lv_color_make(0x3A, 0x3A, 0x3A),
+                                  talking ? UI_COLOR_INTERCOM : lv_color_make(0x3A, 0x3A, 0x3A),
                                   0);
     }
 }
@@ -258,7 +264,7 @@ static void intercom_ptt_event_cb(lv_event_t *e)
  * 相机页面事件处理
  * ========================================================================== */
 
-/** @brief 拍照按钮：冻结预览画面，启用上传和重拍按钮。 */
+/** @brief 拍照/重新预览按钮：在实时预览和定格画面之间切换。 */
 static void camera_capture_event_cb(lv_event_t *e)
 {
     ui_camera_view_t *view = (ui_camera_view_t *)lv_event_get_user_data(e);
@@ -267,40 +273,43 @@ static void camera_capture_event_cb(lv_event_t *e)
         return;
     }
 
-    view->frozen = true;
-    lv_obj_add_state(view->capture_button, LV_STATE_DISABLED);
-    lv_obj_remove_state(view->upload_button, LV_STATE_DISABLED);
-    lv_obj_remove_state(view->retake_button, LV_STATE_DISABLED);
+    if(view->frozen) {
+        view->frozen = false;
+        lv_label_set_text(view->capture_label, ui_i18n_text(UI_TEXT_CAMERA_CAPTURE));
+        lv_obj_add_state(view->upload_button, LV_STATE_DISABLED);
 
-    if(g_callbacks.camera_capture_requested != NULL) {
-        g_callbacks.camera_capture_requested();
+        if(g_callbacks.camera_retake_requested != NULL) {
+            g_callbacks.camera_retake_requested();
+        }
+    }
+    else {
+        view->frozen = true;
+        lv_label_set_text(view->capture_label, ui_i18n_text(UI_TEXT_CAMERA_RETAKE));
+        lv_obj_remove_state(view->upload_button, LV_STATE_DISABLED);
+
+        if(g_callbacks.camera_capture_requested != NULL) {
+            g_callbacks.camera_capture_requested();
+        }
     }
 }
 
-/** @brief 上传按钮：触发上传回调。 */
+/** @brief 上传按钮：触发上传并切到 AI 问答页面。 */
 static void camera_upload_event_cb(lv_event_t *e)
 {
-    if(lv_event_get_code(e) == LV_EVENT_CLICKED && g_callbacks.camera_upload_requested != NULL) {
-        g_callbacks.camera_upload_requested();
+    if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if(g_callbacks.camera_upload_requested != NULL) {
+            g_callbacks.camera_upload_requested();
+        }
+        ui_event_set_ai_waiting(true);
+        ui_shell_switch_to(UI_APP_ID_AI);
     }
 }
 
-/** @brief 重拍按钮：恢复实时预览状态，重新启用拍照。 */
+/** @brief Return 按钮：回到 AI 问答界面。 */
 static void camera_retake_event_cb(lv_event_t *e)
 {
-    ui_camera_view_t *view = (ui_camera_view_t *)lv_event_get_user_data(e);
-
-    if(lv_event_get_code(e) != LV_EVENT_CLICKED || view == NULL) {
-        return;
-    }
-
-    view->frozen = false;
-    lv_obj_remove_state(view->capture_button, LV_STATE_DISABLED);
-    lv_obj_add_state(view->upload_button, LV_STATE_DISABLED);
-    lv_obj_add_state(view->retake_button, LV_STATE_DISABLED);
-
-    if(g_callbacks.camera_retake_requested != NULL) {
-        g_callbacks.camera_retake_requested();
+    if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        ui_shell_switch_to(UI_APP_ID_AI);
     }
 }
 
@@ -332,9 +341,13 @@ static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
         return;
     }
 
+    if(speaking && g_ai_waiting != 0u) {
+        ui_event_set_ai_waiting(false);
+    }
+
     view->speaking = speaking;
     lv_obj_set_style_bg_color(view->ask_button,
-                              speaking ? lv_color_make(0xFF, 0x66, 0x00) : lv_color_make(0x36, 0x36, 0x36),
+                              speaking ? UI_COLOR_AI : lv_color_make(0x36, 0x36, 0x36),
                               0);
     for(int32_t i = 0; i < 4; i++) {
         lv_obj_t *bar = view->voice_bars[i];
@@ -368,8 +381,34 @@ static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
             set_obj_hidden(bar, true);
         }
     }
-    lv_label_set_text(view->answer_label,
-                      speaking ? ui_i18n_text(UI_TEXT_AI_LISTENING) : ui_i18n_text(UI_TEXT_AI_IDLE));
+    if(speaking) {
+        lv_label_set_text(view->answer_label, ui_i18n_text(UI_TEXT_AI_LISTENING));
+    }
+    else if(g_ai_waiting == 0u) {
+        lv_label_set_text(view->answer_label, ui_i18n_text(g_ai_message_id));
+    }
+}
+
+static void ai_wait_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
+    if(g_ai_view == NULL || g_ai_view->answer_label == NULL || g_ai_waiting == 0u) {
+        return;
+    }
+
+    g_ai_wait_dot_count = (uint8_t)((g_ai_wait_dot_count % 3u) + 1u);
+    switch(g_ai_wait_dot_count) {
+        case 1:
+            lv_label_set_text(g_ai_view->answer_label, ".");
+            break;
+        case 2:
+            lv_label_set_text(g_ai_view->answer_label, "..");
+            break;
+        default:
+            lv_label_set_text(g_ai_view->answer_label, "...");
+            break;
+    }
 }
 
 /**
@@ -391,10 +430,20 @@ static void ai_ask_event_cb(lv_event_t *e)
         }
     }
     else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        bool was_speaking = view != NULL && view->speaking;
         ai_set_speaking(view, false);
-        if(g_callbacks.ai_question_stopped != NULL) {
+        if(was_speaking && g_callbacks.ai_question_stopped != NULL) {
             g_callbacks.ai_question_stopped();
+            ui_event_set_ai_waiting(true);
         }
+    }
+}
+
+/** @brief AI 页拍照按钮：切换到相机页面。 */
+static void ai_camera_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        ui_shell_switch_to(UI_APP_ID_CAMERA);
     }
 }
 
@@ -559,7 +608,6 @@ void ui_event_register_camera(ui_camera_view_t *view)
     lv_obj_add_event_cb(view->upload_button, camera_upload_event_cb, LV_EVENT_CLICKED, view);
     lv_obj_add_event_cb(view->retake_button, camera_retake_event_cb, LV_EVENT_CLICKED, view);
     lv_obj_add_state(view->upload_button, LV_STATE_DISABLED);
-    lv_obj_add_state(view->retake_button, LV_STATE_DISABLED);
 }
 
 void ui_event_notify_camera_entered(void)
@@ -582,8 +630,62 @@ void ui_event_register_ai(ui_ai_view_t *view)
         return;
     }
 
+    g_ai_view = view;
     ai_set_speaking(view, false);
+    if(view->camera_button != NULL) {
+        lv_obj_add_event_cb(view->camera_button, ai_camera_event_cb, LV_EVENT_CLICKED, view);
+    }
     lv_obj_add_event_cb(view->ask_button, ai_ask_event_cb, LV_EVENT_ALL, view);
+    if(g_ai_waiting != 0u) {
+        ui_event_set_ai_waiting(true);
+    }
+}
+
+void ui_event_unregister_ai(ui_ai_view_t *view)
+{
+    if(g_ai_view != view) {
+        return;
+    }
+
+    if(g_ai_wait_timer != NULL) {
+        lv_timer_delete(g_ai_wait_timer);
+        g_ai_wait_timer = NULL;
+    }
+    g_ai_view = NULL;
+}
+
+void ui_event_set_ai_waiting(bool waiting)
+{
+    g_ai_waiting = waiting ? 1u : 0u;
+
+    if(!waiting) {
+        if(g_ai_wait_timer != NULL) {
+            lv_timer_delete(g_ai_wait_timer);
+            g_ai_wait_timer = NULL;
+        }
+        g_ai_wait_dot_count = 0u;
+        if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
+            lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(g_ai_message_id));
+        }
+        return;
+    }
+
+    g_ai_wait_dot_count = 0u;
+    if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
+        lv_label_set_text(g_ai_view->answer_label, ".");
+    }
+    if(g_ai_wait_timer == NULL) {
+        g_ai_wait_timer = lv_timer_create(ai_wait_timer_cb, 320, NULL);
+    }
+}
+
+void ui_event_set_ai_message(ui_text_id_t text_id)
+{
+    g_ai_message_id = text_id;
+    ui_event_set_ai_waiting(false);
+    if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
+        lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(text_id));
+    }
 }
 
 void ui_event_register_settings(ui_settings_view_t *view)

@@ -6,6 +6,7 @@
 #define UI_EVENT_H
 
 #include "lvgl.h"
+#include "ui_i18n.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -48,12 +49,12 @@ typedef struct {
  * @brief 相机页面视图对象集合。
  */
 typedef struct {
-    lv_obj_t *capture_label;  /**< 拍照按钮文本。 */
+    lv_obj_t *capture_label;  /**< 拍照/重新预览按钮文本。 */
     lv_obj_t *upload_label;   /**< 上传按钮文本。 */
-    lv_obj_t *retake_label;   /**< 重拍按钮文本。 */
-    lv_obj_t *capture_button; /**< 拍照按钮。 */
+    lv_obj_t *retake_label;   /**< Return 按钮文本。 */
+    lv_obj_t *capture_button; /**< 拍照/重新预览按钮。 */
     lv_obj_t *upload_button;  /**< 上传按钮。 */
-    lv_obj_t *retake_button;  /**< 重拍按钮。 */
+    lv_obj_t *retake_button;  /**< Return 按钮。 */
     bool frozen;              /**< 预览是否冻结。 */
 } ui_camera_view_t;
 
@@ -61,11 +62,13 @@ typedef struct {
  * @brief AI 页面视图对象集合。
  */
 typedef struct {
-    lv_obj_t *answer_label; /**< AI 回答显示标签。 */
-    lv_obj_t *ask_button;   /**< AI 问答按钮。 */
-    lv_obj_t *ask_label;    /**< AI 问答按钮文本。 */
+    lv_obj_t *answer_label;  /**< AI 回答显示标签。 */
+    lv_obj_t *camera_button; /**< 拍照按钮。 */
+    lv_obj_t *camera_label;  /**< 拍照按钮文本。 */
+    lv_obj_t *ask_button;    /**< AI 问答按钮。 */
+    lv_obj_t *ask_label;     /**< AI 问答按钮文本。 */
     lv_obj_t *voice_bars[4]; /**< 录音动效柱。 */
-    bool speaking;          /**< 是否处于录音动效状态。 */
+    bool speaking;           /**< 是否处于录音动效状态。 */
 } ui_ai_view_t;
 
 /**
@@ -121,6 +124,27 @@ void ui_event_notify_camera_exited(void);
  * @param[in] view AI 页面视图对象集合。
  */
 void ui_event_register_ai(ui_ai_view_t *view);
+
+/**
+ * @brief 注销 AI 页面视图对象。
+ *
+ * @param[in] view AI 页面视图对象集合。
+ */
+void ui_event_unregister_ai(ui_ai_view_t *view);
+
+/**
+ * @brief 设置 AI 回答框等待动画状态。
+ *
+ * @param[in] waiting true 开启等待动画，false 关闭。
+ */
+void ui_event_set_ai_waiting(bool waiting);
+
+/**
+ * @brief 设置 AI 回答框提示文本。
+ *
+ * @param[in] text_id UI 文本 ID。
+ */
+void ui_event_set_ai_message(ui_text_id_t text_id);
 
 /**
  * @brief 注册设置页面视图对象。

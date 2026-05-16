@@ -31,6 +31,7 @@
 #include "ui.h"
 #include "ui_event.h"
 #include "ui_i18n.h"
+#include "ui_theme.h"
 
 /**
  * @brief 页面退场上下文——用于在动画结束后清理。
@@ -48,6 +49,13 @@ static ui_ai_view_t g_ai_view;
 
 /** @brief AI 回答面板（深灰圆角矩形） */
 static lv_obj_t *g_answer_panel;
+
+#define AI_ACTION_BTN_Y      262
+#define AI_ACTION_BTN_W      96
+#define AI_ACTION_BTN_H      42
+#define AI_CAMERA_BTN_X      18
+#define AI_ASK_BTN_X         126
+#define AI_ACTION_BTN_RADIUS 21
 
 /* ---- LVGL 动画回调函数 ---- */
 
@@ -157,7 +165,7 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
     lv_obj_set_style_radius(g_answer_panel, 16, 0);
     lv_obj_set_style_bg_color(g_answer_panel, lv_color_make(0x22, 0x22, 0x22), 0);
     lv_obj_set_style_bg_opa(g_answer_panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(g_answer_panel, lv_color_make(0x70, 0x70, 0x70), 0);
+    lv_obj_set_style_border_color(g_answer_panel, UI_COLOR_AI, 0);
     lv_obj_set_style_border_width(g_answer_panel, 1, 0);
     lv_obj_set_style_pad_all(g_answer_panel, 12, 0);
 
@@ -175,17 +183,32 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
         lv_obj_set_size(g_ai_view.voice_bars[i], 7, 18 + (i % 2) * 12);
         lv_obj_set_pos(g_ai_view.voice_bars[i], 88 + i * 16, 238 - (i % 2) * 6);
         lv_obj_set_style_radius(g_ai_view.voice_bars[i], 3, 0);
-        lv_obj_set_style_bg_color(g_ai_view.voice_bars[i], lv_color_make(0xFF, 0x66, 0x00), 0);
+        lv_obj_set_style_bg_color(g_ai_view.voice_bars[i], UI_COLOR_AI, 0);
         lv_obj_set_style_border_width(g_ai_view.voice_bars[i], 0, 0);
         lv_obj_add_flag(g_ai_view.voice_bars[i], LV_OBJ_FLAG_HIDDEN);
     }
 
+    /* "拍照" 按钮 */
+    g_ai_view.camera_button = lv_button_create(root);
+    lv_obj_set_pos(g_ai_view.camera_button, AI_CAMERA_BTN_X, AI_ACTION_BTN_Y);
+    lv_obj_set_size(g_ai_view.camera_button, AI_ACTION_BTN_W, AI_ACTION_BTN_H);
+    lv_obj_set_style_radius(g_ai_view.camera_button, AI_ACTION_BTN_RADIUS, 0);
+    lv_obj_set_style_bg_color(g_ai_view.camera_button, lv_color_make(0x36, 0x36, 0x36), 0);
+    lv_obj_set_style_border_color(g_ai_view.camera_button, lv_color_make(0x88, 0x88, 0x88), 0);
+    lv_obj_set_style_border_width(g_ai_view.camera_button, 1, 0);
+
+    g_ai_view.camera_label = lv_label_create(g_ai_view.camera_button);
+    lv_label_set_text(g_ai_view.camera_label, ui_i18n_text(UI_TEXT_CAMERA_CAPTURE));
+    lv_obj_set_style_text_color(g_ai_view.camera_label, lv_color_white(), 0);
+    lv_obj_center(g_ai_view.camera_label);
+
     /* "按住提问" 按钮 */
     g_ai_view.ask_button = lv_button_create(root);
-    lv_obj_set_pos(g_ai_view.ask_button, 60, 262);
-    lv_obj_set_size(g_ai_view.ask_button, 120, 42);
-    lv_obj_set_style_radius(g_ai_view.ask_button, 21, 0);
+    lv_obj_set_pos(g_ai_view.ask_button, AI_ASK_BTN_X, AI_ACTION_BTN_Y);
+    lv_obj_set_size(g_ai_view.ask_button, AI_ACTION_BTN_W, AI_ACTION_BTN_H);
+    lv_obj_set_style_radius(g_ai_view.ask_button, AI_ACTION_BTN_RADIUS, 0);
     lv_obj_set_style_bg_color(g_ai_view.ask_button, lv_color_make(0x36, 0x36, 0x36), 0);
+    lv_obj_set_style_bg_color(g_ai_view.ask_button, UI_COLOR_AI, LV_STATE_PRESSED);
     lv_obj_set_style_border_color(g_ai_view.ask_button, lv_color_make(0x88, 0x88, 0x88), 0);
     lv_obj_set_style_border_width(g_ai_view.ask_button, 1, 0);
 
@@ -214,6 +237,7 @@ void ui_app_ai_enter(lv_obj_t * root)
     (void)root;
 
     lv_obj_set_y(g_answer_panel, -180);
+    lv_obj_set_y(g_ai_view.camera_button, UI_SCREEN_HEIGHT + 12);
     lv_obj_set_y(g_ai_view.ask_button, UI_SCREEN_HEIGHT + 12);
     for(int32_t i = 0; i < 4; i++) {
         lv_obj_set_y(g_ai_view.voice_bars[i], UI_SCREEN_HEIGHT + 12);
@@ -231,7 +255,22 @@ void ui_app_ai_enter(lv_obj_t * root)
                      NULL,
                      NULL);
     }
-    start_y_anim(g_ai_view.ask_button, UI_SCREEN_HEIGHT + 12, 262, 250, 75, lv_anim_path_ease_out, NULL, NULL);
+    start_y_anim(g_ai_view.camera_button,
+                 UI_SCREEN_HEIGHT + 12,
+                 AI_ACTION_BTN_Y,
+                 250,
+                 75,
+                 lv_anim_path_ease_out,
+                 NULL,
+                 NULL);
+    start_y_anim(g_ai_view.ask_button,
+                 UI_SCREEN_HEIGHT + 12,
+                 AI_ACTION_BTN_Y,
+                 250,
+                 90,
+                 lv_anim_path_ease_out,
+                 NULL,
+                 NULL);
 }
 
 /**
@@ -250,6 +289,8 @@ void ui_app_ai_enter(lv_obj_t * root)
  */
 void ui_app_ai_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
+    ui_event_unregister_ai(&g_ai_view);
+
     app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));
     if(ctx == NULL) {
         lv_obj_delete(root);
@@ -272,11 +313,19 @@ void ui_app_ai_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
                      NULL,
                      NULL);
     }
+    start_y_anim(g_ai_view.camera_button,
+                 lv_obj_get_y(g_ai_view.camera_button),
+                 UI_SCREEN_HEIGHT + 12,
+                 220,
+                 70,
+                 lv_anim_path_ease_in,
+                 NULL,
+                 NULL);
     start_y_anim(g_ai_view.ask_button,
                  lv_obj_get_y(g_ai_view.ask_button),
                  UI_SCREEN_HEIGHT + 12,
                  220,
-                 70,
+                 90,
                  lv_anim_path_ease_in,
                  app_exit_done_cb,
                  ctx);

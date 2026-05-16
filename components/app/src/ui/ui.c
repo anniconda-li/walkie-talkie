@@ -5,8 +5,11 @@
 
 void ui_init(void)
 {
+    lv_obj_t *screen = lv_screen_active();
+
     ui_font_init();
-    lv_obj_set_style_text_font(lv_screen_active(), ui_font_normal(), 0);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_text_font(screen, ui_font_normal(), 0);
 
     /* UI 入口暂时保持简单：
      * 1. 先播放开机动画

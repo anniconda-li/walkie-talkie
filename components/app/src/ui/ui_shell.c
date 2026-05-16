@@ -4,11 +4,12 @@
 #include "ui_app_camera.h"
 #include "ui_app_intercom.h"
 #include "ui_app_settings.h"
+#include "ui_assets.h"
 #include "ui_font.h"
 #include "ui_i18n.h"
+#include "ui_theme.h"
 #include "lvgl.h"
 #include <stdbool.h>
-#include <limits.h>
 #include <stdint.h>
 
 #define COLOR_BG               lv_color_hex(0x000000)
@@ -16,11 +17,6 @@
 #define COLOR_PANEL            lv_color_make(0x78, 0x78, 0x78)
 #define COLOR_BORDER           lv_color_make(0xD0, 0xD0, 0xD0)
 #define COLOR_ARROW            lv_color_make(0xF4, 0xF4, 0xF4)
-#define COLOR_ICON_INTERCOM    lv_color_make(0xFF, 0x66, 0x00)
-#define COLOR_ICON_SETTINGS    lv_color_make(0x88, 0x88, 0x88)
-#define COLOR_ICON_AI          lv_color_make(0x10, 0x10, 0x10)
-#define COLOR_ICON_CAMERA      lv_color_make(0x2E, 0x86, 0xDE)
-
 #define STATUS_BAR_H           30
 #define STATUS_BAR_Y           0
 #define APP_NAME_Y             48
@@ -28,7 +24,7 @@
 #define MENU_TOGGLE_W          34
 #define MENU_TOGGLE_H          40
 #define MENU_BAR_W             50
-#define MENU_BAR_H             96
+#define MENU_BAR_H             164
 
 #define MENU_BAR_Y             ((UI_SCREEN_HEIGHT - MENU_BAR_H) / 2)
 #define MENU_TOGGLE_Y          ((UI_SCREEN_HEIGHT - MENU_TOGGLE_H) / 2)
@@ -37,17 +33,21 @@
 #define MENU_TOGGLE_OVERLAP_W  10
 #define MENU_TOGGLE_OFFSET_X   (MENU_TOGGLE_OVERLAP_W - MENU_TOGGLE_W)
 
-#define MENU_ICON_LARGE_SIZE   40
-#define MENU_ICON_SMALL_SIZE   30
-#define MENU_ICON_STEP         40
-#define MENU_DRAG_SNAP_LIMIT   (MENU_ICON_STEP / 2)
+#define MENU_ICON_SIZE         42
+#define MENU_ICON_IMAGE_SCALE  198
+#define MENU_ICON_GAP          6
+#define MENU_ICON_OFFSET_X     (-1)
+#define MENU_APP_COUNT         3
+#define MENU_ICON_TOP_PAD      ((MENU_BAR_H - (MENU_APP_COUNT * MENU_ICON_SIZE) - \
+                                ((MENU_APP_COUNT - 1) * MENU_ICON_GAP)) / 2)
 
 #define ENTRY_FROM_TOP(y)      ((y) - STATUS_BAR_H - 10)
 #define ENTRY_FROM_RIGHT(x)    (UI_SCREEN_WIDTH + 10)
 
 typedef struct {
+    lv_obj_t * selector;
     lv_obj_t * box;
-    lv_obj_t * label;
+    lv_obj_t * icon;
 } menu_icon_t;
 
 static lv_obj_t *g_bg;
@@ -68,11 +68,8 @@ static menu_icon_t g_menu_icons[UI_APP_ID_COUNT];
 
 static ui_app_id_t g_current_app = UI_APP_ID_INTERCOM;
 static ui_app_id_t g_center_app = UI_APP_ID_INTERCOM;
-static int32_t g_menu_drag_offset;
 static bool g_menu_expanded;
-static bool g_menu_dragging;
 static bool g_switch_requested;
-static int32_t g_last_drag_dir;
 
 static const ui_text_id_t g_app_text_ids[UI_APP_ID_COUNT] = {
     UI_TEXT_APP_INTERCOM,
@@ -81,21 +78,25 @@ static const ui_text_id_t g_app_text_ids[UI_APP_ID_COUNT] = {
     UI_TEXT_APP_SETTINGS
 };
 
+static const ui_app_id_t g_menu_apps[MENU_APP_COUNT] = {
+    UI_APP_ID_INTERCOM,
+    UI_APP_ID_AI,
+    UI_APP_ID_SETTINGS
+};
+
 static void update_menu_icons(void);
 
-static lv_color_t get_app_icon_color(ui_app_id_t app)
+static const lv_image_dsc_t *get_app_icon_src(ui_app_id_t app)
 {
     switch(app) {
         case UI_APP_ID_INTERCOM:
-            return COLOR_ICON_INTERCOM;
-        case UI_APP_ID_CAMERA:
-            return COLOR_ICON_CAMERA;
+            return &intercom;
         case UI_APP_ID_AI:
-            return COLOR_ICON_AI;
+            return &ai;
         case UI_APP_ID_SETTINGS:
-            return COLOR_ICON_SETTINGS;
+            return &settings;
         default:
-            return COLOR_PANEL;
+            return NULL;
     }
 }
 
@@ -110,22 +111,34 @@ static void refresh_menu_toggle_arrow(void)
 }
 
 static void apply_menu_icon_visual(lv_obj_t *target_box,
-                                   lv_obj_t *target_label,
+                                   lv_obj_t *target_selector,
+                                   lv_obj_t *target_icon,
                                    ui_app_id_t app,
                                    int32_t size,
                                    int32_t x,
                                    int32_t y,
                                    bool highlighted)
 {
-    lv_obj_remove_flag(target_box, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(target_selector, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(target_selector, size + 4, size + 4);
+    lv_obj_set_pos(target_selector, x - 2, y - 2);
+    lv_obj_set_style_radius(target_selector, 10, 0);
+    lv_obj_set_style_bg_color(target_selector, COLOR_ARROW, 0);
+    lv_obj_set_style_bg_opa(target_selector, highlighted ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(target_selector, 0, 0);
+    lv_obj_set_style_pad_all(target_selector, 0, 0);
+
     lv_obj_set_size(target_box, size, size);
     lv_obj_set_pos(target_box, x, y);
-    lv_obj_set_style_radius(target_box, highlighted ? 8 : 6, 0);
-    lv_obj_set_style_bg_color(target_box, get_app_icon_color(app), 0);
+    lv_obj_set_style_radius(target_box, 8, 0);
+    lv_obj_set_style_clip_corner(target_box, true, 0);
+    lv_obj_set_style_bg_color(target_box, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(target_box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(target_box, 0, 0);
-    (void)app;
-    lv_label_set_text(target_label, "");
+
+    lv_image_set_src(target_icon, get_app_icon_src(app));
+    lv_image_set_scale(target_icon, MENU_ICON_IMAGE_SCALE);
+    lv_obj_center(target_icon);
 }
 
 static lv_obj_t *create_base_rect(lv_obj_t *parent, int32_t w, int32_t h)
@@ -151,58 +164,33 @@ static void anim_set_y(void *obj, int32_t y)
     lv_obj_set_y((lv_obj_t *)obj, y);
 }
 
-static void anim_set_menu_offset(void *obj, int32_t value)
-{
-    (void)obj;
-    g_menu_drag_offset = value;
-    update_menu_icons();
-}
-
-static ui_app_id_t app_prev(ui_app_id_t app)
-{
-    return (ui_app_id_t)((app + UI_APP_ID_COUNT - 1) % UI_APP_ID_COUNT);
-}
-
-static ui_app_id_t app_next(ui_app_id_t app)
-{
-    return (ui_app_id_t)((app + 1) % UI_APP_ID_COUNT);
-}
-
-static ui_app_id_t app_from_slot(ui_app_id_t center_app, int32_t slot)
-{
-    int32_t index = ((int32_t)center_app + slot + UI_APP_ID_COUNT) % UI_APP_ID_COUNT;
-    return (ui_app_id_t)index;
-}
-
-static int32_t get_app_relative_slot(ui_app_id_t center_app, ui_app_id_t app)
-{
-    int32_t diff = ((int32_t)app - (int32_t)center_app + UI_APP_ID_COUNT) % UI_APP_ID_COUNT;
-    int32_t half = UI_APP_ID_COUNT / 2;
-
-    if(diff == 0) {
-        return 0;
-    }
-
-    if(diff < half) {
-        return diff;
-    }
-
-    if(diff > half) {
-        return diff - UI_APP_ID_COUNT;
-    }
-
-    /* 对于 4 个应用时正对面的那个图标，静止时默认放到上方隐藏区；
-     * 拖动时根据最近一次拖动方向决定它从哪一侧进入。 */
-    if(g_menu_drag_offset < 0 || g_last_drag_dir < 0) {
-        return half;
-    }
-
-    return -half;
-}
-
 static void refresh_app_title(ui_app_id_t app)
 {
     lv_label_set_text(g_app_name_label, ui_i18n_text(g_app_text_ids[app]));
+    lv_obj_set_style_text_color(g_app_name_label, ui_theme_app_color(app), 0);
+}
+
+static void refresh_menu_visibility(void)
+{
+    bool hide = g_current_app == UI_APP_ID_CAMERA;
+
+    if(g_menu_toggle != NULL) {
+        if(hide) {
+            lv_obj_add_flag(g_menu_toggle, LV_OBJ_FLAG_HIDDEN);
+        }
+        else {
+            lv_obj_remove_flag(g_menu_toggle, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if(g_menu_bar != NULL) {
+        if(hide) {
+            lv_obj_add_flag(g_menu_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        else {
+            lv_obj_remove_flag(g_menu_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 static void create_status_signal(lv_obj_t *parent)
@@ -297,41 +285,24 @@ static void refresh_battery_level(void)
 
 static void update_menu_icons(void)
 {
-    const int32_t center_y = MENU_BAR_H / 2;
-    int32_t min_distance = INT32_MAX;
-    ui_app_id_t nearest_app = g_center_app;
+    for(int32_t i = 0; i < MENU_APP_COUNT; i++) {
+        ui_app_id_t app = g_menu_apps[i];
+        int32_t y = MENU_ICON_TOP_PAD + i * (MENU_ICON_SIZE + MENU_ICON_GAP);
+        int32_t x = ((MENU_BAR_W - MENU_ICON_SIZE) / 2) + MENU_ICON_OFFSET_X;
+        bool highlighted = app == g_center_app;
 
-    for(int32_t i = 0; i < UI_APP_ID_COUNT; i++) {
-        ui_app_id_t app = (ui_app_id_t)i;
-        int32_t slot = get_app_relative_slot(g_center_app, app);
-        int32_t rel = slot * MENU_ICON_STEP + g_menu_drag_offset;
-        int32_t distance = LV_ABS(rel);
-        int32_t limited = LV_MIN(distance, MENU_ICON_STEP);
-        int32_t size = MENU_ICON_LARGE_SIZE -
-                       ((MENU_ICON_LARGE_SIZE - MENU_ICON_SMALL_SIZE) * limited) / MENU_ICON_STEP;
-        int32_t y = center_y + rel - size / 2;
-        int32_t x = (MENU_BAR_W - size) / 2;
-        bool highlighted = distance < MENU_ICON_STEP / 2;
-
-        /* 这里改成 4 个真实图标对象循环排布，不再用“补位副本”。
-         * 这样图标在静止和拖动时都只有一份实体，不会再出现互相压住、
-         * 或者另一侧多露出一截的显示错误。 */
-        apply_menu_icon_visual(g_menu_icons[i].box, g_menu_icons[i].label,
-                               app, size, x, y, highlighted);
-
-        if(distance < min_distance) {
-            min_distance = distance;
-            nearest_app = app;
-        }
+        apply_menu_icon_visual(g_menu_icons[i].box,
+                               g_menu_icons[i].selector,
+                               g_menu_icons[i].icon,
+                               app, MENU_ICON_SIZE, x, y, highlighted);
 
         if(highlighted) {
+            lv_obj_move_foreground(g_menu_icons[i].selector);
             lv_obj_move_foreground(g_menu_icons[i].box);
         }
     }
 
-    /* 标题实时跟随当前最近中心的图标，
-     * 这样拖动时屏幕也会告诉用户当前对准的是哪个应用。 */
-    refresh_app_title(nearest_app);
+    refresh_app_title(g_center_app);
 }
 
 static lv_obj_t *create_app_root(ui_app_id_t app)
@@ -383,6 +354,7 @@ static void app_switch_done_cb(lv_anim_t *a)
     if(g_current_app_root) {
         enter_app(g_current_app, g_current_app_root);
     }
+    refresh_menu_visibility();
 }
 
 static void request_app_switch_if_needed(void)
@@ -408,92 +380,6 @@ static void request_app_switch_if_needed(void)
             break;
         default:
             break;
-    }
-}
-
-static void menu_snap_done_cb(lv_anim_t *a)
-{
-    (void)a;
-    update_menu_icons();
-    request_app_switch_if_needed();
-}
-
-static void start_menu_snap_animation(void)
-{
-    lv_anim_t anim;
-
-    lv_anim_del(NULL, anim_set_menu_offset);
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, NULL);
-    lv_anim_set_exec_cb(&anim, anim_set_menu_offset);
-    lv_anim_set_values(&anim, g_menu_drag_offset, 0);
-    lv_anim_set_duration(&anim, 180);
-    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
-    lv_anim_set_completed_cb(&anim, menu_snap_done_cb);
-    lv_anim_start(&anim);
-}
-
-static void normalize_drag_offset(void)
-{
-    /* 这里是无限循环的关键：
-     * 拖动累计跨过一个槽位后，立即把中心应用索引切到上一个/下一个，
-     * 同时把偏移回卷回来，于是视觉上就会形成从另一侧补位的效果。 */
-    while(g_menu_drag_offset >= MENU_ICON_STEP) {
-        g_menu_drag_offset -= MENU_ICON_STEP;
-        g_center_app = app_prev(g_center_app);
-    }
-
-    while(g_menu_drag_offset <= -MENU_ICON_STEP) {
-        g_menu_drag_offset += MENU_ICON_STEP;
-        g_center_app = app_next(g_center_app);
-    }
-}
-
-static void menu_drag_event_cb(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-
-    if(!g_menu_expanded || g_switch_requested) {
-        return;
-    }
-
-    if(code == LV_EVENT_PRESSED) {
-        g_menu_dragging = true;
-        lv_anim_del(NULL, anim_set_menu_offset);
-        return;
-    }
-
-    if(code == LV_EVENT_PRESSING && g_menu_dragging) {
-        lv_indev_t * indev = lv_indev_active();
-        lv_point_t vect;
-
-        if(indev == NULL) {
-            return;
-        }
-
-        lv_indev_get_vect(indev, &vect);
-        g_menu_drag_offset += vect.y;
-        if(vect.y != 0) {
-            g_last_drag_dir = vect.y;
-        }
-        normalize_drag_offset();
-        update_menu_icons();
-        return;
-    }
-
-    if((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) && g_menu_dragging) {
-        g_menu_dragging = false;
-
-        if(g_menu_drag_offset > MENU_DRAG_SNAP_LIMIT) {
-            g_menu_drag_offset -= MENU_ICON_STEP;
-            g_center_app = app_prev(g_center_app);
-        }
-        else if(g_menu_drag_offset < -MENU_DRAG_SNAP_LIMIT) {
-            g_menu_drag_offset += MENU_ICON_STEP;
-            g_center_app = app_next(g_center_app);
-        }
-
-        start_menu_snap_animation();
     }
 }
 
@@ -532,6 +418,19 @@ static void menu_toggle_event_cb(lv_event_t *e)
     g_menu_expanded = !g_menu_expanded;
     refresh_menu_toggle_arrow();
     start_menu_motion(g_menu_expanded ? MENU_BAR_OPEN_X : MENU_BAR_HIDDEN_X);
+}
+
+static void menu_icon_event_cb(lv_event_t *e)
+{
+    ui_app_id_t app = (ui_app_id_t)(intptr_t)lv_event_get_user_data(e);
+
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || g_switch_requested) {
+        return;
+    }
+
+    g_center_app = app;
+    update_menu_icons();
+    request_app_switch_if_needed();
 }
 
 static void menu_entry_done_cb(lv_anim_t *a)
@@ -582,15 +481,25 @@ static void start_entry_animation(void)
 
 static void create_menu_icons(void)
 {
-    for(int32_t i = 0; i < UI_APP_ID_COUNT; i++) {
+    for(int32_t i = 0; i < MENU_APP_COUNT; i++) {
+        g_menu_icons[i].selector = lv_obj_create(g_menu_clip);
+        lv_obj_remove_flag(g_menu_icons[i].selector, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(g_menu_icons[i].selector, 0, 0);
+        lv_obj_set_style_pad_all(g_menu_icons[i].selector, 0, 0);
+        lv_obj_remove_flag(g_menu_icons[i].selector, LV_OBJ_FLAG_CLICKABLE);
+
         g_menu_icons[i].box = lv_obj_create(g_menu_clip);
         lv_obj_remove_flag(g_menu_icons[i].box, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_border_width(g_menu_icons[i].box, 0, 0);
         lv_obj_set_style_pad_all(g_menu_icons[i].box, 0, 0);
-        lv_obj_add_flag(g_menu_icons[i].box, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_add_event_cb(g_menu_icons[i].box, menu_drag_event_cb, LV_EVENT_ALL, NULL);
+        lv_obj_add_flag(g_menu_icons[i].box, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(g_menu_icons[i].box,
+                            menu_icon_event_cb,
+                            LV_EVENT_CLICKED,
+                            (void *)(intptr_t)g_menu_apps[i]);
 
-        g_menu_icons[i].label = lv_label_create(g_menu_icons[i].box);
+        g_menu_icons[i].icon = lv_image_create(g_menu_icons[i].box);
+        lv_obj_remove_flag(g_menu_icons[i].icon, LV_OBJ_FLAG_CLICKABLE);
     }
 }
 
@@ -655,7 +564,6 @@ void ui_shell_init(void)
     lv_obj_set_style_border_width(g_menu_clip, 0, 0);
     lv_obj_set_style_pad_all(g_menu_clip, 0, 0);
     lv_obj_set_style_radius(g_menu_clip, 20, 0);
-    lv_obj_add_event_cb(g_menu_clip, menu_drag_event_cb, LV_EVENT_ALL, NULL);
 
     create_menu_icons();
 
@@ -666,14 +574,12 @@ void ui_shell_init(void)
         enter_app(g_current_app, g_current_app_root);
     }
 
-    g_menu_drag_offset = 0;
     g_menu_expanded = false;
-    g_menu_dragging = false;
     g_switch_requested = false;
-    g_last_drag_dir = 0;
 
     refresh_menu_toggle_arrow();
     update_menu_icons();
+    refresh_menu_visibility();
     lv_obj_move_foreground(g_status_bar);
     lv_obj_move_foreground(g_menu_toggle);
     lv_obj_move_foreground(g_menu_bar);
@@ -683,6 +589,17 @@ void ui_shell_init(void)
 void ui_shell_refresh_language(void)
 {
     refresh_app_title(g_center_app);
+}
+
+void ui_shell_switch_to(ui_app_id_t app)
+{
+    if(app < UI_APP_ID_INTERCOM || app >= UI_APP_ID_COUNT || g_switch_requested) {
+        return;
+    }
+
+    g_center_app = app;
+    update_menu_icons();
+    request_app_switch_if_needed();
 }
 
 void ui_shell_set_battery_level(uint8_t percent)

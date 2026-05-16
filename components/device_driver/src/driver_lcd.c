@@ -133,27 +133,6 @@ static int driver_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-/**
- * @brief 检查并打开 LCD 背光。
- *
- * @return 成功返回 0；失败返回负值。
- */
-static int driver_lcd_backlight_on(void)
-{
-    if (driver_pca9557_is_initialized() == 0) {
-        DRIVER_LOGE(TAG, "LCD 背光打开失败: PCA9557 未初始化");
-        return -1;
-    }
-
-    int ret = driver_pca9557_set_lcd_backlight(1);
-    if (ret != 0) {
-        DRIVER_LOGE(TAG, "LCD 背光打开失败, ret=%d", ret);
-        return ret;
-    }
-
-    return 0;
-}
-
 int driver_lcd_display_init(void)
 {
     if (s_lcd_panel != NULL) {
@@ -161,8 +140,14 @@ int driver_lcd_display_init(void)
         return 0;
     }
 
-    int ret = driver_lcd_backlight_on();
+    if (driver_pca9557_is_initialized() == 0) {
+        DRIVER_LOGE(TAG, "LCD 显示初始化失败: PCA9557 未初始化");
+        return -1;
+    }
+
+    int ret = driver_pca9557_set_lcd_backlight(0);
     if (ret != 0) {
+        DRIVER_LOGE(TAG, "LCD 显示初始化失败: 背光关闭失败, ret=%d", ret);
         return ret;
     }
 
@@ -223,6 +208,13 @@ int driver_lcd_display_init(void)
     }
     if (ret != 0) {
         DRIVER_LOGE(TAG, "ST7789 面板初始化失败, ret=%d", ret);
+        driver_lcd_deinit();
+        return ret;
+    }
+
+    ret = driver_lcd_fill_screen(0x0000u);
+    if (ret != 0) {
+        DRIVER_LOGE(TAG, "ST7789 面板初始化失败: 清黑屏失败, ret=%d", ret);
         driver_lcd_deinit();
         return ret;
     }

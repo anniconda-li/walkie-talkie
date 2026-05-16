@@ -73,6 +73,7 @@ static int service_screen_ops_is_valid(const service_screen_device_ops_t *ops)
         ops->get_panel_io == NULL ||
         ops->get_panel == NULL ||
         ops->get_touch == NULL ||
+        ops->display_on == NULL ||
         ops->draw_rgb565 == NULL ||
         ops->hres == 0u ||
         ops->vres == 0u) {
@@ -274,6 +275,21 @@ int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data)
 
     ret = s_screen_ops.draw_rgb565(x, y, w, h, data);
     service_screen_unlock();
+    return ret;
+}
+
+int service_screen_display_on(int on)
+{
+    if (s_screen_ops_ready == 0u || s_screen_ops.display_on == NULL) {
+        SERVICE_LOGE(TAG, "屏幕显示开关失败: 屏幕服务未初始化");
+        return -1;
+    }
+
+    int ret = s_screen_ops.display_on(on);
+    if (ret != 0) {
+        SERVICE_LOGE(TAG, "屏幕显示开关失败, on=%d, ret=%d", on, ret);
+    }
+
     return ret;
 }
 

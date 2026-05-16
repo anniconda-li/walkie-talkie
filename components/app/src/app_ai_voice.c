@@ -21,6 +21,7 @@
 
 #include "app_business.h"
 #include "app_config.h"
+#include "app_ui.h"
 #include "osal_heap.h"
 #include "osal_task.h"
 #include "service_audio.h"
@@ -562,6 +563,13 @@ static void app_ai_voice_task(void *arg)
         /* 步骤 1：获取录音数据（指针指向 service 层内部缓冲区） */
         int ret = service_audio_get_record_data(&record_pcm, &samples_total);
         if (ret != 0 || record_pcm == NULL || samples_total == 0u) {
+            (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+            app_business_audio_session_end();
+            continue;
+        }
+
+        if (service_network_is_ready() != 1) {
+            (void)app_ui_set_ai_message(UI_TEXT_AI_NO_NETWORK);
             app_business_audio_session_end();
             continue;
         }
@@ -582,9 +590,15 @@ static void app_ai_voice_task(void *arg)
             if (ret == 0) {
                 ret = app_ai_voice_finish_upload(session);
             }
+            if (ret != 0) {
+                (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+            }
             uint32_t reply_len = 0u;
             if (ret == 0) {
                 ret = app_ai_voice_wait_result_info(session, &reply_len);
+                if (ret != 0) {
+                    (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                }
             }
             if (ret == 0) {
                 if (reply_len > APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES) {
@@ -593,8 +607,12 @@ static void app_ai_voice_task(void *arg)
                              (unsigned int)reply_len,
                              (unsigned int)APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES);
                     ret = -10;
+                    (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
                 } else {
                     ret = app_ai_voice_download_result_chunks(session, reply_len);
+                    if (ret != 0) {
+                        (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                    }
                 }
             }
 
@@ -610,17 +628,19 @@ static void app_ai_voice_task(void *arg)
                 }
                 ret = app_ai_voice_wav_parse_pcm(s_ai_wav_buf, reply_len, &resp_pcm, &resp_samples);
                 if (ret == 0 && resp_samples > 0u) {
-                    /* 先标记播放开始（设置 s_playback_started 标志），再播放 PCM */
+                    (void)app_ui_set_ai_waiting(0);
                     (void)service_audio_start_playback();
                     (void)service_audio_play(resp_pcm, resp_samples, 100u);
                 } else {
                     APP_LOGW(TAG, "AI 响应 WAV 解析失败, ret=%d, len=%u", ret, (unsigned int)reply_len);
+                    (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
                 }
             } else if (ret != 0) {
                 APP_LOGW(TAG, "AI 分片问答失败, ret=%d", ret);
             }
         } else {
             APP_LOGW(TAG, "AI 录音 WAV 长度无效或超限, wav_len=%u", (unsigned int)wav_len);
+            (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
         }
 
         /* 步骤 8：无论成功失败都释放音频会话锁 */

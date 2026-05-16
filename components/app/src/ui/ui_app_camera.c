@@ -10,6 +10,13 @@ typedef struct {
 
 static ui_camera_view_t g_camera_view;
 
+#define CAMERA_BTN_LEFT_X   8
+#define CAMERA_BTN_CENTER_X 86
+#define CAMERA_BTN_RIGHT_X  164
+#define CAMERA_BTN_Y        278
+#define CAMERA_BTN_W        68
+#define CAMERA_BTN_H        34
+
 static void anim_set_y(void *obj, int32_t y)
 {
     lv_obj_set_y((lv_obj_t *)obj, y);
@@ -99,14 +106,14 @@ lv_obj_t * ui_app_camera_create(lv_obj_t * parent)
      * LCD 的固定区域，底部按钮仍由 LVGL 管理。这样可以排除预览区对象被
      * LVGL flush 覆盖导致的花屏。
      */
-    g_camera_view.capture_button = create_button(root, 8, 278, 68, 34,
-                                                 ui_i18n_text(UI_TEXT_CAMERA_CAPTURE),
-                                                 &g_camera_view.capture_label);
-    g_camera_view.upload_button = create_button(root, 86, 278, 68, 34,
+    g_camera_view.upload_button = create_button(root, CAMERA_BTN_LEFT_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
                                                 ui_i18n_text(UI_TEXT_CAMERA_UPLOAD),
                                                 &g_camera_view.upload_label);
-    g_camera_view.retake_button = create_button(root, 164, 278, 68, 34,
-                                                ui_i18n_text(UI_TEXT_CAMERA_RETAKE),
+    g_camera_view.capture_button = create_button(root, CAMERA_BTN_CENTER_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
+                                                 ui_i18n_text(UI_TEXT_CAMERA_CAPTURE),
+                                                 &g_camera_view.capture_label);
+    g_camera_view.retake_button = create_button(root, CAMERA_BTN_RIGHT_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
+                                                ui_i18n_text(UI_TEXT_CAMERA_HOME),
                                                 &g_camera_view.retake_label);
     g_camera_view.frozen = false;
 
@@ -124,9 +131,9 @@ void ui_app_camera_enter(lv_obj_t * root)
     lv_obj_set_y(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10);
     lv_obj_set_y(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10);
 
-    start_y_anim(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10, 278, 240, 40, lv_anim_path_ease_out, NULL, NULL);
-    start_y_anim(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10, 278, 240, 65, lv_anim_path_ease_out, NULL, NULL);
-    start_y_anim(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10, 278, 240, 90, lv_anim_path_ease_out, NULL, NULL);
+    start_y_anim(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10, CAMERA_BTN_Y, 240, 40, lv_anim_path_ease_out, NULL, NULL);
+    start_y_anim(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10, CAMERA_BTN_Y, 240, 65, lv_anim_path_ease_out, NULL, NULL);
+    start_y_anim(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10, CAMERA_BTN_Y, 240, 90, lv_anim_path_ease_out, NULL, NULL);
 }
 
 void ui_app_camera_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)

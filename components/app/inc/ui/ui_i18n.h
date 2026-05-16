@@ -30,9 +30,14 @@ typedef enum {
     UI_TEXT_CAMERA_CAPTURE,         /**< 拍照文本。 */
     UI_TEXT_CAMERA_UPLOAD,          /**< 上传文本。 */
     UI_TEXT_CAMERA_RETAKE,          /**< 重拍文本。 */
+    UI_TEXT_CAMERA_HOME,            /**< 返回 AI 页面文本。 */
     UI_TEXT_AI_IDLE,                /**< AI 空闲文本。 */
     UI_TEXT_AI_LISTENING,           /**< AI 录音中文本。 */
     UI_TEXT_AI_ASK,                 /**< AI 提问按钮文本。 */
+    UI_TEXT_AI_NO_NETWORK,          /**< AI 无网络提示。 */
+    UI_TEXT_AI_IMAGE_UPLOAD_FAILED, /**< 图片上传失败提示。 */
+    UI_TEXT_AI_QUESTION_FAILED,     /**< AI 提问失败提示。 */
+    UI_TEXT_AI_REPLY_FAILED,        /**< AI 回复接收失败提示。 */
     UI_TEXT_SETTINGS_BRIGHTNESS,    /**< 亮度文本。 */
     UI_TEXT_SETTINGS_VOLUME,        /**< 音量文本。 */
     UI_TEXT_SETTINGS_LANGUAGE,      /**< 语言文本。 */

@@ -3,6 +3,7 @@
 #include "ui_event.h"
 #include "ui_font.h"
 #include "ui_i18n.h"
+#include "ui_theme.h"
 
 typedef struct {
     lv_anim_completed_cb_t done_cb;
@@ -66,7 +67,7 @@ static lv_obj_t *create_panel(lv_obj_t *parent, int32_t x, int32_t y, int32_t w,
     lv_obj_set_style_radius(obj, 14, 0);
     lv_obj_set_style_bg_color(obj, lv_color_make(0x24, 0x24, 0x24), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(obj, lv_color_make(0xFF, 0x66, 0x00), 0);
+    lv_obj_set_style_border_color(obj, UI_COLOR_INTERCOM, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     return obj;
@@ -120,7 +121,7 @@ lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
         lv_obj_set_size(g_intercom_view.broadcast_rings[i], 58 + i * 24, 58 + i * 24);
         lv_obj_set_style_radius(g_intercom_view.broadcast_rings[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_opa(g_intercom_view.broadcast_rings[i], LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_color(g_intercom_view.broadcast_rings[i], lv_color_make(0xFF, 0x66, 0x00), 0);
+        lv_obj_set_style_border_color(g_intercom_view.broadcast_rings[i], UI_COLOR_INTERCOM, 0);
         lv_obj_set_style_border_width(g_intercom_view.broadcast_rings[i], 1, 0);
         lv_obj_set_style_opa(g_intercom_view.broadcast_rings[i], (lv_opa_t)(100 - i * 24), 0);
         lv_obj_center(g_intercom_view.broadcast_rings[i]);
