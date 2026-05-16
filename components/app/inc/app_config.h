@@ -59,7 +59,20 @@ extern "C" {
 /** @brief 相机预览区域高度。 */
 #define APP_CAMERA_PREVIEW_H            240
 /** @brief 相机预览帧间隔，约 15 FPS。 */
-#define APP_CAMERA_PREVIEW_INTERVAL_MS  66u
+#define APP_CAMERA_PREVIEW_INTERVAL_MS  100u
+/** @brief 相机正常连续预览模式。 */
+#define APP_CAMERA_PREVIEW_TEST_NORMAL  0
+/** @brief 相机单帧冻结测试模式，用于判断花屏是否来自连续刷新。 */
+#define APP_CAMERA_PREVIEW_TEST_SINGLE  1
+/** @brief 相机固定色块测试模式，用于判断 LCD 直刷链路是否稳定。 */
+#define APP_CAMERA_PREVIEW_TEST_COLOR   2
+/**
+ * @brief 当前相机预览测试模式。
+ *
+ * 调试花屏时先使用 SINGLE；若单帧仍花，再改为 COLOR 测 LCD 直刷路径。
+ * 验证完成后改回 NORMAL。
+ */
+#define APP_CAMERA_PREVIEW_TEST_MODE    APP_CAMERA_PREVIEW_TEST_NORMAL
 /** @brief AI HTTP 单片请求等待响应的超时时间，单位 ms。 */
 #define APP_AI_HTTP_CHUNK_TIMEOUT_MS    30000u
 /** @brief AI 服务器处理等待总超时时间，单位 ms。 */

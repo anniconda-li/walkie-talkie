@@ -4,6 +4,7 @@
 The server provides:
 - UDP WTK1 packet logging and same-device audio echo with a server device name.
 - HTTP chunked WAV echo for AI voice tests.
+- HTTP JPEG upload receiver for camera tests.
 """
 
 from __future__ import annotations
@@ -34,10 +35,13 @@ SERVER_DEVICE = b"server-echo"
 # APP_BUSINESS_UDP_PORT should match DEFAULT_UDP_PORT.
 # APP_BUSINESS_AI_HTTP_URL should usually be:
 #   http://<PC_LAN_IP>:<DEFAULT_HTTP_PORT>/voice_chat_binary_with_audio?language=zh
+# APP_BUSINESS_CAMERA_UPLOAD_URL should usually be:
+#   http://<PC_LAN_IP>:<DEFAULT_HTTP_PORT>/camera/upload
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_UDP_PORT = 9000
 DEFAULT_HTTP_PORT = 8000
-DEFAULT_SAVE_DIR = Path("tools/received_wav")
+DEFAULT_WAV_SAVE_DIR = Path("tools/received_wav")
+DEFAULT_JPG_SAVE_DIR = Path("tools/received_jpg")
 DEFAULT_CHUNK_SIZE = 32768
 
 PKT_TYPES = {
@@ -68,6 +72,13 @@ class WavInfo:
     bits_per_sample: int
     data_offset: int
     data_size: int
+
+
+@dataclass
+class JpegInfo:
+    width: int | None = None
+    height: int | None = None
+    progressive: bool = False
 
 
 @dataclass
@@ -229,6 +240,81 @@ def validate_and_log_wav(body: bytes, save_dir: Path, prefix: str) -> tuple[bool
     return True, save_path
 
 
+def parse_jpeg(body: bytes) -> JpegInfo | None:
+    if len(body) < 4 or body[:2] != b"\xFF\xD8" or body[-2:] != b"\xFF\xD9":
+        return None
+
+    pos = 2
+    while pos + 4 <= len(body):
+        if body[pos] != 0xFF:
+            pos += 1
+            continue
+        while pos < len(body) and body[pos] == 0xFF:
+            pos += 1
+        if pos >= len(body):
+            break
+
+        marker = body[pos]
+        pos += 1
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            continue
+        if pos + 2 > len(body):
+            return None
+
+        segment_len = read_u16_be(body, pos)
+        if segment_len < 2 or pos + segment_len > len(body):
+            return None
+
+        if marker in (0xC0, 0xC1, 0xC2):
+            if segment_len < 7:
+                return None
+            height = read_u16_be(body, pos + 3)
+            width = read_u16_be(body, pos + 5)
+            return JpegInfo(width=width, height=height, progressive=(marker == 0xC2))
+
+        pos += segment_len
+
+    return JpegInfo()
+
+
+def read_u16_be(data: bytes, offset: int) -> int:
+    return (data[offset] << 8) | data[offset + 1]
+
+
+def save_jpeg(body: bytes, save_dir: Path) -> Path:
+    save_dir.mkdir(parents=True, exist_ok=True)
+    path = save_dir / f"camera_upload_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+    path.write_bytes(body)
+    return path
+
+
+def save_camera_raw(body: bytes, save_dir: Path) -> Path:
+    save_dir.mkdir(parents=True, exist_ok=True)
+    path = save_dir / f"camera_upload_invalid_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.bin"
+    path.write_bytes(body)
+    return path
+
+
+def validate_and_log_jpeg(body: bytes, save_dir: Path, prefix: str) -> tuple[bool, Path | None, JpegInfo | None]:
+    jpeg = parse_jpeg(body)
+    if jpeg is None:
+        save_path = save_camera_raw(body, save_dir)
+        log(
+            f"{prefix} invalid JPEG len={len(body)} "
+            f"soi={body[:2].hex()} eoi={body[-2:].hex() if len(body) >= 2 else ''} "
+            f"saved_raw={save_path}"
+        )
+        return False, save_path, None
+
+    save_path = save_jpeg(body, save_dir)
+    size_text = f"{jpeg.width}x{jpeg.height}" if jpeg.width and jpeg.height else "unknown"
+    log(
+        f"{prefix} JPEG len={len(body)} size={size_text} "
+        f"progressive={int(jpeg.progressive)} saved={save_path}"
+    )
+    return True, save_path, jpeg
+
+
 def run_udp(host: str, port: int) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -288,6 +374,10 @@ class AiWavHandler(http.server.BaseHTTPRequestHandler):
             self.handle_chunked_ai(op, params, body)
             return
 
+        if parsed.path == "/camera/upload":
+            self.handle_camera_upload(body, content_type)
+            return
+
         # Backward-compatible old one-shot WAV echo endpoint.
         if parsed.path != "/ai/wav":
             self.send_error(404)
@@ -301,6 +391,38 @@ class AiWavHandler(http.server.BaseHTTPRequestHandler):
 
         validate_and_log_wav(body, self.server.save_dir, "HTTP one-shot")
         self.send_bytes(200, body, "audio/wav")
+
+    def handle_camera_upload(self, body: bytes, content_type: str) -> None:
+        if "image/jpeg" not in content_type.lower() and "image/jpg" not in content_type.lower():
+            log(f"Camera upload content-type warning: {content_type!r}")
+
+        ok, save_path, jpeg = validate_and_log_jpeg(body, self.server.jpg_save_dir, "Camera upload")
+        if not ok or save_path is None:
+            self.send_json(
+                400,
+                (
+                    '{"ok":false,'
+                    '"error":"invalid jpeg",'
+                    f'"len":{len(body)},'
+                    f'"file":"{save_path.as_posix() if save_path else ""}"'
+                    '}'
+                ),
+            )
+            return
+
+        width = jpeg.width if jpeg and jpeg.width is not None else 0
+        height = jpeg.height if jpeg and jpeg.height is not None else 0
+        self.send_json(
+            200,
+            (
+                '{"ok":true,'
+                f'"len":{len(body)},'
+                f'"width":{width},'
+                f'"height":{height},'
+                f'"file":"{save_path.as_posix()}"'
+                '}'
+            ),
+        )
 
     def handle_chunked_ai(self, op: str, params: dict[str, list[str]], body: bytes) -> None:
         if op == "start":
@@ -402,7 +524,7 @@ class AiWavHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
-def run_http(host: str, port: int, save_dir: Path) -> None:
+def run_http(host: str, port: int, wav_save_dir: Path, jpg_save_dir: Path) -> None:
     class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         daemon_threads = True
 
@@ -412,9 +534,11 @@ def run_http(host: str, port: int, save_dir: Path) -> None:
         log(f"HTTP bind failed on {host}:{port}: {exc}")
         return
 
-    server.save_dir = save_dir
+    server.save_dir = wav_save_dir
+    server.jpg_save_dir = jpg_save_dir
     server.ai_sessions = {}
-    log(f"HTTP AI chunk test listening on {host}:{port}")
+    log(f"HTTP AI WAV + camera JPEG test listening on {host}:{port}")
+    log(f"Camera upload URL: http://<PC_LAN_IP>:{port}/camera/upload")
     server.serve_forever()
 
 
@@ -423,13 +547,14 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_BIND_HOST, help="bind address")
     parser.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT, help="WTK1 UDP listen port")
     parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT, help="AI WAV HTTP port")
-    parser.add_argument("--save-dir", default=str(DEFAULT_SAVE_DIR), help="directory for received WAV files")
+    parser.add_argument("--wav-save-dir", default=str(DEFAULT_WAV_SAVE_DIR), help="directory for received WAV files")
+    parser.add_argument("--jpg-save-dir", default=str(DEFAULT_JPG_SAVE_DIR), help="directory for received JPEG files")
     args = parser.parse_args()
 
     threading.Thread(target=run_udp, args=(args.host, args.udp_port), daemon=True).start()
     threading.Thread(
         target=run_http,
-        args=(args.host, args.http_port, Path(args.save_dir)),
+        args=(args.host, args.http_port, Path(args.wav_save_dir), Path(args.jpg_save_dir)),
         daemon=True,
     ).start()
 

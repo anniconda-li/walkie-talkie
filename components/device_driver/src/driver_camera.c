@@ -18,7 +18,7 @@ static const char *TAG = "driver_camera";
 /**
  * @brief 摄像头 XCLK 频率。
  */
-#define driver_camera_XCLK_FREQ_HZ 24000000
+#define driver_camera_XCLK_FREQ_HZ 20000000
 
 /** @brief 本地预览使用的帧尺寸。 */
 #define DRIVER_CAMERA_PREVIEW_FRAME_SIZE FRAMESIZE_240X240
@@ -46,13 +46,39 @@ static int driver_camera_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-int driver_camera_init(void)
+/**
+ * @brief 打印当前 esp-camera 自动识别到的传感器信息。
+ *
+ * 当前驱动不再绑定固定传感器型号，OV2640/OV5640 都交给 esp-camera
+ * 自动探测。这里打印 PID 和当前格式，便于换模组后确认实际识别结果。
+ */
+static void driver_camera_log_sensor_info(void)
 {
-    if (s_camera_inited != 0u) {
-        DRIVER_LOGI(TAG, "摄像头已初始化");
-        return 0;
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor == NULL) {
+        DRIVER_LOGW(TAG, "摄像头 sensor 信息不可用");
+        return;
     }
 
+    DRIVER_LOGI(TAG,
+                "摄像头 sensor 已识别, pid=0x%04X, slv_addr=0x%02X, pixformat=%d, framesize=%d",
+                (unsigned int)sensor->id.PID,
+                (unsigned int)sensor->slv_addr,
+                (int)sensor->pixformat,
+                (int)sensor->status.framesize);
+}
+
+/**
+ * @brief 按指定输出格式初始化 esp-camera。
+ *
+ * esp-camera 的 JPEG/RGB565 采样模式、DMA 接收长度和帧缓存处理是在
+ * esp_camera_init() 内根据 camera_config_t.pixel_format 配好的。运行时只
+ * 调 sensor->set_pixformat() 会让 sensor 状态变成 JPEG，但 HAL 仍按旧的
+ * RGB/YUV 接收路径取帧，表现为 fb->format 是 JPEG、数据却不是 JPEG。
+ * 因此本项目在 RGB565 预览和 JPEG 拍照之间切换时，采用 deinit/init 重建。
+ */
+static int driver_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
+{
     if (bsp_i2c_get_bus_handle() == NULL) {
         DRIVER_LOGE(TAG, "摄像头初始化失败: I2C 未初始化");
         return -1;
@@ -87,8 +113,8 @@ int driver_camera_init(void)
         .xclk_freq_hz = driver_camera_XCLK_FREQ_HZ,
         .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
-        .pixel_format = PIXFORMAT_RGB565,
-        .frame_size = DRIVER_CAMERA_PREVIEW_FRAME_SIZE,
+        .pixel_format = pixformat,
+        .frame_size = framesize,
         .jpeg_quality = 12,
         .fb_count = 1,
         .fb_location = CAMERA_FB_IN_PSRAM,
@@ -98,16 +124,57 @@ int driver_camera_init(void)
 
     int ret = driver_camera_err_to_int(esp_camera_init(&camera_config));
     if (ret != 0) {
-        DRIVER_LOGE(TAG, "摄像头初始化失败, ret=%d", ret);
+        DRIVER_LOGE(TAG, "摄像头初始化失败, ret=%d, pixformat=%d, frame_size=%d",
+                    ret,
+                    (int)pixformat,
+                    (int)framesize);
         return ret;
     }
 
-    s_camera_pixformat = PIXFORMAT_RGB565;
-    s_camera_framesize = DRIVER_CAMERA_PREVIEW_FRAME_SIZE;
+    s_camera_pixformat = pixformat;
+    s_camera_framesize = framesize;
     s_camera_inited = 1u;
+    driver_camera_log_sensor_info();
     DRIVER_LOGI(TAG, "摄像头初始化成功, frame_size=%d, pixel_format=%d",
-             DRIVER_CAMERA_PREVIEW_FRAME_SIZE, PIXFORMAT_RGB565);
+                (int)framesize,
+                (int)pixformat);
     return 0;
+}
+
+/**
+ * @brief 重建 esp-camera 到指定模式。
+ *
+ * 如果当前模式已经匹配则直接返回。否则先释放旧实例，再用目标格式重新
+ * 初始化，这样 HAL 的 jpeg_mode、DMA 长度和 sensor 输出格式保持一致。
+ */
+static int driver_camera_reinit_mode(pixformat_t pixformat, framesize_t framesize)
+{
+    if (s_camera_inited != 0u &&
+        s_camera_pixformat == pixformat &&
+        s_camera_framesize == framesize) {
+        return 0;
+    }
+
+    if (s_camera_inited != 0u) {
+        int ret = driver_camera_err_to_int(esp_camera_deinit());
+        if (ret != 0) {
+            DRIVER_LOGE(TAG, "摄像头模式切换前释放失败, ret=%d", ret);
+            return ret;
+        }
+        s_camera_inited = 0u;
+    }
+
+    return driver_camera_init_mode(pixformat, framesize);
+}
+
+int driver_camera_init(void)
+{
+    if (s_camera_inited != 0u) {
+        DRIVER_LOGI(TAG, "摄像头已初始化");
+        return 0;
+    }
+
+    return driver_camera_init_mode(PIXFORMAT_RGB565, DRIVER_CAMERA_PREVIEW_FRAME_SIZE);
 }
 
 int driver_camera_deinit(void)
@@ -134,33 +201,11 @@ int driver_camera_set_rgb565_mode(void)
         DRIVER_LOGE(TAG, "切换 RGB565 模式失败: 摄像头未初始化");
         return -1;
     }
-    if (s_camera_pixformat == PIXFORMAT_RGB565 &&
-        s_camera_framesize == DRIVER_CAMERA_PREVIEW_FRAME_SIZE) {
-        return 0;
-    }
-
-    /*
-     * 运行时切换格式由 esp32-camera sensor 驱动完成。若后续实测某个传感器
-     * 不支持稳定切换，可把这里内部改成 deinit/init 重建，service/app 接口不变。
-     */
-    sensor_t *sensor = esp_camera_sensor_get();
-    if (sensor == NULL) {
-        DRIVER_LOGE(TAG, "切换 RGB565 模式失败: sensor 为空");
-        return -2;
-    }
-
-    int ret = driver_camera_err_to_int(sensor->set_pixformat(sensor, PIXFORMAT_RGB565));
-    if (ret == 0) {
-        ret = driver_camera_err_to_int(sensor->set_framesize(sensor,
-                                                             DRIVER_CAMERA_PREVIEW_FRAME_SIZE));
-    }
+    int ret = driver_camera_reinit_mode(PIXFORMAT_RGB565, DRIVER_CAMERA_PREVIEW_FRAME_SIZE);
     if (ret != 0) {
         DRIVER_LOGE(TAG, "切换 RGB565 模式失败, ret=%d", ret);
         return ret;
     }
-
-    s_camera_pixformat = PIXFORMAT_RGB565;
-    s_camera_framesize = DRIVER_CAMERA_PREVIEW_FRAME_SIZE;
     DRIVER_LOGI(TAG, "摄像头已切换到 RGB565 预览模式, frame_size=%d",
                 DRIVER_CAMERA_PREVIEW_FRAME_SIZE);
     return 0;
@@ -172,32 +217,11 @@ int driver_camera_set_jpeg_mode(void)
         DRIVER_LOGE(TAG, "切换 JPEG 模式失败: 摄像头未初始化");
         return -1;
     }
-    if (s_camera_pixformat == PIXFORMAT_JPEG &&
-        s_camera_framesize == DRIVER_CAMERA_CAPTURE_FRAME_SIZE) {
-        return 0;
-    }
-
-    sensor_t *sensor = esp_camera_sensor_get();
-    if (sensor == NULL) {
-        DRIVER_LOGE(TAG, "切换 JPEG 模式失败: sensor 为空");
-        return -2;
-    }
-
-    int ret = driver_camera_err_to_int(sensor->set_pixformat(sensor, PIXFORMAT_JPEG));
-    if (ret == 0) {
-        ret = driver_camera_err_to_int(sensor->set_framesize(sensor,
-                                                             DRIVER_CAMERA_CAPTURE_FRAME_SIZE));
-    }
-    if (ret == 0 && sensor->set_quality != NULL) {
-        ret = driver_camera_err_to_int(sensor->set_quality(sensor, 12));
-    }
+    int ret = driver_camera_reinit_mode(PIXFORMAT_JPEG, DRIVER_CAMERA_CAPTURE_FRAME_SIZE);
     if (ret != 0) {
         DRIVER_LOGE(TAG, "切换 JPEG 模式失败, ret=%d", ret);
         return ret;
     }
-
-    s_camera_pixformat = PIXFORMAT_JPEG;
-    s_camera_framesize = DRIVER_CAMERA_CAPTURE_FRAME_SIZE;
     DRIVER_LOGI(TAG, "摄像头已切换到 JPEG 拍照模式, frame_size=%d",
                 DRIVER_CAMERA_CAPTURE_FRAME_SIZE);
     return 0;

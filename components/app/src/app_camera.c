@@ -29,7 +29,9 @@ static const char *TAG = "app_camera";
 /** @brief 相机后台任务优先级，低于 PTT，避免影响实时音频。 */
 #define APP_CAMERA_TASK_PRIORITY       4u
 /** @brief 模式切换后丢弃帧数，用于等待 sensor 输出稳定。 */
-#define APP_CAMERA_MODE_DISCARD_FRAMES 2u
+#define APP_CAMERA_MODE_DISCARD_FRAMES 5u
+/** @brief JPEG 模式切换后最多尝试取帧次数。 */
+#define APP_CAMERA_JPEG_CAPTURE_TRIES 10u
 
 /** @brief 相机后台任务句柄。 */
 static osal_task_t s_camera_task = NULL;
@@ -57,6 +59,16 @@ static uint32_t s_jpeg_buf_size = 0u;
 static uint32_t s_jpeg_len = 0u;
 /** @brief HTTP 上传响应临时缓冲。 */
 static uint8_t s_upload_resp[APP_CAMERA_UPLOAD_RESP_BYTES];
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
+/** @brief 固定色块测试缓冲，保存在 PSRAM，避免占用内部 SRAM。 */
+static uint16_t *s_color_test_buf = NULL;
+/** @brief 固定色块测试缓冲是否已经绘制过。 */
+static uint8_t s_color_test_drawn = 0u;
+#endif
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_SINGLE
+/** @brief 单帧冻结测试是否已经绘制过。 */
+static uint8_t s_single_test_drawn = 0u;
+#endif
 
 /**
  * @brief 锁定相机业务状态。
@@ -134,6 +146,79 @@ static int app_camera_ensure_jpeg_buffer(uint32_t len)
 }
 
 /**
+ * @brief 判断一帧数据是否具有完整 JPEG 头尾。
+ *
+ * esp-camera 在运行时从 RGB565 切到 JPEG 后，可能还会吐出旧缓冲帧。
+ * 仅检查 frame.format 不够稳妥，这里同时检查 SOI/EOI，确认本地拿到的
+ * 确实是可保存、可上传的 JPEG 码流。
+ */
+static int app_camera_frame_is_valid_jpeg(const service_camera_frame_t *frame)
+{
+    if (frame == NULL ||
+        frame->format != SERVICE_CAMERA_FORMAT_JPEG ||
+        frame->data == NULL ||
+        frame->len < 4u) {
+        return 0;
+    }
+
+    return (frame->data[0] == 0xFFu &&
+            frame->data[1] == 0xD8u &&
+            frame->data[frame->len - 2u] == 0xFFu &&
+            frame->data[frame->len - 1u] == 0xD9u) ? 1 : 0;
+}
+
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
+/**
+ * @brief 绘制固定 RGB565 色块。
+ *
+ * 不经过 camera，只验证 service_screen_draw_rgb565()/LCD 直刷链路是否稳定。
+ */
+static void app_camera_preview_color_test_once(void)
+{
+    if (s_color_test_drawn != 0u) {
+        s_preview_active = 0;
+        s_frozen = 1;
+        return;
+    }
+
+    const uint32_t pixels = APP_CAMERA_PREVIEW_W * APP_CAMERA_PREVIEW_H;
+    if (s_color_test_buf == NULL) {
+        s_color_test_buf = (uint16_t *)osal_heap_alloc_external(pixels * sizeof(uint16_t));
+        if (s_color_test_buf == NULL) {
+            APP_LOGE(TAG,
+                     "相机固定色块测试缓冲分配失败, bytes=%u, external_free=%u",
+                     (unsigned int)(pixels * sizeof(uint16_t)),
+                     (unsigned int)osal_heap_get_external_free_size());
+            s_preview_active = 0;
+            return;
+        }
+    }
+
+    for (uint32_t y = 0u; y < APP_CAMERA_PREVIEW_H; y++) {
+        for (uint32_t x = 0u; x < APP_CAMERA_PREVIEW_W; x++) {
+            uint16_t color = 0x07E0; /* green */
+            if (x < (APP_CAMERA_PREVIEW_W / 3u)) {
+                color = 0xF800;      /* red */
+            } else if (x >= ((APP_CAMERA_PREVIEW_W * 2u) / 3u)) {
+                color = 0x001F;      /* blue */
+            }
+            s_color_test_buf[(y * APP_CAMERA_PREVIEW_W) + x] = color;
+        }
+    }
+
+    (void)service_screen_draw_rgb565(APP_CAMERA_PREVIEW_X,
+                                     APP_CAMERA_PREVIEW_Y,
+                                     APP_CAMERA_PREVIEW_W,
+                                     APP_CAMERA_PREVIEW_H,
+                                     s_color_test_buf);
+    APP_LOGI(TAG, "相机固定色块测试已绘制");
+    s_color_test_drawn = 1u;
+    s_preview_active = 0;
+    s_frozen = 1;
+}
+#endif
+
+/**
  * @brief 处理一帧 RGB565 预览。
  *
  * 获取 camera frame 后立即通过 service_screen 直绘，然后归还 frame。这里不
@@ -141,6 +226,19 @@ static int app_camera_ensure_jpeg_buffer(uint32_t len)
  */
 static void app_camera_preview_once(void)
 {
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
+    app_camera_preview_color_test_once();
+    return;
+#endif
+
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_SINGLE
+    if (s_single_test_drawn != 0u) {
+        s_preview_active = 0;
+        s_frozen = 1;
+        return;
+    }
+#endif
+
     service_camera_frame_t frame;
     int ret = service_camera_get_frame(&frame);
     if (ret != 0) {
@@ -157,6 +255,17 @@ static void app_camera_preview_once(void)
                                          APP_CAMERA_PREVIEW_W,
                                          APP_CAMERA_PREVIEW_H,
                                          frame.data);
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_SINGLE
+        APP_LOGI(TAG,
+                 "相机单帧冻结测试已绘制, format=%d, size=%ux%u, len=%u",
+                 (int)frame.format,
+                 (unsigned int)frame.width,
+                 (unsigned int)frame.height,
+                 (unsigned int)frame.len);
+        s_single_test_drawn = 1u;
+        s_preview_active = 0;
+        s_frozen = 1;
+#endif
     }
 
     service_camera_return_frame(&frame);
@@ -187,35 +296,53 @@ static void app_camera_do_capture(void)
         return;
     }
 
-    service_camera_frame_t frame;
-    ret = service_camera_get_frame(&frame);
-    if (ret != 0) {
-        APP_LOGW(TAG, "相机 JPEG 取帧失败, ret=%d", ret);
-        return;
-    }
+    for (uint32_t i = 0u; i < APP_CAMERA_JPEG_CAPTURE_TRIES; i++) {
+        service_camera_frame_t frame;
+        ret = service_camera_get_frame(&frame);
+        if (ret != 0) {
+            APP_LOGW(TAG, "相机 JPEG 取帧失败, try=%u, ret=%d", (unsigned int)i, ret);
+            return;
+        }
 
-    if (frame.format != SERVICE_CAMERA_FORMAT_JPEG || frame.data == NULL || frame.len == 0u) {
-        APP_LOGW(TAG,
-                 "相机 JPEG 帧无效, format=%d, data=%p, len=%u",
+        const uint8_t head0 = frame.len > 0u && frame.data != NULL ? frame.data[0] : 0u;
+        const uint8_t head1 = frame.len > 1u && frame.data != NULL ? frame.data[1] : 0u;
+        const uint8_t tail0 = frame.len > 1u && frame.data != NULL ? frame.data[frame.len - 2u] : 0u;
+        const uint8_t tail1 = frame.len > 0u && frame.data != NULL ? frame.data[frame.len - 1u] : 0u;
+
+        APP_LOGI(TAG,
+                 "相机 JPEG 候选帧, try=%u, format=%d, size=%ux%u, len=%u, head=%02X%02X, tail=%02X%02X",
+                 (unsigned int)i,
                  (int)frame.format,
-                 frame.data,
-                 (unsigned int)frame.len);
+                 (unsigned int)frame.width,
+                 (unsigned int)frame.height,
+                 (unsigned int)frame.len,
+                 (unsigned int)head0,
+                 (unsigned int)head1,
+                 (unsigned int)tail0,
+                 (unsigned int)tail1);
+
+        if (app_camera_frame_is_valid_jpeg(&frame) == 0) {
+            service_camera_return_frame(&frame);
+            continue;
+        }
+
+        ret = app_camera_ensure_jpeg_buffer(frame.len);
+        if (ret == 0) {
+            memcpy(s_jpeg_buf, frame.data, frame.len);
+            s_jpeg_len = frame.len;
+            APP_LOGI(TAG,
+                     "相机拍照完成, jpeg_len=%u, size=%ux%u",
+                     (unsigned int)s_jpeg_len,
+                     (unsigned int)frame.width,
+                     (unsigned int)frame.height);
+        }
+
         service_camera_return_frame(&frame);
         return;
     }
 
-    ret = app_camera_ensure_jpeg_buffer(frame.len);
-    if (ret == 0) {
-        memcpy(s_jpeg_buf, frame.data, frame.len);
-        s_jpeg_len = frame.len;
-        APP_LOGI(TAG,
-                 "相机拍照完成, jpeg_len=%u, size=%ux%u",
-                 (unsigned int)s_jpeg_len,
-                 (unsigned int)frame.width,
-                 (unsigned int)frame.height);
-    }
-
-    service_camera_return_frame(&frame);
+    APP_LOGW(TAG, "相机 JPEG 取帧失败: 连续 %u 帧都不是合法 JPEG",
+             (unsigned int)APP_CAMERA_JPEG_CAPTURE_TRIES);
 }
 
 /**
@@ -257,6 +384,12 @@ static void app_camera_do_upload(void)
 static void app_camera_do_retake(void)
 {
     app_camera_clear_jpeg();
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_SINGLE
+    s_single_test_drawn = 0u;
+#endif
+#if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
+    s_color_test_drawn = 0u;
+#endif
     s_frozen = 0;
     if (s_page_active != 0 && service_camera_set_rgb565_mode() == 0) {
         (void)service_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);

@@ -108,7 +108,10 @@
 #define BSP_I2C_SCL_IO GPIO_NUM_2 /**< I2C SCL。 */
 
 /**
- * @brief OV5640 摄像头并口和控制引脚定义。
+ * @brief 摄像头并口和控制引脚定义。
+ *
+ * esp-camera 会通过 SCCB 自动识别 OV2640/OV5640 等传感器。这里仅描述
+ * 板级 DVP 引脚连接，不在 BSP 层绑定具体摄像头型号。
  */
 #define BSP_CAMERA_SIOD_IO  BSP_I2C_SDA_IO /**< SCCB/I2C 数据线，复用项目 I2C SDA。 */
 #define BSP_CAMERA_SIOC_IO  BSP_I2C_SCL_IO /**< SCCB/I2C 时钟线，复用项目 I2C SCL。 */

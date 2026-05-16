@@ -94,42 +94,11 @@ lv_obj_t * ui_app_camera_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(root, 0, 0);
     lv_obj_set_style_radius(root, 0, 0);
 
-    g_camera_view.preview = lv_obj_create(root);
-    lv_obj_remove_flag(g_camera_view.preview, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(g_camera_view.preview, 0, 30);
-    lv_obj_set_size(g_camera_view.preview, 240, 240);
-    lv_obj_set_style_radius(g_camera_view.preview, 0, 0);
-    lv_obj_set_style_bg_color(g_camera_view.preview, lv_color_make(0x13, 0x1A, 0x22), 0);
-    lv_obj_set_style_bg_opa(g_camera_view.preview, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(g_camera_view.preview, 0, 0);
-    lv_obj_set_style_pad_all(g_camera_view.preview, 0, 0);
-
-    lv_obj_t *cross_h = lv_obj_create(g_camera_view.preview);
-    lv_obj_remove_flag(cross_h, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(cross_h, 200, 1);
-    lv_obj_set_pos(cross_h, 20, 120);
-    lv_obj_set_style_bg_color(cross_h, lv_color_make(0x45, 0x56, 0x68), 0);
-    lv_obj_set_style_border_width(cross_h, 0, 0);
-
-    lv_obj_t *cross_v = lv_obj_create(g_camera_view.preview);
-    lv_obj_remove_flag(cross_v, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(cross_v, 1, 200);
-    lv_obj_set_pos(cross_v, 120, 20);
-    lv_obj_set_style_bg_color(cross_v, lv_color_make(0x45, 0x56, 0x68), 0);
-    lv_obj_set_style_border_width(cross_v, 0, 0);
-
-    g_camera_view.status_label = lv_label_create(g_camera_view.preview);
-    lv_label_set_text(g_camera_view.status_label, ui_i18n_text(UI_TEXT_CAMERA_LIVE));
-    lv_obj_set_style_text_color(g_camera_view.status_label, lv_color_make(0xB7, 0xC4, 0xD2), 0);
-    lv_obj_align(g_camera_view.status_label, LV_ALIGN_BOTTOM_MID, 0, -12);
     /*
-     * 预览画面由 app_camera 通过 service_screen_draw_rgb565() 直接绘制到 LCD。
-     * 这里的 LVGL preview 对象只保留给事件状态机使用，不参与实际渲染；
-     * 否则 LVGL 周期 flush 会和 camera 直绘交替覆盖同一块屏幕区域，表现为
-     * 预览偶发闪烁、颜色混乱。
+     * 预览区域不创建任何 LVGL 对象。摄像头画面由 app_camera 直接绘制到
+     * LCD 的固定区域，底部按钮仍由 LVGL 管理。这样可以排除预览区对象被
+     * LVGL flush 覆盖导致的花屏。
      */
-    lv_obj_add_flag(g_camera_view.preview, LV_OBJ_FLAG_HIDDEN);
-
     g_camera_view.capture_button = create_button(root, 8, 278, 68, 34,
                                                  ui_i18n_text(UI_TEXT_CAMERA_CAPTURE),
                                                  &g_camera_view.capture_label);

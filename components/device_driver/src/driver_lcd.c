@@ -35,10 +35,12 @@ static const char *TAG = "driver_lcd";
  */
 #define driver_lcd_SPI_TRANS_QUEUE_DEPTH 10
 
-/**
- * @brief ST7789 NOP 命令。
- */
-#define DRIVER_LCD_CMD_NOP 0x00
+/** @brief ST7789 列地址设置命令。 */
+#define DRIVER_LCD_CMD_CASET 0x2A
+/** @brief ST7789 行地址设置命令。 */
+#define DRIVER_LCD_CMD_RASET 0x2B
+/** @brief ST7789 显存写入命令。 */
+#define DRIVER_LCD_CMD_RAMWR 0x2C
 
 /**
  * @brief 摄像头预览直绘 DMA 中转缓冲行数。
@@ -77,6 +79,21 @@ static size_t s_lcd_dma_bounce_size = 0u;
 static int driver_lcd_err_to_int(int ret);
 
 /**
+ * @brief 生成 ST7789 地址参数。
+ *
+ * ST7789 的 CASET/RASET 参数使用大端 16-bit 起止坐标，结束坐标为包含式。
+ */
+static void driver_lcd_make_addr_param(uint8_t param[4], int start, int end)
+{
+    const uint16_t start_u16 = (uint16_t)start;
+    const uint16_t end_u16 = (uint16_t)(end - 1);
+    param[0] = (uint8_t)(start_u16 >> 8);
+    param[1] = (uint8_t)(start_u16 & 0xFFu);
+    param[2] = (uint8_t)(end_u16 >> 8);
+    param[3] = (uint8_t)(end_u16 & 0xFFu);
+}
+
+/**
  * @brief 确保摄像头预览直绘 DMA 中转缓冲可用。
  *
  * @param[in] min_bytes 本次至少需要的字节数。
@@ -103,27 +120,6 @@ static int driver_lcd_ensure_dma_bounce(size_t min_bytes)
     s_lcd_dma_bounce_size = min_bytes;
     DRIVER_LOGI(TAG, "LCD DMA 中转缓冲已分配, bytes=%u", (unsigned int)s_lcd_dma_bounce_size);
     return 0;
-}
-
-/**
- * @brief 等待 LCD SPI 颜色事务完成。
- *
- * @return 成功返回 0；失败返回负值。
- */
-static int driver_lcd_wait_color_done(void)
-{
-    if (s_lcd_panel_io == NULL) {
-        return 0;
-    }
-
-    /*
-     * esp_lcd SPI IO 在发送命令前会回收已排队的颜色事务。发送 NOP 不改变
-     * ST7789 状态，但可以把异步颜色发送收敛成同步完成语义。
-     */
-    return driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
-                                                           DRIVER_LCD_CMD_NOP,
-                                                           NULL,
-                                                           0));
 }
 
 /**
@@ -455,12 +451,33 @@ int driver_lcd_draw_bitmap(int x_start,
                src + ((size_t)(y - y_start) * line_bytes),
                draw_bytes);
 
-        ret = driver_lcd_err_to_int(esp_lcd_panel_draw_bitmap(s_lcd_panel,
-                                                              x_start,
-                                                              y,
-                                                              x_end,
-                                                              y + draw_lines,
-                                                              s_lcd_dma_bounce_buf));
+        uint8_t x_param[4];
+        uint8_t y_param[4];
+        driver_lcd_make_addr_param(x_param, x_start, x_end);
+        driver_lcd_make_addr_param(y_param, y, y + draw_lines);
+
+        /*
+         * 不使用 esp_lcd_panel_draw_bitmap()/tx_color。LVGL port 已经在同一个
+         * panel IO 上注册 on_color_trans_done，camera 预览如果走 tx_color，
+         * 会误触发 LVGL 的 flush_ready。这里全部用 tx_param 的 polling
+         * 路径发送，避免触发 LVGL flush 回调。
+         */
+        ret = driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                              DRIVER_LCD_CMD_CASET,
+                                                              x_param,
+                                                              sizeof(x_param)));
+        if (ret == 0) {
+            ret = driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                                  DRIVER_LCD_CMD_RASET,
+                                                                  y_param,
+                                                                  sizeof(y_param)));
+        }
+        if (ret == 0) {
+            ret = driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                                  DRIVER_LCD_CMD_RAMWR,
+                                                                  s_lcd_dma_bounce_buf,
+                                                                  draw_bytes));
+        }
         if (ret != 0) {
             DRIVER_LOGE(TAG,
                         "LCD 画图失败, ret=%d, area=(%d,%d)-(%d,%d)",
@@ -469,12 +486,6 @@ int driver_lcd_draw_bitmap(int x_start,
                         y,
                         x_end,
                         y + draw_lines);
-            return ret;
-        }
-
-        ret = driver_lcd_wait_color_done();
-        if (ret != 0) {
-            DRIVER_LOGE(TAG, "LCD 画图同步失败, ret=%d", ret);
             return ret;
         }
 

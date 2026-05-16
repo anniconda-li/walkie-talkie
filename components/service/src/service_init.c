@@ -102,6 +102,21 @@ static int service_init_camera_get_frame(service_camera_frame_t *frame)
     frame->height = (uint16_t)fb->height;
     frame->format = service_init_camera_map_format(fb->format);
     frame->opaque = fb;
+    if (fb->format == PIXFORMAT_JPEG) {
+        const uint8_t head0 = fb->len > 0u && fb->buf != NULL ? fb->buf[0] : 0u;
+        const uint8_t head1 = fb->len > 1u && fb->buf != NULL ? fb->buf[1] : 0u;
+        const uint8_t tail0 = fb->len > 1u && fb->buf != NULL ? fb->buf[fb->len - 2u] : 0u;
+        const uint8_t tail1 = fb->len > 0u && fb->buf != NULL ? fb->buf[fb->len - 1u] : 0u;
+        SERVICE_LOGI(TAG,
+                     "camera fb JPEG, w=%u, h=%u, len=%u, head=%02X%02X, tail=%02X%02X",
+                     (unsigned int)fb->width,
+                     (unsigned int)fb->height,
+                     (unsigned int)fb->len,
+                     (unsigned int)head0,
+                     (unsigned int)head1,
+                     (unsigned int)tail0,
+                     (unsigned int)tail1);
+    }
     return 0;
 }
 

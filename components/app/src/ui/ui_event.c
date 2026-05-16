@@ -268,8 +268,6 @@ static void camera_capture_event_cb(lv_event_t *e)
     }
 
     view->frozen = true;
-    lv_obj_set_style_bg_color(view->preview, lv_color_make(0x24, 0x2E, 0x38), 0);
-    lv_label_set_text(view->status_label, ui_i18n_text(UI_TEXT_CAMERA_LOCKED));
     lv_obj_add_state(view->capture_button, LV_STATE_DISABLED);
     lv_obj_remove_state(view->upload_button, LV_STATE_DISABLED);
     lv_obj_remove_state(view->retake_button, LV_STATE_DISABLED);
@@ -297,8 +295,6 @@ static void camera_retake_event_cb(lv_event_t *e)
     }
 
     view->frozen = false;
-    lv_obj_set_style_bg_color(view->preview, lv_color_make(0x13, 0x1A, 0x22), 0);
-    lv_label_set_text(view->status_label, ui_i18n_text(UI_TEXT_CAMERA_LIVE));
     lv_obj_remove_state(view->capture_button, LV_STATE_DISABLED);
     lv_obj_add_state(view->upload_button, LV_STATE_DISABLED);
     lv_obj_add_state(view->retake_button, LV_STATE_DISABLED);

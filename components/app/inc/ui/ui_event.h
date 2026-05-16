@@ -51,8 +51,6 @@ typedef struct {
     lv_obj_t *capture_label;  /**< 拍照按钮文本。 */
     lv_obj_t *upload_label;   /**< 上传按钮文本。 */
     lv_obj_t *retake_label;   /**< 重拍按钮文本。 */
-    lv_obj_t *preview;        /**< 预览区域对象。 */
-    lv_obj_t *status_label;   /**< 状态文本。 */
     lv_obj_t *capture_button; /**< 拍照按钮。 */
     lv_obj_t *upload_button;  /**< 上传按钮。 */
     lv_obj_t *retake_button;  /**< 重拍按钮。 */
