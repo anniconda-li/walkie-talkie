@@ -300,7 +300,7 @@ static void app_business_register_ui_callbacks(void)
  *
  * @return 成功返回 0；失败返回负值。
  */
-int app_business_start(void)
+int app_business_start_runtime(void)
 {
     if (s_started) {
         return 0;
@@ -309,12 +309,6 @@ int app_business_start(void)
     int ret = app_business_audio_session_init();
     if (ret != 0) {
         APP_LOGE(TAG, "音频会话状态初始化失败, ret=%d", ret);
-        return ret;
-    }
-
-    ret = app_ui_create();
-    if (ret != 0) {
-        APP_LOGE(TAG, "应用 UI 创建失败, ret=%d", ret);
         return ret;
     }
 
@@ -348,4 +342,15 @@ int app_business_start(void)
              APP_BUSINESS_UDP_PORT,
              APP_BUSINESS_DEFAULT_CHANNEL);
     return 0;
+}
+
+int app_business_start(void)
+{
+    int ret = app_ui_create();
+    if (ret != 0) {
+        APP_LOGE(TAG, "应用 UI 创建失败, ret=%d", ret);
+        return ret;
+    }
+
+    return app_business_start_runtime();
 }

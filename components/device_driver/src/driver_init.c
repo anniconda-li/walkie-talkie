@@ -131,19 +131,14 @@ int driver_audio_init(void)
     return 0;
 }
 
-int driver_init(void)
+int driver_screen_init(void)
 {
-    int ret = driver_audio_init();
-    if (ret != 0) {
-        return ret;
-    }
-
     driver_pca9557_bsp_ops_t pca9557_bsp_ops = {
         .get_i2c_bus_handle = bsp_i2c_get_bus_handle,
         .i2c_write_reg = bsp_i2c_write_reg,
         .i2c_read_reg = bsp_i2c_read_reg,
     };
-    ret = driver_pca9557_init(&pca9557_bsp_ops);
+    int ret = driver_pca9557_init(&pca9557_bsp_ops);
     if (ret != 0) {
         DRIVER_LOGE(TAG, "PCA9557 初始化失败, ret=%d", ret);
         return ret;
@@ -155,20 +150,50 @@ int driver_init(void)
         return ret;
     }
 
+    return 0;
+}
+
+int driver_power_init(void)
+{
+    int ret = driver_battery_init();
+    if (ret != 0) {
+        DRIVER_LOGE(TAG, "电池采样驱动初始化失败, ret=%d", ret);
+    }
+
+    return ret;
+}
+
+int driver_optional_camera_init(void)
+{
 #if DRIVER_INIT_ENABLE_CAMERA
-    /*
-     * 摄像头依赖 I2C 和 PCA9557 camera power-down 控制，因此放在 PCA9557
-     * 初始化之后。默认关闭，避免未接摄像头或测试阶段引脚未固定时影响主业务。
-     */
-    ret = driver_camera_init();
+    int ret = driver_camera_init();
     if (ret != 0) {
         DRIVER_LOGW(TAG, "摄像头驱动初始化失败，摄像头业务将不可用, ret=%d", ret);
     }
+    return ret;
+#else
+    return -1;
+#endif
+}
+
+int driver_init(void)
+{
+    int ret = driver_audio_init();
+    if (ret != 0) {
+        return ret;
+    }
+
+    ret = driver_screen_init();
+    if (ret != 0) {
+        return ret;
+    }
+
+#if DRIVER_INIT_ENABLE_CAMERA
+    (void)driver_optional_camera_init();
 #endif
 
-    ret = driver_battery_init();
+    ret = driver_power_init();
     if (ret != 0) {
-        DRIVER_LOGE(TAG, "电池采样驱动初始化失败, ret=%d", ret);
         return ret;
     }
 

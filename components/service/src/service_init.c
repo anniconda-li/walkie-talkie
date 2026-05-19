@@ -238,6 +238,17 @@ int service_init_network(void)
     return ret;
 }
 
+int service_init_network_recover(void)
+{
+    int ret = driver_network_init();
+    if (ret != 0) {
+        SERVICE_LOGW(TAG, "网络 driver 恢复失败, ret=%d", ret);
+        return ret;
+    }
+
+    return service_init_network();
+}
+
 int service_init_audio(void)
 {
     /*
@@ -298,13 +309,8 @@ int service_init_camera(void)
     return ret;
 }
 
-int service_init(void)
+int service_init_screen(void)
 {
-    /*
-     * 总装配顺序与 app 依赖一致：
-     * screen 先初始化，app_business_start() 才能创建 UI；
-     * battery/status/audio/network 之后由 app 后台任务持续使用。
-     */
     service_screen_config_t screen_cfg = {
         .device_ops = {
             .is_initialized = driver_lcd_is_initialized,
@@ -324,18 +330,41 @@ int service_init(void)
     int ret = service_screen_init(&screen_cfg);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "屏幕服务初始化失败, ret=%d", ret);
-        return ret;
     }
 
+    return ret;
+}
+
+int service_init_battery(void)
+{
     service_battery_config_t battery_cfg = {
         .sample_ops = {
             .is_initialized = driver_battery_is_initialized,
             .read_voltage_mv = driver_battery_read_voltage_mv,
         },
     };
-    ret = service_battery_init(&battery_cfg);
+    int ret = service_battery_init(&battery_cfg);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "电池服务初始化失败, ret=%d", ret);
+    }
+
+    return ret;
+}
+
+int service_init(void)
+{
+    /*
+     * 总装配顺序与 app 依赖一致：
+     * screen 先初始化，app_business_start() 才能创建 UI；
+     * battery/status/audio/network 之后由 app 后台任务持续使用。
+     */
+    int ret = service_init_screen();
+    if (ret != 0) {
+        return ret;
+    }
+
+    ret = service_init_battery();
+    if (ret != 0) {
         return ret;
     }
 

@@ -22,6 +22,7 @@
 #include "app_ui.h"
 #include "osal_task.h"
 #include "service_battery.h"
+#include "service_init.h"
 #include "service_network.h"
 
 #include <stddef.h>
@@ -124,8 +125,8 @@ static void app_status_monitor_network_task(void *arg)
         } else {
             (void)app_ui_set_network_state(0);
             s_network_ready = 0;
-            /* 初始化失败或掉线后允许后台继续重试，不阻塞主业务启动。 */
-            (void)service_network_init(NULL);
+            /* 初始化失败或掉线后允许后台重试 driver + service，不阻塞主业务启动。 */
+            (void)service_init_network_recover();
         }
 
         osal_delay_ms(3000u);
