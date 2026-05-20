@@ -1,42 +1,23 @@
 /**
  * @file ui_splash.c
- * @brief 可显示真实开机阶段的启动页实现。
+ * @brief 品牌化启动页实现。
  */
 #include "ui_splash.h"
 
-#include "app_boot_status.h"
 #include "ui.h"
+#include "ui_assets.h"
 #include "ui_font.h"
 #include "ui_shell.h"
 #include "lvgl.h"
 
-#include <stdio.h>
-
-#define SPLASH_ROW_COUNT APP_BOOT_STAGE_COUNT
-#define SPLASH_ROW_Y     82
-#define SPLASH_ROW_H     22
+#define SPLASH_LOGO_Y       70
+#define SPLASH_SPINNER_Y    205
+#define SPLASH_SPINNER_SIZE 34
 
 static lv_obj_t *s_root = NULL;
-static lv_obj_t *s_title = NULL;
-static lv_obj_t *s_rows[SPLASH_ROW_COUNT];
+static lv_obj_t *s_logo = NULL;
+static lv_obj_t *s_spinner = NULL;
 static lv_obj_t *s_error = NULL;
-
-static lv_color_t ui_splash_state_color(app_boot_state_t state)
-{
-    switch (state) {
-    case APP_BOOT_STATE_OK:
-        return lv_color_hex(0x41D178);
-    case APP_BOOT_STATE_WARN:
-        return lv_color_hex(0xF2B84B);
-    case APP_BOOT_STATE_ERROR:
-        return lv_color_hex(0xF05B5B);
-    case APP_BOOT_STATE_RUNNING:
-        return lv_color_hex(0xFFFFFF);
-    case APP_BOOT_STATE_PENDING:
-    default:
-        return lv_color_hex(0x777777);
-    }
-}
 
 static void ui_splash_cleanup(void)
 {
@@ -45,11 +26,9 @@ static void ui_splash_cleanup(void)
     }
 
     s_root = NULL;
-    s_title = NULL;
+    s_logo = NULL;
+    s_spinner = NULL;
     s_error = NULL;
-    for (int i = 0; i < SPLASH_ROW_COUNT; i++) {
-        s_rows[i] = NULL;
-    }
 }
 
 void splash_screen(void)
@@ -69,80 +48,47 @@ void splash_screen(void)
     lv_obj_set_style_border_width(s_root, 0, 0);
     lv_obj_set_style_pad_all(s_root, 0, 0);
 
-    s_title = lv_label_create(s_root);
-    lv_label_set_text(s_title, "Walkie Talkie");
-    lv_obj_set_size(s_title, UI_SCREEN_WIDTH, 28);
-    lv_obj_set_pos(s_title, 0, 34);
-    lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(s_title, ui_font_normal(), 0);
+    s_logo = lv_image_create(s_root);
+    lv_image_set_src(s_logo, &logo);
+    lv_obj_set_pos(s_logo, (UI_SCREEN_WIDTH - 96) / 2, SPLASH_LOGO_Y);
 
-    for (int i = 0; i < SPLASH_ROW_COUNT; i++) {
-        s_rows[i] = lv_label_create(s_root);
-        lv_obj_set_size(s_rows[i], UI_SCREEN_WIDTH - 36, SPLASH_ROW_H);
-        lv_obj_set_pos(s_rows[i], 18, SPLASH_ROW_Y + (i * SPLASH_ROW_H));
-        lv_obj_set_style_text_font(s_rows[i], ui_font_small(), 0);
-        lv_obj_set_style_text_color(s_rows[i], lv_color_hex(0x777777), 0);
-    }
+    s_spinner = lv_spinner_create(s_root);
+    lv_obj_set_size(s_spinner, SPLASH_SPINNER_SIZE, SPLASH_SPINNER_SIZE);
+    lv_obj_set_pos(s_spinner,
+                   (UI_SCREEN_WIDTH - SPLASH_SPINNER_SIZE) / 2,
+                   SPLASH_SPINNER_Y);
+    lv_obj_set_style_arc_color(s_spinner, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_spinner, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(s_spinner, 3, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_spinner, 3, LV_PART_INDICATOR);
 
     s_error = lv_label_create(s_root);
+    lv_label_set_text(s_error, "启动失败，请重启");
     lv_obj_set_size(s_error, UI_SCREEN_WIDTH - 28, 36);
     lv_obj_set_pos(s_error, 14, UI_SCREEN_HEIGHT - 52);
     lv_obj_set_style_text_align(s_error, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(s_error, ui_font_small(), 0);
     lv_obj_set_style_text_color(s_error, lv_color_hex(0xF05B5B), 0);
     lv_obj_add_flag(s_error, LV_OBJ_FLAG_HIDDEN);
-
-    ui_splash_refresh_status();
 }
 
 void ui_splash_refresh_status(void)
 {
-    char text[64];
-
-    if (s_root == NULL) {
-        return;
-    }
-
-    for (int i = 0; i < SPLASH_ROW_COUNT; i++) {
-        app_boot_stage_t stage = (app_boot_stage_t)i;
-        app_boot_stage_status_t status = app_boot_status_get(stage);
-
-        if (status.code != 0 &&
-            (status.state == APP_BOOT_STATE_WARN || status.state == APP_BOOT_STATE_ERROR)) {
-            (void)snprintf(text,
-                           sizeof(text),
-                           "%s  %s (%d)",
-                           app_boot_status_stage_name(stage),
-                           app_boot_status_state_name(status.state),
-                           status.code);
-        } else {
-            (void)snprintf(text,
-                           sizeof(text),
-                           "%s  %s",
-                           app_boot_status_stage_name(stage),
-                           app_boot_status_state_name(status.state));
-        }
-
-        lv_label_set_text(s_rows[i], text);
-        lv_obj_set_style_text_color(s_rows[i], ui_splash_state_color(status.state), 0);
-    }
+    /* 用户启动页不展示内部初始化阶段，状态仍由 app_boot_status 和日志保留。 */
 }
 
 void ui_splash_show_error(const char *stage, int code)
 {
-    char text[72];
+    (void)stage;
+    (void)code;
 
     if (s_error == NULL) {
         return;
     }
 
-    (void)snprintf(text,
-                   sizeof(text),
-                   "Boot failed: %s (%d)",
-                   stage != NULL ? stage : "Unknown",
-                   code);
-    lv_label_set_text(s_error, text);
+    if (s_spinner != NULL) {
+        lv_obj_add_flag(s_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_remove_flag(s_error, LV_OBJ_FLAG_HIDDEN);
 }
 

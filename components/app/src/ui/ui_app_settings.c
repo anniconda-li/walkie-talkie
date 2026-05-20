@@ -1,6 +1,6 @@
 /**
  * @file ui_app_settings.c
- * @brief 设置页面 UI——亮度、音量、语言、服务器信息。
+ * @brief 设置页面 UI——亮度、音量、服务器信息。
  *
  * ## 页面布局（240×280 屏幕）
  * ```
@@ -14,9 +14,7 @@
  * │  │ 音量大小            │  │  y=103
  * │  │ [══════●═══════] 56%│  │  滑块: y=132
  * │  │                    │  │
- * │  │ 语言          [v]  │  │  y=154, 下拉框: y=178
- * │  │                    │  │
- * │  │ 服务器              │  │  y=216
+ * │  │ 服务器              │  │  y=132
  * │  │ IP   10.212.141.251│  │
  * │  │ 端口 9000           │  │
  * │  └────────────────────┘  │
@@ -25,9 +23,6 @@
  *
  * ## 交互
  * - 亮度/音量滑块：LV_EVENT_VALUE_CHANGED → 回调到 app_business
- * - 语言下拉框：选择中文/English → 更新所有页面文字
- * - 自定义箭头符号（"v"/"^"）替代 LVGL 默认下拉图标，因为 ESP32-S3 的中文字体
- *   可能缺少 LVGL 内置图标字形
  *
  * ## 动画说明
  * - 入场：面板整体从上方滑入
@@ -188,42 +183,17 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
     g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 55);
     g_settings_view.volume_slider = create_slider(g_settings_panel, 84, 56);
 
-    /* 语言行：标签 + 下拉框 + 自定义箭头 */
-    g_settings_view.language_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_LANGUAGE), 106);
-    g_settings_view.language_dropdown = lv_dropdown_create(g_settings_panel);
-    lv_obj_set_pos(g_settings_view.language_dropdown, 2, 130);
-    lv_obj_set_size(g_settings_view.language_dropdown, 132, 32);
-    lv_dropdown_set_options(g_settings_view.language_dropdown, "中文\nEnglish");
-    lv_dropdown_set_selected(g_settings_view.language_dropdown, ui_i18n_is_english() ? 1 : 0);
-    /* Disable LVGL's built-in dropdown symbol and draw our own ASCII marker.
-     * The built-in symbol uses LVGL's private icon glyphs, which are easy to
-     * miss in Windows TTF loading and ESP32-S3 reduced CJK fonts. */
-    lv_dropdown_set_symbol(g_settings_view.language_dropdown, NULL);
-    lv_obj_set_style_radius(g_settings_view.language_dropdown, 8, 0);
-    lv_obj_set_style_bg_color(g_settings_view.language_dropdown, lv_color_make(0x36, 0x36, 0x36), 0);
-    lv_obj_set_style_text_color(g_settings_view.language_dropdown, lv_color_white(), 0);
-    lv_obj_set_style_pad_left(g_settings_view.language_dropdown, 14, 0);
-    lv_obj_set_style_pad_right(g_settings_view.language_dropdown, 30, 0);
-
-    /* 自定义下拉箭头（"v" 收起 / "^" 展开） */
-    g_settings_view.language_symbol_label = lv_label_create(g_settings_panel);
-    lv_label_set_text(g_settings_view.language_symbol_label, "v");
-    lv_obj_set_style_text_color(g_settings_view.language_symbol_label, lv_color_white(), 0);
-    lv_obj_set_pos(g_settings_view.language_symbol_label, 114, 134);
-    lv_obj_add_flag(g_settings_view.language_symbol_label, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(g_settings_view.language_symbol_label, LV_OBJ_FLAG_EVENT_BUBBLE);
-
     /* 服务器信息行（只读标签） */
-    g_settings_view.server_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_SERVER), 168);
+    g_settings_view.server_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_SERVER), 122);
 
     g_settings_view.ip_label = lv_label_create(g_settings_panel);
     lv_label_set_text(g_settings_view.ip_label, ui_i18n_text(UI_TEXT_SETTINGS_IP));
-    lv_obj_set_pos(g_settings_view.ip_label, 2, 192);
+    lv_obj_set_pos(g_settings_view.ip_label, 2, 146);
     lv_obj_set_style_text_color(g_settings_view.ip_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
 
     g_settings_view.port_label = lv_label_create(g_settings_panel);
     lv_label_set_text(g_settings_view.port_label, ui_i18n_text(UI_TEXT_SETTINGS_PORT));
-    lv_obj_set_pos(g_settings_view.port_label, 2, 214);
+    lv_obj_set_pos(g_settings_view.port_label, 2, 168);
     lv_obj_set_style_text_color(g_settings_view.port_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
 
     ui_event_register_settings(&g_settings_view);

@@ -7,12 +7,9 @@
 
 #include <stdbool.h>
 
-/**
- * @brief UI 支持的语言。
- */
+/** @brief UI 固定使用中文，保留语言类型用于兼容旧接口。 */
 typedef enum {
-    UI_LANG_CN = 0, /**< 中文。 */
-    UI_LANG_EN      /**< 英文。 */
+    UI_LANG_CN = 0 /**< 中文。 */
 } ui_lang_t;
 
 /**
@@ -40,7 +37,6 @@ typedef enum {
     UI_TEXT_AI_REPLY_FAILED,        /**< AI 回复接收失败提示。 */
     UI_TEXT_SETTINGS_BRIGHTNESS,    /**< 亮度文本。 */
     UI_TEXT_SETTINGS_VOLUME,        /**< 音量文本。 */
-    UI_TEXT_SETTINGS_LANGUAGE,      /**< 语言文本。 */
     UI_TEXT_SETTINGS_SERVER,        /**< 服务器文本。 */
     UI_TEXT_SETTINGS_IP,            /**< IP 文本。 */
     UI_TEXT_SETTINGS_PORT,          /**< 端口文本。 */
@@ -48,7 +44,7 @@ typedef enum {
 } ui_text_id_t;
 
 /**
- * @brief 设置 UI 当前语言。
+ * @brief 兼容旧接口，当前 UI 固定中文。
  *
  * @param[in] lang 目标语言。
  */
@@ -62,9 +58,9 @@ void ui_i18n_set_language(ui_lang_t lang);
 ui_lang_t ui_i18n_get_language(void);
 
 /**
- * @brief 判断当前语言是否为英文。
+ * @brief 兼容旧语言判断接口。
  *
- * @return 英文返回 true；否则返回 false。
+ * @return 固定返回 false。
  */
 bool ui_i18n_is_english(void);
 

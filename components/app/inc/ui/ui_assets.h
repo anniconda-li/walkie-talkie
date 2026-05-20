@@ -6,5 +6,6 @@
 LV_IMAGE_DECLARE(intercom);
 LV_IMAGE_DECLARE(ai);
 LV_IMAGE_DECLARE(settings);
+LV_IMAGE_DECLARE(logo);
 
 #endif /* UI_ASSETS_H */

@@ -16,7 +16,7 @@
  * - 对讲：频道切换（+/- 按钮）、PTT 按下/松开（长按/释放）
  * - 相机：拍照、上传、重拍
  * - AI：提问开始/停止（长按/释放）
- * - 设置：亮度/音量滑块变化、语言切换
+ * - 设置：亮度/音量滑块变化
  */
 #include "ui_event.h"
 #include "ui_i18n.h"
@@ -478,87 +478,6 @@ static void settings_slider_event_cb(lv_event_t *e)
     }
 }
 
-/** @brief 刷新设置页面所有标签文字（语言切换时调用）。 */
-static void refresh_settings_language(ui_settings_view_t *view)
-{
-    if(view == NULL) {
-        return;
-    }
-
-    lv_label_set_text(view->brightness_label, ui_i18n_text(UI_TEXT_SETTINGS_BRIGHTNESS));
-    lv_label_set_text(view->volume_label, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME));
-    lv_label_set_text(view->language_label, ui_i18n_text(UI_TEXT_SETTINGS_LANGUAGE));
-    lv_label_set_text(view->server_label, ui_i18n_text(UI_TEXT_SETTINGS_SERVER));
-    lv_label_set_text(view->ip_label, ui_i18n_text(UI_TEXT_SETTINGS_IP));
-    lv_label_set_text(view->port_label, ui_i18n_text(UI_TEXT_SETTINGS_PORT));
-    lv_dropdown_set_selected(view->language_dropdown, ui_i18n_is_english() ? 1 : 0);
-}
-
-/** @brief 语言下拉框事件：切换中英文。 */
-static void settings_language_event_cb(lv_event_t *e)
-{
-    lv_obj_t *dropdown = lv_event_get_target(e);
-    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
-    bool english;
-
-    if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || dropdown == NULL) {
-        return;
-    }
-
-    english = lv_dropdown_get_selected(dropdown) == 1;
-    ui_i18n_set_language(english ? UI_LANG_EN : UI_LANG_CN);
-    refresh_settings_language(view);
-    ui_shell_refresh_language();
-
-    if(g_callbacks.settings_language_changed != NULL) {
-        g_callbacks.settings_language_changed(english);
-    }
-}
-
-/** @brief 更新语言下拉框右侧的自定义箭头符号（"v" 展开 / "^" 收起）。 */
-static void refresh_language_symbol(ui_settings_view_t *view)
-{
-    if(view == NULL || view->language_symbol_label == NULL || view->language_dropdown == NULL) {
-        return;
-    }
-
-    if(lv_dropdown_is_open(view->language_dropdown)) {
-        lv_label_set_text(view->language_symbol_label, "^");
-        lv_obj_set_pos(view->language_symbol_label, 114, 137);
-    }
-    else {
-        lv_label_set_text(view->language_symbol_label, "v");
-        lv_obj_set_pos(view->language_symbol_label, 114, 134);
-    }
-}
-
-/** @brief 下拉框展开/收起状态变化时更新箭头。 */
-static void settings_language_dropdown_state_event_cb(lv_event_t *e)
-{
-    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
-
-    if(lv_event_get_code(e) == LV_EVENT_READY || lv_event_get_code(e) == LV_EVENT_CANCEL) {
-        refresh_language_symbol(view);
-    }
-}
-
-/** @brief 点击自定义箭头符号 → 切换下拉框展开/收起。 */
-static void settings_language_symbol_event_cb(lv_event_t *e)
-{
-    lv_obj_t *dropdown = (lv_obj_t *)lv_event_get_user_data(e);
-
-    if(lv_event_get_code(e) != LV_EVENT_CLICKED || dropdown == NULL) {
-        return;
-    }
-
-    if(lv_dropdown_is_open(dropdown)) {
-        lv_dropdown_close(dropdown);
-    }
-    else {
-        lv_dropdown_open(dropdown);
-    }
-}
-
 /* ==========================================================================
  * 公开接口
  * ========================================================================== */
@@ -696,15 +615,4 @@ void ui_event_register_settings(ui_settings_view_t *view)
 
     lv_obj_add_event_cb(view->brightness_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, view->brightness_slider);
     lv_obj_add_event_cb(view->volume_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, view->brightness_slider);
-    refresh_settings_language(view);
-    lv_obj_add_event_cb(view->language_dropdown, settings_language_event_cb, LV_EVENT_VALUE_CHANGED, view);
-    lv_obj_add_event_cb(view->language_dropdown,
-                        settings_language_dropdown_state_event_cb,
-                        LV_EVENT_ALL,
-                        view);
-    lv_obj_add_event_cb(view->language_symbol_label,
-                        settings_language_symbol_event_cb,
-                        LV_EVENT_CLICKED,
-                        view->language_dropdown);
-    refresh_language_symbol(view);
 }

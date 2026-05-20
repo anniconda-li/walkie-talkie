@@ -10,8 +10,8 @@
 /**
  * @brief 初始化 UI 字体资源。
  *
- * ESP32-S3 版本不依赖 Windows 文件路径加载 TTF；后续需要中文显示时，
- * 在这里替换为裁剪后的 LVGL C 字体。
+ * ESP32-S3 版本使用 LVGL 内置 Source Han Sans SC CJK 字体，
+ * 不依赖 Windows 文件路径加载 TTF。
  */
 void ui_font_init(void);
 

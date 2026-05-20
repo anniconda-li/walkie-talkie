@@ -12,6 +12,7 @@
 #include "driver_camera.h"
 #include "driver_es8311.h"
 #include "driver_es7210.h"
+#include "driver_init.h"
 #include "driver_inmp441.h"
 #include "driver_lcd.h"
 #include "driver_max98357a.h"

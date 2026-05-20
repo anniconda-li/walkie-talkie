@@ -29,7 +29,6 @@ typedef struct {
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
     void (*settings_brightness_changed)(int32_t value); /**< 亮度变化回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
-    void (*settings_language_changed)(bool english);   /**< 语言变化回调。 */
 } ui_event_callbacks_t;
 
 /**
@@ -77,14 +76,11 @@ typedef struct {
 typedef struct {
     lv_obj_t *brightness_label;       /**< 亮度标签。 */
     lv_obj_t *volume_label;           /**< 音量标签。 */
-    lv_obj_t *language_label;         /**< 语言标签。 */
-    lv_obj_t *language_symbol_label;  /**< 语言符号标签。 */
     lv_obj_t *server_label;           /**< 服务器设置标签。 */
     lv_obj_t *ip_label;               /**< IP 标签。 */
     lv_obj_t *port_label;             /**< 端口标签。 */
     lv_obj_t *brightness_slider;      /**< 亮度滑块。 */
     lv_obj_t *volume_slider;          /**< 音量滑块。 */
-    lv_obj_t *language_dropdown;      /**< 语言下拉框。 */
 } ui_settings_view_t;
 
 /**
