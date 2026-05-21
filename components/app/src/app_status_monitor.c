@@ -8,7 +8,7 @@
  * - 维护 s_network_ready 标志供心跳任务检测断线重连
  *
  * ## 任务列表
- * - biz_battery（优先级 5, 1s 周期）—— 读 ADC → 滤波 → 查表得百分比 → 更新 UI
+ * - biz_battery（优先级 5, 1s 周期）—— 读 ADC → 滤波 → 查表和滞回 → 更新 UI
  * - biz_network（优先级 4, 3s 周期）—— 查 AT 信号 → 换算格数 → 更新 UI + s_network_ready
  *
  * ## 调度方式
@@ -79,7 +79,7 @@ static int app_status_monitor_csq_to_bars(const service_network_status_t *status
  * @brief 电池电量轮询任务（1s 周期）。
  *
  * service_battery_get_status() 内部完成了 ADC 读取 → 一阶低通滤波 → 放电曲线查表 →
- * 5% 步进取整。本任务只将最终百分比推送给 UI。
+ * 5% 步进取整和显示滞回。本任务只将最终百分比推送给 UI。
  *
  * @param arg 未使用。
  */
@@ -88,7 +88,7 @@ static void app_status_monitor_battery_task(void *arg)
     (void)arg;
 
     while (1) {
-        /* service 层已经完成 ADC 滤波和百分比映射，UI 只消费百分比。 */
+        /* service 层已经完成 ADC 滤波、百分比映射和显示滞回，UI 只消费百分比。 */
         int voltage_mv = 0;
         int percent = 0;
         if (service_battery_get_status(&voltage_mv, &percent) == 0) {

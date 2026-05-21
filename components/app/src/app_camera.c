@@ -21,6 +21,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "app_camera";
@@ -99,6 +100,26 @@ static void app_camera_notify_task(void)
     if (s_camera_task != NULL) {
         (void)osal_task_notify_give(s_camera_task);
     }
+}
+
+/**
+ * @brief 构造 FastAPI 业务路由 URL。
+ */
+static int app_camera_build_url(char *out, size_t out_size, const char *path)
+{
+    if (out == NULL || out_size == 0u || path == NULL) {
+        return -1;
+    }
+
+    const char *base = APP_BUSINESS_HTTP_BASE_URL;
+    size_t base_len = strlen(base);
+    const char *path_start = path;
+    while (*path_start == '/' && base_len > 0u && base[base_len - 1u] == '/') {
+        path_start++;
+    }
+
+    int written = snprintf(out, out_size, "%s%s", base, path_start);
+    return (written > 0 && (size_t)written < out_size) ? 0 : -2;
 }
 
 /**
@@ -367,7 +388,16 @@ static void app_camera_do_upload(void)
     }
 
     uint32_t resp_len = 0u;
-    ret = service_network_http_post(APP_BUSINESS_CAMERA_UPLOAD_URL,
+    char url[256];
+    ret = app_camera_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD);
+    if (ret != 0) {
+        APP_LOGW(TAG, "相机上传 URL 构造失败, ret=%d", ret);
+        app_camera_clear_jpeg();
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        return;
+    }
+
+    ret = service_network_http_post(url,
                                     "image/jpeg",
                                     s_jpeg_buf,
                                     s_jpeg_len,

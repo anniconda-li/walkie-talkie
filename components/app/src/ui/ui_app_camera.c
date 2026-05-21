@@ -1,12 +1,7 @@
 #include "ui_app_camera.h"
 #include "ui.h"
+#include "ui_assets.h"
 #include "ui_event.h"
-#include "ui_i18n.h"
-
-typedef struct {
-    lv_anim_completed_cb_t done_cb;
-    lv_obj_t * root;
-} app_exit_ctx_t;
 
 static ui_camera_view_t g_camera_view;
 
@@ -17,57 +12,13 @@ static ui_camera_view_t g_camera_view;
 #define CAMERA_BTN_W        68
 #define CAMERA_BTN_H        34
 
-static void anim_set_y(void *obj, int32_t y)
-{
-    lv_obj_set_y((lv_obj_t *)obj, y);
-}
-
-static void start_y_anim(lv_obj_t *obj,
-                         int32_t from,
-                         int32_t to,
-                         uint32_t duration,
-                         uint32_t delay,
-                         lv_anim_path_cb_t path_cb,
-                         lv_anim_completed_cb_t done_cb,
-                         void *user_data)
-{
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, obj);
-    lv_anim_set_exec_cb(&anim, anim_set_y);
-    lv_anim_set_values(&anim, from, to);
-    lv_anim_set_duration(&anim, duration);
-    lv_anim_set_delay(&anim, delay);
-    lv_anim_set_path_cb(&anim, path_cb);
-    if(done_cb != NULL) {
-        lv_anim_set_user_data(&anim, user_data);
-        lv_anim_set_completed_cb(&anim, done_cb);
-    }
-    lv_anim_start(&anim);
-}
-
-static void app_exit_done_cb(lv_anim_t *a)
-{
-    app_exit_ctx_t *ctx = (app_exit_ctx_t *)lv_anim_get_user_data(a);
-
-    if(ctx->root) {
-        lv_obj_delete(ctx->root);
-    }
-
-    if(ctx->done_cb) {
-        ctx->done_cb(a);
-    }
-
-    lv_free(ctx);
-}
-
 static lv_obj_t *create_button(lv_obj_t *parent,
                                int32_t x,
                                int32_t y,
                                int32_t w,
                                int32_t h,
-                               const char *text,
-                               lv_obj_t **label_out)
+                               const lv_image_dsc_t *src,
+                               lv_obj_t **icon_out)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_pos(btn, x, y);
@@ -80,12 +31,13 @@ static lv_obj_t *create_button(lv_obj_t *parent,
     lv_obj_set_style_border_color(btn, lv_color_make(0x75, 0x75, 0x75), 0);
     lv_obj_set_style_border_width(btn, 1, 0);
 
-    lv_obj_t *label = lv_label_create(btn);
-    lv_label_set_text(label, text);
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_center(label);
-    if(label_out != NULL) {
-        *label_out = label;
+    lv_obj_t *icon = lv_image_create(btn);
+    lv_image_set_src(icon, src);
+    lv_image_set_scale(icon, 160);
+    lv_obj_center(icon);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    if(icon_out != NULL) {
+        *icon_out = icon;
     }
     return btn;
 }
@@ -107,14 +59,14 @@ lv_obj_t * ui_app_camera_create(lv_obj_t * parent)
      * LVGL flush 覆盖导致的花屏。
      */
     g_camera_view.upload_button = create_button(root, CAMERA_BTN_LEFT_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
-                                                ui_i18n_text(UI_TEXT_CAMERA_UPLOAD),
-                                                &g_camera_view.upload_label);
+                                                &icon_camera_upload,
+                                                &g_camera_view.upload_icon);
     g_camera_view.capture_button = create_button(root, CAMERA_BTN_CENTER_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
-                                                 ui_i18n_text(UI_TEXT_CAMERA_CAPTURE),
-                                                 &g_camera_view.capture_label);
+                                                 &icon_camera_capture,
+                                                 &g_camera_view.capture_icon);
     g_camera_view.retake_button = create_button(root, CAMERA_BTN_RIGHT_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
-                                                ui_i18n_text(UI_TEXT_CAMERA_HOME),
-                                                &g_camera_view.retake_label);
+                                                &icon_camera_back,
+                                                &g_camera_view.retake_icon);
     g_camera_view.frozen = false;
 
     ui_event_register_camera(&g_camera_view);
@@ -127,52 +79,17 @@ void ui_app_camera_enter(lv_obj_t * root)
 
     ui_event_notify_camera_entered();
 
-    lv_obj_set_y(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10);
-    lv_obj_set_y(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10);
-    lv_obj_set_y(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10);
-
-    start_y_anim(g_camera_view.upload_button, UI_SCREEN_HEIGHT + 10, CAMERA_BTN_Y, 240, 40, lv_anim_path_ease_out, NULL, NULL);
-    start_y_anim(g_camera_view.capture_button, UI_SCREEN_HEIGHT + 10, CAMERA_BTN_Y, 240, 65, lv_anim_path_ease_out, NULL, NULL);
-    start_y_anim(g_camera_view.retake_button, UI_SCREEN_HEIGHT + 10, CAMERA_BTN_Y, 240, 90, lv_anim_path_ease_out, NULL, NULL);
+    lv_obj_set_y(g_camera_view.capture_button, CAMERA_BTN_Y);
+    lv_obj_set_y(g_camera_view.upload_button, CAMERA_BTN_Y);
+    lv_obj_set_y(g_camera_view.retake_button, CAMERA_BTN_Y);
 }
 
 void ui_app_camera_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
     ui_event_notify_camera_exited();
 
-    app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));
-    if(ctx == NULL) {
-        lv_obj_delete(root);
-        if(done_cb != NULL) {
-            done_cb(NULL);
-        }
-        return;
+    lv_obj_delete(root);
+    if(done_cb != NULL) {
+        done_cb(NULL);
     }
-    ctx->done_cb = done_cb;
-    ctx->root = root;
-
-    start_y_anim(g_camera_view.capture_button,
-                 lv_obj_get_y(g_camera_view.capture_button),
-                 UI_SCREEN_HEIGHT + 10,
-                 210,
-                 30,
-                 lv_anim_path_ease_in,
-                 NULL,
-                 NULL);
-    start_y_anim(g_camera_view.upload_button,
-                 lv_obj_get_y(g_camera_view.upload_button),
-                 UI_SCREEN_HEIGHT + 10,
-                 210,
-                 50,
-                 lv_anim_path_ease_in,
-                 NULL,
-                 NULL);
-    start_y_anim(g_camera_view.retake_button,
-                 lv_obj_get_y(g_camera_view.retake_button),
-                 UI_SCREEN_HEIGHT + 10,
-                 210,
-                 70,
-                 lv_anim_path_ease_in,
-                 app_exit_done_cb,
-                 ctx);
 }

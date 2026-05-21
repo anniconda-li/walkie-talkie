@@ -84,6 +84,7 @@ static const ui_app_id_t g_menu_apps[MENU_APP_COUNT] = {
     UI_APP_ID_SETTINGS
 };
 
+static void anim_set_x(void *obj, int32_t x);
 static void update_menu_icons(void);
 
 static const lv_image_dsc_t *get_app_icon_src(ui_app_id_t app)
@@ -191,6 +192,25 @@ static void refresh_menu_visibility(void)
             lv_obj_remove_flag(g_menu_bar, LV_OBJ_FLAG_HIDDEN);
         }
     }
+}
+
+static void set_menu_position(int32_t menu_x)
+{
+    lv_anim_del(g_menu_toggle, anim_set_x);
+    lv_anim_del(g_menu_bar, anim_set_x);
+    lv_obj_set_x(g_menu_bar, menu_x);
+    lv_obj_set_x(g_menu_toggle, menu_x + MENU_TOGGLE_OFFSET_X);
+}
+
+static void collapse_menu_now(void)
+{
+    if(!g_menu_expanded) {
+        return;
+    }
+
+    g_menu_expanded = false;
+    refresh_menu_toggle_arrow();
+    set_menu_position(MENU_BAR_HIDDEN_X);
 }
 
 static void create_status_signal(lv_obj_t *parent)
@@ -345,8 +365,7 @@ static void app_switch_done_cb(lv_anim_t *a)
 {
     (void)a;
 
-    /* 旧页面退场并删除后，再创建并播放新页面入场。
-     * 这样严格符合“先反向退场，再播放新页面入场”的切换要求。 */
+    /* 旧页面直接删除后创建新页面，避免退场和入场动画串行拉长切页时间。 */
     g_current_app_root = create_app_root(g_center_app);
     g_current_app = g_center_app;
     g_switch_requested = false;
@@ -430,6 +449,7 @@ static void menu_icon_event_cb(lv_event_t *e)
 
     g_center_app = app;
     update_menu_icons();
+    collapse_menu_now();
     request_app_switch_if_needed();
 }
 
@@ -599,6 +619,7 @@ void ui_shell_switch_to(ui_app_id_t app)
 
     g_center_app = app;
     update_menu_icons();
+    collapse_menu_now();
     request_app_switch_if_needed();
 }
 

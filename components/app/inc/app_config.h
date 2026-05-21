@@ -42,10 +42,20 @@ extern "C" {
 #define APP_BUSINESS_SERVER_HOST        "10.212.141.251"
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           9000
-/** @brief AI WAV 问答 HTTP 上传地址。 */
-#define APP_BUSINESS_AI_HTTP_URL        "http://10.212.141.28:8000/voice_chat_binary_with_audio?language=zh"
-/** @brief 相机 JPEG 上传 HTTP 地址。 */
-#define APP_BUSINESS_CAMERA_UPLOAD_URL  "http://10.212.141.251:8000/camera/upload"
+/** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
+#define APP_BUSINESS_HTTP_BASE_URL      "http://10.224.127.28:8000"
+/** @brief AI 创建会话路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_START        "/ai/start"
+/** @brief AI 上传请求 WAV 分片路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_UPLOAD       "/ai/upload"
+/** @brief AI 上传完成路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_FINISH       "/ai/finish"
+/** @brief AI 回复状态查询路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_RESULT_INFO  "/ai/result_info"
+/** @brief AI 回复 WAV 分片拉取路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK "/ai/result_chunk"
+/** @brief 相机 JPEG 上传路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD   "/camera/upload"
 /** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
 #define APP_CAMERA_UPLOAD_TIMEOUT_MS    30000u
 /** @brief 相机 JPEG 上传响应临时缓冲大小。 */
@@ -74,9 +84,9 @@ extern "C" {
  */
 #define APP_CAMERA_PREVIEW_TEST_MODE    APP_CAMERA_PREVIEW_TEST_NORMAL
 /** @brief AI HTTP 单片请求等待响应的超时时间，单位 ms。 */
-#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    30000u
+#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    300000u
 /** @brief AI 服务器处理等待总超时时间，单位 ms。 */
-#define APP_AI_PROCESS_TIMEOUT_MS       120000u
+#define APP_AI_PROCESS_TIMEOUT_MS       300000u
 /** @brief AI 结果轮询间隔，单位 ms。 */
 #define APP_AI_RESULT_POLL_MS           1000u
 /** @brief AI HTTP 分片大小，需小于 ML307C AT+HTTP body_size 65535 限制。 */

@@ -3,24 +3,25 @@
 
 The server provides:
 - UDP WTK1 packet logging and same-device audio echo with a server device name.
-- HTTP chunked WAV echo for AI voice tests.
-- HTTP JPEG upload receiver for camera tests.
+- FastAPI chunked WAV echo for AI voice tests.
+- FastAPI JPEG upload receiver for camera tests.
 """
 
 from __future__ import annotations
 
 import argparse
-import http.server
 import math
 import struct
 import socket
-import socketserver
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+
+import uvicorn
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 
 
 MAGIC = b"WTK1"
@@ -33,10 +34,8 @@ SERVER_DEVICE = b"server-echo"
 # =============================================================================
 # Device firmware should point APP_BUSINESS_SERVER_HOST to this PC's LAN IP.
 # APP_BUSINESS_UDP_PORT should match DEFAULT_UDP_PORT.
-# APP_BUSINESS_AI_HTTP_URL should usually be:
-#   http://<PC_LAN_IP>:<DEFAULT_HTTP_PORT>/voice_chat_binary_with_audio?language=zh
-# APP_BUSINESS_CAMERA_UPLOAD_URL should usually be:
-#   http://<PC_LAN_IP>:<DEFAULT_HTTP_PORT>/camera/upload
+# APP_BUSINESS_HTTP_BASE_URL should usually be:
+#   http://<PC_LAN_IP>:<DEFAULT_HTTP_PORT>
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_UDP_PORT = 9000
 DEFAULT_HTTP_PORT = 8000
@@ -358,188 +357,152 @@ def run_udp(host: str, port: int) -> None:
                 sock.sendto(make_server_echo(data), addr)
 
 
-class AiWavHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "WalkieTestHTTP/1.0"
+def create_http_app(wav_save_dir: Path, jpg_save_dir: Path) -> FastAPI:
+    app = FastAPI(title="Walkie Talkie Test Server")
+    app.state.save_dir = wav_save_dir
+    app.state.jpg_save_dir = jpg_save_dir
+    app.state.ai_sessions = {}
 
-    def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        op = params.get("op", [""])[0]
-        content_type = self.headers.get("Content-Type", "")
-        log(f"HTTP POST {self.path} len={len(body)} content_type={content_type!r} op={op!r}")
+    def get_session(session_id: str) -> AiSession:
+        session = app.state.ai_sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "error": "unknown session"})
+        return session
 
-        if op:
-            self.handle_chunked_ai(op, params, body)
-            return
+    async def log_request(request: Request, body: bytes, op: str) -> None:
+        content_type = request.headers.get("content-type", "")
+        log(f"HTTP POST {request.url.path}?{request.url.query} len={len(body)} content_type={content_type!r} route_op={op!r}")
 
-        if parsed.path == "/camera/upload":
-            self.handle_camera_upload(body, content_type)
-            return
+    @app.post("/ai/start")
+    async def ai_start(request: Request) -> dict[str, object]:
+        body = await request.body()
+        await log_request(request, body, "start")
+        session_id = uuid.uuid4().hex[:12]
+        app.state.ai_sessions[session_id] = AiSession(session_id=session_id)
+        log(f"AI start session={session_id}")
+        return {"session": session_id, "chunk_size": DEFAULT_CHUNK_SIZE}
 
-        # Backward-compatible old one-shot WAV echo endpoint.
-        if parsed.path != "/ai/wav":
-            self.send_error(404)
-            return
+    @app.post("/ai/upload")
+    async def ai_upload(
+        request: Request,
+        session: str = Query(...),
+        index: int = Query(0),
+        offset: int = Query(0),
+        total: int = Query(0),
+    ) -> dict[str, bool]:
+        body = await request.body()
+        await log_request(request, body, "upload")
+        ai_session = get_session(session)
+        if total <= 0 or offset < 0 or offset + len(body) > total:
+            raise HTTPException(status_code=400, detail={"ok": False, "error": "upload range invalid"})
+        if ai_session.chunks is None:
+            ai_session.total = total
+            ai_session.chunks = bytearray(total)
+        if total != ai_session.total or ai_session.chunks is None:
+            raise HTTPException(status_code=409, detail={"ok": False, "error": "total changed"})
+        ai_session.chunks[offset : offset + len(body)] = body
+        ai_session.received += len(body)
+        log(
+            f"AI upload session={session} index={index} offset={offset} "
+            f"len={len(body)} received={ai_session.received}/{ai_session.total}"
+        )
+        return {"ok": True}
 
-        wav = parse_wav(body)
-        valid_wav = wav is not None
-        if not valid_wav:
-            self.send_bytes(400, b"expected audio/wav", "text/plain")
-            return
+    @app.post("/ai/finish")
+    async def ai_finish(request: Request, session: str = Query(...)) -> dict[str, object]:
+        body = await request.body()
+        await log_request(request, body, "finish")
+        ai_session = get_session(session)
+        if ai_session.chunks is None or ai_session.total <= 0:
+            raise HTTPException(status_code=400, detail={"ok": False, "error": "no upload"})
+        if ai_session.received < ai_session.total:
+            raise HTTPException(status_code=409, detail={"ok": False, "error": "upload incomplete"})
+        full_wav = bytes(ai_session.chunks)
+        ok, save_path = validate_and_log_wav(full_wav, app.state.save_dir, f"AI finish session={session}")
+        if not ok:
+            raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid wav"})
+        # Link test: echo uploaded WAV as AI reply. This validates upload,
+        # polling, chunk download and device-side playback without a real AI backend.
+        ai_session.reply = full_wav
+        ai_session.save_path = save_path
+        return {"ok": True, "status": "processing"}
 
-        validate_and_log_wav(body, self.server.save_dir, "HTTP one-shot")
-        self.send_bytes(200, body, "audio/wav")
+    @app.post("/ai/result_info")
+    async def ai_result_info(request: Request, session: str = Query(...)) -> dict[str, object]:
+        body = await request.body()
+        await log_request(request, body, "result_info")
+        ai_session = get_session(session)
+        if ai_session.reply is None:
+            return {"ready": False}
+        return {"ready": True, "total": len(ai_session.reply), "format": "wav"}
 
-    def handle_camera_upload(self, body: bytes, content_type: str) -> None:
+    @app.post("/ai/result_chunk")
+    async def ai_result_chunk(
+        request: Request,
+        session: str = Query(...),
+        offset: int = Query(0),
+        len_: int = Query(DEFAULT_CHUNK_SIZE, alias="len"),
+    ) -> Response:
+        body = await request.body()
+        await log_request(request, body, "result_chunk")
+        ai_session = get_session(session)
+        if ai_session.reply is None:
+            return Response(b"not ready", status_code=409, media_type="text/plain")
+        if offset < 0 or len_ <= 0 or offset >= len(ai_session.reply):
+            return Response(b"range invalid", status_code=416, media_type="text/plain")
+        chunk = ai_session.reply[offset : offset + len_]
+        log(f"AI result_chunk session={session} offset={offset} len={len(chunk)}")
+        return Response(chunk, media_type="application/octet-stream")
+
+    @app.post("/camera/upload")
+    async def camera_upload(request: Request, content_type: str = Header("", alias="content-type")) -> JSONResponse:
+        body = await request.body()
+        await log_request(request, body, "camera_upload")
         if "image/jpeg" not in content_type.lower() and "image/jpg" not in content_type.lower():
             log(f"Camera upload content-type warning: {content_type!r}")
 
-        ok, save_path, jpeg = validate_and_log_jpeg(body, self.server.jpg_save_dir, "Camera upload")
+        ok, save_path, jpeg = validate_and_log_jpeg(body, app.state.jpg_save_dir, "Camera upload")
         if not ok or save_path is None:
-            self.send_json(
-                400,
-                (
-                    '{"ok":false,'
-                    '"error":"invalid jpeg",'
-                    f'"len":{len(body)},'
-                    f'"file":"{save_path.as_posix() if save_path else ""}"'
-                    '}'
-                ),
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "invalid jpeg",
+                    "len": len(body),
+                    "file": save_path.as_posix() if save_path else "",
+                },
+                status_code=400,
             )
-            return
 
         width = jpeg.width if jpeg and jpeg.width is not None else 0
         height = jpeg.height if jpeg and jpeg.height is not None else 0
-        self.send_json(
-            200,
-            (
-                '{"ok":true,'
-                f'"len":{len(body)},'
-                f'"width":{width},'
-                f'"height":{height},'
-                f'"file":"{save_path.as_posix()}"'
-                '}'
-            ),
+        return JSONResponse(
+            {
+                "ok": True,
+                "len": len(body),
+                "width": width,
+                "height": height,
+                "file": save_path.as_posix(),
+            }
         )
 
-    def handle_chunked_ai(self, op: str, params: dict[str, list[str]], body: bytes) -> None:
-        if op == "start":
-            session_id = uuid.uuid4().hex[:12]
-            self.server.ai_sessions[session_id] = AiSession(session_id=session_id)
-            log(f"AI start session={session_id}")
-            self.send_json(200, f'{{"session":"{session_id}","chunk_size":{DEFAULT_CHUNK_SIZE}}}')
-            return
+    @app.post("/ai/wav")
+    async def ai_wav_oneshot(request: Request) -> Response:
+        body = await request.body()
+        await log_request(request, body, "one_shot")
+        if parse_wav(body) is None:
+            return Response(b"expected audio/wav", status_code=400, media_type="text/plain")
+        validate_and_log_wav(body, app.state.save_dir, "HTTP one-shot")
+        return Response(body, media_type="audio/wav")
 
-        session_id = params.get("session", [""])[0]
-        session = self.server.ai_sessions.get(session_id)
-        if not session:
-            self.send_json(404, '{"ok":false,"error":"unknown session"}')
-            return
-
-        if op == "upload":
-            try:
-                index = int(params.get("index", ["0"])[0])
-                offset = int(params.get("offset", ["0"])[0])
-                total = int(params.get("total", ["0"])[0])
-            except ValueError:
-                self.send_json(400, '{"ok":false,"error":"bad upload params"}')
-                return
-            if total <= 0 or offset < 0 or offset + len(body) > total:
-                self.send_json(400, '{"ok":false,"error":"upload range invalid"}')
-                return
-            if session.chunks is None:
-                session.total = total
-                session.chunks = bytearray(total)
-            if total != session.total or session.chunks is None:
-                self.send_json(409, '{"ok":false,"error":"total changed"}')
-                return
-            session.chunks[offset : offset + len(body)] = body
-            session.received += len(body)
-            log(
-                f"AI upload session={session_id} index={index} offset={offset} "
-                f"len={len(body)} received={session.received}/{session.total}"
-            )
-            self.send_json(200, '{"ok":true}')
-            return
-
-        if op == "finish":
-            if session.chunks is None or session.total <= 0:
-                self.send_json(400, '{"ok":false,"error":"no upload"}')
-                return
-            if session.received < session.total:
-                self.send_json(409, '{"ok":false,"error":"upload incomplete"}')
-                return
-            full_wav = bytes(session.chunks)
-            ok, save_path = validate_and_log_wav(full_wav, self.server.save_dir, f"AI finish session={session_id}")
-            if not ok:
-                self.send_json(400, '{"ok":false,"error":"invalid wav"}')
-                return
-            # Link test: echo uploaded WAV as AI reply. This validates upload,
-            # polling, chunk download and device-side playback without a real AI backend.
-            session.reply = full_wav
-            session.save_path = save_path
-            self.send_json(200, '{"ok":true,"status":"processing"}')
-            return
-
-        if op == "result_info":
-            if session.reply is None:
-                self.send_json(200, '{"ready":false}')
-                return
-            self.send_json(200, f'{{"ready":true,"total":{len(session.reply)},"format":"wav"}}')
-            return
-
-        if op == "result_chunk":
-            if session.reply is None:
-                self.send_bytes(409, b"not ready", "text/plain")
-                return
-            try:
-                offset = int(params.get("offset", ["0"])[0])
-                req_len = int(params.get("len", [str(DEFAULT_CHUNK_SIZE)])[0])
-            except ValueError:
-                self.send_bytes(400, b"bad result_chunk params", "text/plain")
-                return
-            if offset < 0 or req_len <= 0 or offset >= len(session.reply):
-                self.send_bytes(416, b"range invalid", "text/plain")
-                return
-            chunk = session.reply[offset : offset + req_len]
-            log(f"AI result_chunk session={session_id} offset={offset} len={len(chunk)}")
-            self.send_bytes(200, chunk, "application/octet-stream")
-            return
-
-        self.send_json(400, '{"ok":false,"error":"unknown op"}')
-
-    def send_json(self, status: int, text: str) -> None:
-        self.send_bytes(status, text.encode("utf-8"), "application/json")
-
-    def send_bytes(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, fmt: str, *args: object) -> None:
-        return
+    return app
 
 
 def run_http(host: str, port: int, wav_save_dir: Path, jpg_save_dir: Path) -> None:
-    class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-        daemon_threads = True
-
-    try:
-        server = ThreadingHTTPServer((host, port), AiWavHandler)
-    except OSError as exc:
-        log(f"HTTP bind failed on {host}:{port}: {exc}")
-        return
-
-    server.save_dir = wav_save_dir
-    server.jpg_save_dir = jpg_save_dir
-    server.ai_sessions = {}
-    log(f"HTTP AI WAV + camera JPEG test listening on {host}:{port}")
+    app = create_http_app(wav_save_dir, jpg_save_dir)
+    log(f"FastAPI AI WAV + camera JPEG test listening on {host}:{port}")
+    log(f"AI base URL: http://<PC_LAN_IP>:{port}")
     log(f"Camera upload URL: http://<PC_LAN_IP>:{port}/camera/upload")
-    server.serve_forever()
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 def main() -> None:

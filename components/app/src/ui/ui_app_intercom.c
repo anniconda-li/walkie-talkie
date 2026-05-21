@@ -1,14 +1,10 @@
 #include "ui_app_intercom.h"
 #include "ui.h"
+#include "ui_assets.h"
 #include "ui_event.h"
 #include "ui_font.h"
 #include "ui_i18n.h"
 #include "ui_theme.h"
-
-typedef struct {
-    lv_anim_completed_cb_t done_cb;
-    lv_obj_t * root;
-} app_exit_ctx_t;
 
 static ui_intercom_view_t g_intercom_view;
 static lv_obj_t *g_display_panel;
@@ -43,21 +39,6 @@ static void start_y_anim(lv_obj_t *obj,
     lv_anim_start(&anim);
 }
 
-static void app_exit_done_cb(lv_anim_t *a)
-{
-    app_exit_ctx_t *ctx = (app_exit_ctx_t *)lv_anim_get_user_data(a);
-
-    if(ctx->root) {
-        lv_obj_delete(ctx->root);
-    }
-
-    if(ctx->done_cb) {
-        ctx->done_cb(a);
-    }
-
-    lv_free(ctx);
-}
-
 static lv_obj_t *create_panel(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h)
 {
     lv_obj_t *obj = lv_obj_create(parent);
@@ -89,6 +70,15 @@ static lv_obj_t *create_button(lv_obj_t *parent, int32_t x, int32_t y, int32_t w
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_center(label);
     return btn;
+}
+
+static void add_button_icon(lv_obj_t *btn, const lv_image_dsc_t *src, int32_t scale)
+{
+    lv_obj_t *icon = lv_image_create(btn);
+    lv_image_set_src(icon, src);
+    lv_image_set_scale(icon, scale);
+    lv_obj_center(icon);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
 }
 
 lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
@@ -133,7 +123,8 @@ lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
     g_control_panel = create_panel(root, 16, 220, 208, 70);
     lv_obj_set_style_radius(g_control_panel, 20, 0);
     g_intercom_view.channel_dec_button = create_button(g_control_panel, 10, 14, 42, 42, "-");
-    g_intercom_view.ptt_button = create_button(g_control_panel, 66, 8, 76, 54, ui_i18n_text(UI_TEXT_INTERCOM_PTT));
+    g_intercom_view.ptt_button = create_button(g_control_panel, 66, 8, 76, 54, "");
+    add_button_icon(g_intercom_view.ptt_button, &icon_ptt_mic, 160);
     g_intercom_view.channel_inc_button = create_button(g_control_panel, 156, 14, 42, 42, "+");
 
     ui_event_register_intercom(&g_intercom_view);
@@ -145,31 +136,16 @@ void ui_app_intercom_enter(lv_obj_t * root)
     (void)root;
 
     lv_obj_set_y(g_display_panel, -132);
-    lv_obj_set_y(g_control_panel, UI_SCREEN_HEIGHT + 18);
-    start_y_anim(g_display_panel, -132, 66, 260, 0, lv_anim_path_ease_out, NULL, NULL);
-    start_y_anim(g_control_panel, UI_SCREEN_HEIGHT + 18, 220, 260, 45, lv_anim_path_ease_out, NULL, NULL);
+    lv_obj_set_y(g_control_panel, 220);
+    start_y_anim(g_display_panel, -132, 66, 150, 0, lv_anim_path_ease_out, NULL, NULL);
 }
 
 void ui_app_intercom_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
-    app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));
-    if(ctx == NULL) {
-        lv_obj_delete(root);
-        if(done_cb != NULL) {
-            done_cb(NULL);
-        }
-        return;
+    lv_anim_del(g_display_panel, anim_set_y);
+    lv_anim_del(g_control_panel, anim_set_y);
+    lv_obj_delete(root);
+    if(done_cb != NULL) {
+        done_cb(NULL);
     }
-    ctx->done_cb = done_cb;
-    ctx->root = root;
-
-    start_y_anim(g_display_panel, lv_obj_get_y(g_display_panel), -132, 220, 0, lv_anim_path_ease_in, NULL, NULL);
-    start_y_anim(g_control_panel,
-                 lv_obj_get_y(g_control_panel),
-                 UI_SCREEN_HEIGHT + 18,
-                 220,
-                 35,
-                 lv_anim_path_ease_in,
-                 app_exit_done_cb,
-                 ctx);
 }

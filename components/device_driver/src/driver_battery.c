@@ -17,8 +17,9 @@ static const char *TAG = "driver_battery";
 #define driver_battery_ADC_CHANNEL           ADC_CHANNEL_9
 #define driver_battery_ADC_ATTEN             ADC_ATTEN_DB_12
 #define driver_battery_ADC_BITWIDTH          ADC_BITWIDTH_DEFAULT
-#define driver_battery_SAMPLE_COUNT          16u
-#define driver_battery_ENABLE_SETTLE_MS      5u
+#define driver_battery_SAMPLE_COUNT          32u
+#define driver_battery_DISCARD_COUNT         4u
+#define driver_battery_ENABLE_SETTLE_MS      20u
 
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_adc_cali_handle = NULL;
@@ -186,6 +187,13 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
     osal_delay_ms(driver_battery_ENABLE_SETTLE_MS);
 
     int raw_sum = 0;
+    int raw_min[driver_battery_DISCARD_COUNT];
+    int raw_max[driver_battery_DISCARD_COUNT];
+    for (uint32_t i = 0; i < driver_battery_DISCARD_COUNT; i++) {
+        raw_min[i] = 4095;
+        raw_max[i] = 0;
+    }
+
     for (uint32_t i = 0; i < driver_battery_SAMPLE_COUNT; i++) {
         int raw = 0;
         ret = driver_battery_err_to_int(adc_oneshot_read(s_adc_handle,
@@ -197,11 +205,37 @@ int driver_battery_read_voltage_mv(int *voltage_mv)
             return ret;
         }
         raw_sum += raw;
+
+        for (uint32_t j = 0; j < driver_battery_DISCARD_COUNT; j++) {
+            if (raw < raw_min[j]) {
+                for (uint32_t k = driver_battery_DISCARD_COUNT - 1u; k > j; k--) {
+                    raw_min[k] = raw_min[k - 1u];
+                }
+                raw_min[j] = raw;
+                break;
+            }
+        }
+
+        for (uint32_t j = 0; j < driver_battery_DISCARD_COUNT; j++) {
+            if (raw > raw_max[j]) {
+                for (uint32_t k = driver_battery_DISCARD_COUNT - 1u; k > j; k--) {
+                    raw_max[k] = raw_max[k - 1u];
+                }
+                raw_max[j] = raw;
+                break;
+            }
+        }
     }
 
     (void)gpio_set_level(driver_battery_ADC_EN_IO, 1);
 
-    int raw_avg = raw_sum / (int)driver_battery_SAMPLE_COUNT;
+    int discard_sum = 0;
+    for (uint32_t i = 0; i < driver_battery_DISCARD_COUNT; i++) {
+        discard_sum += raw_min[i] + raw_max[i];
+    }
+
+    int raw_avg = (raw_sum - discard_sum) /
+                  (int)(driver_battery_SAMPLE_COUNT - (driver_battery_DISCARD_COUNT * 2u));
     int mv = 0;
     if (s_adc_cali_enabled != 0u && s_adc_cali_handle != NULL) {
         ret = driver_battery_err_to_int(adc_cali_raw_to_voltage(s_adc_cali_handle, raw_avg, &mv));

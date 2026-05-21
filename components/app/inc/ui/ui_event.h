@@ -27,7 +27,6 @@ typedef struct {
     void (*camera_retake_requested)(void);             /**< 相机重拍请求回调。 */
     void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
-    void (*settings_brightness_changed)(int32_t value); /**< 亮度变化回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
 } ui_event_callbacks_t;
 
@@ -48,9 +47,9 @@ typedef struct {
  * @brief 相机页面视图对象集合。
  */
 typedef struct {
-    lv_obj_t *capture_label;  /**< 拍照/重新预览按钮文本。 */
-    lv_obj_t *upload_label;   /**< 上传按钮文本。 */
-    lv_obj_t *retake_label;   /**< Return 按钮文本。 */
+    lv_obj_t *capture_icon;   /**< 拍照/重新预览按钮图标。 */
+    lv_obj_t *upload_icon;    /**< 上传按钮图标。 */
+    lv_obj_t *retake_icon;    /**< 返回按钮图标。 */
     lv_obj_t *capture_button; /**< 拍照/重新预览按钮。 */
     lv_obj_t *upload_button;  /**< 上传按钮。 */
     lv_obj_t *retake_button;  /**< Return 按钮。 */
@@ -63,9 +62,9 @@ typedef struct {
 typedef struct {
     lv_obj_t *answer_label;  /**< AI 回答显示标签。 */
     lv_obj_t *camera_button; /**< 拍照按钮。 */
-    lv_obj_t *camera_label;  /**< 拍照按钮文本。 */
+    lv_obj_t *camera_icon;   /**< 拍照按钮图标。 */
     lv_obj_t *ask_button;    /**< AI 问答按钮。 */
-    lv_obj_t *ask_label;     /**< AI 问答按钮文本。 */
+    lv_obj_t *ask_icon;      /**< AI 问答按钮图标。 */
     lv_obj_t *voice_bars[4]; /**< 录音动效柱。 */
     bool speaking;           /**< 是否处于录音动效状态。 */
 } ui_ai_view_t;
@@ -74,12 +73,9 @@ typedef struct {
  * @brief 设置页面视图对象集合。
  */
 typedef struct {
-    lv_obj_t *brightness_label;       /**< 亮度标签。 */
     lv_obj_t *volume_label;           /**< 音量标签。 */
-    lv_obj_t *server_label;           /**< 服务器设置标签。 */
-    lv_obj_t *ip_label;               /**< IP 标签。 */
-    lv_obj_t *port_label;             /**< 端口标签。 */
-    lv_obj_t *brightness_slider;      /**< 亮度滑块。 */
+    lv_obj_t *firmware_label;         /**< 固件版本标题标签。 */
+    lv_obj_t *version_label;          /**< 固件版本号标签。 */
     lv_obj_t *volume_slider;          /**< 音量滑块。 */
 } ui_settings_view_t;
 

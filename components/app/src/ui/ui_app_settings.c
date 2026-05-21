@@ -1,6 +1,6 @@
 /**
  * @file ui_app_settings.c
- * @brief 设置页面 UI——亮度、音量、服务器信息。
+ * @brief 设置页面 UI——音量、固件版本信息。
  *
  * ## 页面布局（240×280 屏幕）
  * ```
@@ -8,37 +8,28 @@
  * │    状态栏（shell 管理）    │  y=0..30
  * ├──────────────────────────┤
  * │  ┌────────────────────┐  │
- * │  │ 屏幕亮度            │  │  y=48
- * │  │ [═══════●══════] 72%│  │  滑块: y=78
+ * │  │ 音量大小            │  │
+ * │  │ [══════●═══════] 56%│  │
  * │  │                    │  │
- * │  │ 音量大小            │  │  y=103
- * │  │ [══════●═══════] 56%│  │  滑块: y=132
- * │  │                    │  │
- * │  │ 服务器              │  │  y=132
- * │  │ IP   10.212.141.251│  │
- * │  │ 端口 9000           │  │
+ * │  │ 固件版本            │  │
+ * │  │ v1.0.0              │  │
  * │  └────────────────────┘  │
  * └──────────────────────────┘
  * ```
  *
  * ## 交互
- * - 亮度/音量滑块：LV_EVENT_VALUE_CHANGED → 回调到 app_business
+ * - 音量滑块：LV_EVENT_VALUE_CHANGED → 回调到 app_business
  *
  * ## 动画说明
- * - 入场：面板整体从上方滑入
- * - 退场：面板向上滑出 → 删除 root → 调用 done_cb
+ * - 入场：面板整体短距离滑入
+ * - 退场：停止页面动画后直接删除 root → 调用 done_cb
  */
 #include "ui_app_settings.h"
 #include "ui.h"
 #include "ui_event.h"
 #include "ui_i18n.h"
 #include "ui_theme.h"
-
-/** @brief 页面退场上下文——动画完成后清理 root 并触发回调。 */
-typedef struct {
-    lv_anim_completed_cb_t done_cb;
-    lv_obj_t * root;
-} app_exit_ctx_t;
+#include "esp_app_desc.h"
 
 /** @brief 设置页面全局视图对象。 */
 static ui_settings_view_t g_settings_view;
@@ -75,22 +66,6 @@ static void start_y_anim(lv_obj_t *obj,
         lv_anim_set_completed_cb(&anim, done_cb);
     }
     lv_anim_start(&anim);
-}
-
-/** @brief 退场动画完成回调：删除 root → 释放上下文 → 调用上层回调。 */
-static void app_exit_done_cb(lv_anim_t *a)
-{
-    app_exit_ctx_t *ctx = (app_exit_ctx_t *)lv_anim_get_user_data(a);
-
-    if(ctx->root) {
-        lv_obj_delete(ctx->root);
-    }
-
-    if(ctx->done_cb) {
-        ctx->done_cb(a);
-    }
-
-    lv_free(ctx);
 }
 
 /**
@@ -155,6 +130,25 @@ static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
 }
 
 /**
+ * @brief 设置固件版本标签。
+ *
+ * 版本号来自 ESP-IDF 应用描述，和最终固件镜像中的版本字段保持一致。
+ */
+static void set_firmware_version_label(lv_obj_t *label)
+{
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    const char *version = (app_desc != NULL && app_desc->version[0] != '\0') ? app_desc->version : "unknown";
+    char text[64];
+
+    if (version[0] == 'v' || version[0] == 'V') {
+        lv_snprintf(text, sizeof(text), "%s", version);
+    } else {
+        lv_snprintf(text, sizeof(text), "v%s", version);
+    }
+    lv_label_set_text(label, text);
+}
+
+/**
  * @brief 创建设置页面完整 UI。
  *
  * 控件创建顺序与视觉布局一致（从上到下）。
@@ -175,26 +169,17 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 
     g_settings_panel = create_panel(root);
 
-    /* 亮度行：标签 + 滑块 */
-    g_settings_view.brightness_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_BRIGHTNESS), 0);
-    g_settings_view.brightness_slider = create_slider(g_settings_panel, 30, 72);
-
     /* 音量行 */
-    g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 55);
-    g_settings_view.volume_slider = create_slider(g_settings_panel, 84, 56);
+    g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 0);
+    g_settings_view.volume_slider = create_slider(g_settings_panel, 30, 56);
 
-    /* 服务器信息行（只读标签） */
-    g_settings_view.server_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_SERVER), 122);
+    /* 固件版本信息行（只读标签） */
+    g_settings_view.firmware_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 68);
 
-    g_settings_view.ip_label = lv_label_create(g_settings_panel);
-    lv_label_set_text(g_settings_view.ip_label, ui_i18n_text(UI_TEXT_SETTINGS_IP));
-    lv_obj_set_pos(g_settings_view.ip_label, 2, 146);
-    lv_obj_set_style_text_color(g_settings_view.ip_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
-
-    g_settings_view.port_label = lv_label_create(g_settings_panel);
-    lv_label_set_text(g_settings_view.port_label, ui_i18n_text(UI_TEXT_SETTINGS_PORT));
-    lv_obj_set_pos(g_settings_view.port_label, 2, 168);
-    lv_obj_set_style_text_color(g_settings_view.port_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+    g_settings_view.version_label = lv_label_create(g_settings_panel);
+    set_firmware_version_label(g_settings_view.version_label);
+    lv_obj_set_pos(g_settings_view.version_label, 2, 92);
+    lv_obj_set_style_text_color(g_settings_view.version_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
 
     ui_event_register_settings(&g_settings_view);
     return root;
@@ -203,7 +188,7 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 /**
  * @brief 播放设置页面入场动画。
  *
- * 面板从上方(-260)滑入到 y=48（300ms, ease_out）。
+ * 面板从上方(-260)滑入到 y=48（150ms, ease_out）。
  *
  * @param root 设置页面根对象（未使用）。
  */
@@ -212,37 +197,20 @@ void ui_app_settings_enter(lv_obj_t * root)
     (void)root;
 
     lv_obj_set_y(g_settings_panel, -260);
-    start_y_anim(g_settings_panel, -260, 48, 300, 0, lv_anim_path_ease_out, NULL, NULL);
+    start_y_anim(g_settings_panel, -260, 48, 150, 0, lv_anim_path_ease_out, NULL, NULL);
 }
 
 /**
- * @brief 播放设置页面退场动画并在完成后删除 root。
- *
- * 面板向上滑出到 y=-260（240ms, ease_in）。
- * 动画完成 → 删除 root → 调用 done_cb。
+ * @brief 停止设置页面动画并删除 root。
  *
  * @param root    设置页面根对象。
  * @param done_cb 退场完成回调。
  */
 void ui_app_settings_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
-    app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));
-    if(ctx == NULL) {
-        lv_obj_delete(root);
-        if(done_cb != NULL) {
-            done_cb(NULL);
-        }
-        return;
+    lv_anim_del(g_settings_panel, anim_set_y);
+    lv_obj_delete(root);
+    if(done_cb != NULL) {
+        done_cb(NULL);
     }
-    ctx->done_cb = done_cb;
-    ctx->root = root;
-
-    start_y_anim(g_settings_panel,
-                 lv_obj_get_y(g_settings_panel),
-                 -260,
-                 240,
-                 0,
-                 lv_anim_path_ease_in,
-                 app_exit_done_cb,
-                 ctx);
 }

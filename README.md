@@ -22,17 +22,17 @@
 - 回复 WAV 最大约 3840044 字节。
 - 第一版不做断点续传，任意分片失败则整次 AI 会话失败。
 
-所有请求都使用 `POST`，基础 URL 由固件中的 `APP_BUSINESS_AI_HTTP_URL` 配置。若基础 URL 已经包含 query，例如 `?language=zh`，客户端会继续追加 `&op=...`。
+所有请求都使用 `POST`。固件中的 `APP_BUSINESS_HTTP_BASE_URL` 只配置 FastAPI 服务根地址，例如 `http://<server-ip>:8000`；具体路由集中在 `components/app/inc/app_config.h` 的 `APP_BUSINESS_HTTP_ROUTE_*` 宏中，客户端发送时再拼接完整 URL。
 
 ### 1. 创建会话
 
 请求：
 
 ```text
-POST <AI_URL>&op=start&device=walkie-01
+POST <AI_URL>/ai/start
 Content-Type: application/json
 
-{}
+{"device":"walkie-01","language":"zh"}
 ```
 
 响应：
@@ -51,7 +51,7 @@ Content-Type: application/json
 请求：
 
 ```text
-POST <AI_URL>&op=upload&session=abc123&index=0&offset=0&total=1920044
+POST <AI_URL>/ai/upload?session=abc123&index=0&offset=0&total=1920044
 Content-Type: application/octet-stream
 
 <WAV bytes chunk>
@@ -75,7 +75,7 @@ Content-Type: application/octet-stream
 请求：
 
 ```text
-POST <AI_URL>&op=finish&session=abc123
+POST <AI_URL>/ai/finish?session=abc123
 Content-Type: application/json
 
 {}
@@ -94,7 +94,7 @@ Content-Type: application/json
 请求：
 
 ```text
-POST <AI_URL>&op=result_info&session=abc123
+POST <AI_URL>/ai/result_info?session=abc123
 Content-Type: application/json
 
 {}
@@ -125,7 +125,7 @@ Content-Type: application/json
 请求：
 
 ```text
-POST <AI_URL>&op=result_chunk&session=abc123&offset=0&len=32768
+POST <AI_URL>/ai/result_chunk?session=abc123&offset=0&len=32768
 Content-Type: application/json
 
 {}
@@ -160,3 +160,20 @@ Content-Type: application/json
 ML307C 手册中 `AT+HTTP=<id>,<body_size>,<timeout>,<latency>` 的 `body_size` 取值范围为 `0-65535`，因此固件把每个 AI HTTP 请求体限制在 32768 字节。
 
 大回复不依赖单次 HTTP 大响应，而是通过 `result_chunk` 分片拉取，避免响应体过大导致 UART/AT 解析不稳定。
+
+## 本地测试服务
+
+`tools/wifi_net_test_server.py` 使用 FastAPI 提供 HTTP 测试路由，同时保留 UDP 对讲测试线程。首次运行前创建 Python 3.11 虚拟环境并安装依赖：
+
+```bash
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r tools\requirements.txt
+```
+
+启动：
+
+```bash
+.\.venv\Scripts\python.exe tools\wifi_net_test_server.py --host 0.0.0.0 --http-port 8000 --udp-port 9000
+```
+
+固件侧 `APP_BUSINESS_HTTP_BASE_URL` 配置为测试机局域网地址，例如 `http://<PC_LAN_IP>:8000`。

@@ -1,6 +1,6 @@
 /**
  * @file ui_app_ai.c
- * @brief AI 问答页面 UI——创建控件、入场/退场动画。
+ * @brief AI 问答页面 UI——创建控件、轻量入场动画。
  *
  * ## 页面布局（240×280 屏幕）
  * ```
@@ -24,25 +24,15 @@
  * - 录音期间 4 根橙色柱子上下伸缩动画
  *
  * ## 动画说明
- * - 入场：answer_panel 从上方滑入(270ms)、4 根柱子依次弹入(240ms)、按钮从下方弹入(250ms)
- * - 退场：所有元素反向滑出，动画结束后删除 root 对象并调用 done_cb
+ * - 入场：answer_panel 从上方短距离滑入，按钮直接就位
+ * - 退场：停止页面动画后直接删除 root 对象并调用 done_cb
  */
 #include "ui_app_ai.h"
 #include "ui.h"
+#include "ui_assets.h"
 #include "ui_event.h"
 #include "ui_i18n.h"
 #include "ui_theme.h"
-
-/**
- * @brief 页面退场上下文——用于在动画结束后清理。
- *
- * 退场动画是异步的，需要保存 root 和回调指针，
- * 在动画完成时删除 UI 对象并调用回调。
- */
-typedef struct {
-    lv_anim_completed_cb_t done_cb; /**< 退场完成后的回调（如切换到新页面） */
-    lv_obj_t * root;                /**< AI 页面根对象，动画结束后删除 */
-} app_exit_ctx_t;
 
 /** @brief AI 页面全局视图对象（含 answer_label, ask_button, voice_bars, speaking 状态） */
 static ui_ai_view_t g_ai_view;
@@ -50,12 +40,12 @@ static ui_ai_view_t g_ai_view;
 /** @brief AI 回答面板（深灰圆角矩形） */
 static lv_obj_t *g_answer_panel;
 
-#define AI_ACTION_BTN_Y      262
-#define AI_ACTION_BTN_W      96
-#define AI_ACTION_BTN_H      42
-#define AI_CAMERA_BTN_X      18
-#define AI_ASK_BTN_X         126
-#define AI_ACTION_BTN_RADIUS 21
+#define AI_ACTION_BTN_Y      256
+#define AI_ACTION_BTN_W      104
+#define AI_ACTION_BTN_H      48
+#define AI_CAMERA_BTN_X      12
+#define AI_ASK_BTN_X         124
+#define AI_ACTION_BTN_RADIUS 24
 
 /* ---- LVGL 动画回调函数 ---- */
 
@@ -101,31 +91,6 @@ static void start_y_anim(lv_obj_t *obj,
     lv_anim_start(&anim);
 }
 
-/**
- * @brief 退场动画完成回调：删除 root 对象 → 释放上下文 → 调用上层回调。
- *
- * 这是页面切换的关键环节：
- * 1. 删除旧页面的 LVGL 对象树（释放内存）
- * 2. 调用 ui_shell 传入的 done_cb（通常是 app_switch_done_cb）
- * 3. app_switch_done_cb 会创建新页面并播放其入场动画
- *
- * @param a LVGL 动画对象，user_data 指向 app_exit_ctx_t。
- */
-static void app_exit_done_cb(lv_anim_t *a)
-{
-    app_exit_ctx_t *ctx = (app_exit_ctx_t *)lv_anim_get_user_data(a);
-
-    if(ctx->root) {
-        lv_obj_delete(ctx->root);
-    }
-
-    if(ctx->done_cb) {
-        ctx->done_cb(a);
-    }
-
-    lv_free(ctx);
-}
-
 /* ==========================================================================
  * 页面创建
  * ========================================================================== */
@@ -138,8 +103,8 @@ static void app_exit_done_cb(lv_anim_t *a)
  * ├── g_answer_panel (深灰圆角矩形, y=56, 204×170)
  * │   └── answer_label (多行文本, 宽度 180)
  * ├── voice_bars[4] (4 根橙色柱子, 初始隐藏)
- * └── ask_button (圆角按钮, y=262, 120×42)
- *     └── ask_label (居中文本 "按住提问")
+ * ├── camera_button (圆角图标按钮, y=256, 104×48)
+ * └── ask_button (圆角图标按钮, y=256, 104×48)
  *
  * 创建完成后调用 ui_event_register_ai() 注册长按事件。
  *
@@ -197,10 +162,11 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
     lv_obj_set_style_border_color(g_ai_view.camera_button, lv_color_make(0x88, 0x88, 0x88), 0);
     lv_obj_set_style_border_width(g_ai_view.camera_button, 1, 0);
 
-    g_ai_view.camera_label = lv_label_create(g_ai_view.camera_button);
-    lv_label_set_text(g_ai_view.camera_label, ui_i18n_text(UI_TEXT_CAMERA_CAPTURE));
-    lv_obj_set_style_text_color(g_ai_view.camera_label, lv_color_white(), 0);
-    lv_obj_center(g_ai_view.camera_label);
+    g_ai_view.camera_icon = lv_image_create(g_ai_view.camera_button);
+    lv_image_set_src(g_ai_view.camera_icon, &icon_ai_camera);
+    lv_image_set_scale(g_ai_view.camera_icon, 160);
+    lv_obj_center(g_ai_view.camera_icon);
+    lv_obj_remove_flag(g_ai_view.camera_icon, LV_OBJ_FLAG_CLICKABLE);
 
     /* "按住提问" 按钮 */
     g_ai_view.ask_button = lv_button_create(root);
@@ -208,14 +174,15 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
     lv_obj_set_size(g_ai_view.ask_button, AI_ACTION_BTN_W, AI_ACTION_BTN_H);
     lv_obj_set_style_radius(g_ai_view.ask_button, AI_ACTION_BTN_RADIUS, 0);
     lv_obj_set_style_bg_color(g_ai_view.ask_button, lv_color_make(0x36, 0x36, 0x36), 0);
-    lv_obj_set_style_bg_color(g_ai_view.ask_button, UI_COLOR_AI, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(g_ai_view.ask_button, lv_color_make(0x1C, 0x4A, 0x54), LV_STATE_PRESSED);
     lv_obj_set_style_border_color(g_ai_view.ask_button, lv_color_make(0x88, 0x88, 0x88), 0);
     lv_obj_set_style_border_width(g_ai_view.ask_button, 1, 0);
 
-    g_ai_view.ask_label = lv_label_create(g_ai_view.ask_button);
-    lv_label_set_text(g_ai_view.ask_label, ui_i18n_text(UI_TEXT_AI_ASK));
-    lv_obj_set_style_text_color(g_ai_view.ask_label, lv_color_white(), 0);
-    lv_obj_center(g_ai_view.ask_label);
+    g_ai_view.ask_icon = lv_image_create(g_ai_view.ask_button);
+    lv_image_set_src(g_ai_view.ask_icon, &icon_ai_mic);
+    lv_image_set_scale(g_ai_view.ask_icon, 160);
+    lv_obj_center(g_ai_view.ask_icon);
+    lv_obj_remove_flag(g_ai_view.ask_icon, LV_OBJ_FLAG_CLICKABLE);
 
     g_ai_view.speaking = false;
     ui_event_register_ai(&g_ai_view);
@@ -223,12 +190,9 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
 }
 
 /**
- * @brief 播放 AI 页面入场动画。
+ * @brief 播放 AI 页面轻量入场动画。
  *
- * 动画顺序（各元素依次出现，总时长约 325ms）：
- * 1. answer_panel 从上方(-180)滑入到 y=56（270ms, ease_out）
- * 2. 4 根录音柱依次从底部弹入（240ms, 各延迟 40/58/76/94ms）
- * 3. ask_button 从下方弹入（250ms, 延迟 75ms）
+ * 只动画回答面板，按钮和录音柱直接就位，避免切页时多个对象同时重绘。
  *
  * @param root AI 页面根对象（未使用，直接操作全局对象）。
  */
@@ -237,52 +201,17 @@ void ui_app_ai_enter(lv_obj_t * root)
     (void)root;
 
     lv_obj_set_y(g_answer_panel, -180);
-    lv_obj_set_y(g_ai_view.camera_button, UI_SCREEN_HEIGHT + 12);
-    lv_obj_set_y(g_ai_view.ask_button, UI_SCREEN_HEIGHT + 12);
+    lv_obj_set_y(g_ai_view.camera_button, AI_ACTION_BTN_Y);
+    lv_obj_set_y(g_ai_view.ask_button, AI_ACTION_BTN_Y);
     for(int32_t i = 0; i < 4; i++) {
-        lv_obj_set_y(g_ai_view.voice_bars[i], UI_SCREEN_HEIGHT + 12);
+        lv_obj_set_y(g_ai_view.voice_bars[i], 238 - (i % 2) * 6);
     }
 
-    start_y_anim(g_answer_panel, -180, 56, 270, 0, lv_anim_path_ease_out, NULL, NULL);
-    for(int32_t i = 0; i < 4; i++) {
-        int32_t target_y = 238 - (i % 2) * 6;
-        start_y_anim(g_ai_view.voice_bars[i],
-                     UI_SCREEN_HEIGHT + 12,
-                     target_y,
-                     240,
-                     (uint32_t)(40 + i * 18),
-                     lv_anim_path_ease_out,
-                     NULL,
-                     NULL);
-    }
-    start_y_anim(g_ai_view.camera_button,
-                 UI_SCREEN_HEIGHT + 12,
-                 AI_ACTION_BTN_Y,
-                 250,
-                 75,
-                 lv_anim_path_ease_out,
-                 NULL,
-                 NULL);
-    start_y_anim(g_ai_view.ask_button,
-                 UI_SCREEN_HEIGHT + 12,
-                 AI_ACTION_BTN_Y,
-                 250,
-                 90,
-                 lv_anim_path_ease_out,
-                 NULL,
-                 NULL);
+    start_y_anim(g_answer_panel, -180, 56, 150, 0, lv_anim_path_ease_out, NULL, NULL);
 }
 
 /**
- * @brief 播放 AI 页面退场动画并在完成后删除 root。
- *
- * 动画与入场相反：
- * 1. answer_panel 向上滑出（220ms, ease_in）
- * 2. 4 根柱子依次向下滑出（210ms, 各延迟 25/40/55/70ms）
- * 3. ask_button 向下滑出（220ms, 延迟 70ms）
- *
- * 最后一个动画（ask_button）完成时触发 app_exit_done_cb：
- * 删除 root → 调用 done_cb（通常触发新页面入场）
+ * @brief 停止 AI 页面动画并删除 root。
  *
  * @param root    AI 页面根对象（退场后删除）。
  * @param done_cb 退场完成回调（通常由 ui_shell 传入，用于切换到新页面）。
@@ -291,42 +220,14 @@ void ui_app_ai_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
     ui_event_unregister_ai(&g_ai_view);
 
-    app_exit_ctx_t *ctx = lv_malloc(sizeof(app_exit_ctx_t));
-    if(ctx == NULL) {
-        lv_obj_delete(root);
-        if(done_cb != NULL) {
-            done_cb(NULL);
-        }
-        return;
-    }
-    ctx->done_cb = done_cb;
-    ctx->root = root;
-
-    start_y_anim(g_answer_panel, lv_obj_get_y(g_answer_panel), -180, 220, 0, lv_anim_path_ease_in, NULL, NULL);
+    lv_anim_del(g_answer_panel, anim_set_y);
+    lv_anim_del(g_ai_view.camera_button, anim_set_y);
+    lv_anim_del(g_ai_view.ask_button, anim_set_y);
     for(int32_t i = 0; i < 4; i++) {
-        start_y_anim(g_ai_view.voice_bars[i],
-                     lv_obj_get_y(g_ai_view.voice_bars[i]),
-                     UI_SCREEN_HEIGHT + 12,
-                     210,
-                     (uint32_t)(25 + i * 15),
-                     lv_anim_path_ease_in,
-                     NULL,
-                     NULL);
+        lv_anim_del(g_ai_view.voice_bars[i], anim_set_y);
     }
-    start_y_anim(g_ai_view.camera_button,
-                 lv_obj_get_y(g_ai_view.camera_button),
-                 UI_SCREEN_HEIGHT + 12,
-                 220,
-                 70,
-                 lv_anim_path_ease_in,
-                 NULL,
-                 NULL);
-    start_y_anim(g_ai_view.ask_button,
-                 lv_obj_get_y(g_ai_view.ask_button),
-                 UI_SCREEN_HEIGHT + 12,
-                 220,
-                 90,
-                 lv_anim_path_ease_in,
-                 app_exit_done_cb,
-                 ctx);
+    lv_obj_delete(root);
+    if(done_cb != NULL) {
+        done_cb(NULL);
+    }
 }

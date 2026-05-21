@@ -209,19 +209,27 @@ static int app_ai_voice_wav_parse_pcm(const uint8_t *wav,
 }
 
 /**
- * @brief 构造带 query 参数的 AI URL。
+ * @brief 构造 FastAPI 路由 URL。
  *
- * APP_BUSINESS_AI_HTTP_URL 可能已经带有 language=zh 等参数，因此这里根据
- * base URL 中是否存在 '?' 自动选择追加 '?' 或 '&'。
+ * APP_BUSINESS_HTTP_BASE_URL 只保存服务根地址，例如 http://x.x.x.x:8000。
+ * path 保存 FastAPI 路由，例如 APP_BUSINESS_HTTP_ROUTE_AI_UPLOAD；
+ * query 保存该路由的查询参数。
  */
-static int app_ai_voice_build_url(char *out, size_t out_size, const char *query)
+static int app_ai_voice_build_url(char *out, size_t out_size, const char *path, const char *query)
 {
-    if (out == NULL || out_size == 0u || query == NULL) {
+    if (out == NULL || out_size == 0u || path == NULL || query == NULL) {
         return -1;
     }
 
-    const char *sep = strchr(APP_BUSINESS_AI_HTTP_URL, '?') != NULL ? "&" : "?";
-    int written = snprintf(out, out_size, "%s%s%s", APP_BUSINESS_AI_HTTP_URL, sep, query);
+    const char *base = APP_BUSINESS_HTTP_BASE_URL;
+    size_t base_len = strlen(base);
+    const char *path_start = path;
+    while (*path_start == '/' && base_len > 0u && base[base_len - 1u] == '/') {
+        path_start++;
+    }
+
+    const char *sep = query[0] != '\0' ? "?" : "";
+    int written = snprintf(out, out_size, "%s%s%s%s", base, path_start, sep, query);
     return (written > 0 && (size_t)written < out_size) ? 0 : -2;
 }
 
@@ -329,34 +337,50 @@ static int app_ai_voice_json_is_true(const uint8_t *json, uint32_t len, const ch
     return strncmp(start, "true", 4u) == 0 ? 1 : 0;
 }
 
-/** @brief POST 一个小 JSON 请求并把响应放入 s_ai_resp_buf。 */
-static int app_ai_voice_post_json(const char *url, uint32_t *resp_len)
+/** @brief POST 一个 JSON 请求并把响应放入 s_ai_resp_buf。 */
+static int app_ai_voice_post_json_body(const char *url,
+                                       const uint8_t *json,
+                                       uint32_t json_len,
+                                       uint32_t *resp_len)
 {
-    static const uint8_t empty_json[] = "{}";
-
     return service_network_http_post(url,
                                      "application/json",
-                                     empty_json,
-                                     sizeof(empty_json) - 1u,
+                                     json,
+                                     json_len,
                                      s_ai_resp_buf,
                                      sizeof(s_ai_resp_buf) - 1u,
                                      resp_len,
                                      APP_AI_HTTP_CHUNK_TIMEOUT_MS);
 }
 
+/** @brief POST 空 JSON 请求并把响应放入 s_ai_resp_buf。 */
+static int app_ai_voice_post_json(const char *url, uint32_t *resp_len)
+{
+    static const uint8_t empty_json[] = "{}";
+
+    return app_ai_voice_post_json_body(url, empty_json, sizeof(empty_json) - 1u, resp_len);
+}
+
 /** @brief 请求服务器创建一次 AI 会话。 */
 static int app_ai_voice_start_session(char *session, size_t session_size)
 {
-    char query[96];
+    char json[96];
     char url[256];
     uint32_t resp_len = 0u;
 
-    snprintf(query, sizeof(query), "op=start&device=%s", APP_BUSINESS_DEVICE_NAME);
-    if (app_ai_voice_build_url(url, sizeof(url), query) != 0) {
+    if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_START, "") != 0) {
         return -1;
     }
 
-    int ret = app_ai_voice_post_json(url, &resp_len);
+    int written = snprintf(json,
+                           sizeof(json),
+                           "{\"device\":\"%s\",\"language\":\"zh\"}",
+                           APP_BUSINESS_DEVICE_NAME);
+    if (written <= 0 || (size_t)written >= sizeof(json)) {
+        return -2;
+    }
+
+    int ret = app_ai_voice_post_json_body(url, (const uint8_t *)json, (uint32_t)written, &resp_len);
     if (ret != 0) {
         return ret;
     }
@@ -384,12 +408,12 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
         uint32_t resp_len = 0u;
         snprintf(query,
                  sizeof(query),
-                 "op=upload&session=%s&index=%u&offset=%u&total=%u",
+                 "session=%s&index=%u&offset=%u&total=%u",
                  session,
                  (unsigned int)index,
                  (unsigned int)offset,
                  (unsigned int)wav_len);
-        if (app_ai_voice_build_url(url, sizeof(url), query) != 0) {
+        if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_UPLOAD, query) != 0) {
             return -2;
         }
 
@@ -423,8 +447,8 @@ static int app_ai_voice_finish_upload(const char *session)
     char url[256];
     uint32_t resp_len = 0u;
 
-    snprintf(query, sizeof(query), "op=finish&session=%s", session);
-    if (app_ai_voice_build_url(url, sizeof(url), query) != 0) {
+    snprintf(query, sizeof(query), "session=%s", session);
+    if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_FINISH, query) != 0) {
         return -1;
     }
 
@@ -444,8 +468,8 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
         char url[256];
         uint32_t resp_len = 0u;
 
-        snprintf(query, sizeof(query), "op=result_info&session=%s", session);
-        if (app_ai_voice_build_url(url, sizeof(url), query) != 0) {
+        snprintf(query, sizeof(query), "session=%s", session);
+        if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_RESULT_INFO, query) != 0) {
             return -2;
         }
 
@@ -488,11 +512,11 @@ static int app_ai_voice_download_result_chunks(const char *session, uint32_t tot
         static const uint8_t empty_json[] = "{}";
         snprintf(query,
                  sizeof(query),
-                 "op=result_chunk&session=%s&offset=%u&len=%u",
+                 "session=%s&offset=%u&len=%u",
                  session,
                  (unsigned int)offset,
                  (unsigned int)chunk_len);
-        if (app_ai_voice_build_url(url, sizeof(url), query) != 0) {
+        if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK, query) != 0) {
             return -2;
         }
 

@@ -3,7 +3,7 @@
  * @brief 电池电量服务实现。
  *
  * 下层 driver 只提供 ADC 分压后的电压 mV；service 负责一阶低通滤波、
- * 按锂电池放电曲线映射百分比，并做 5% 步进取整，降低 UI 抖动。
+ * 按锂电池放电曲线映射百分比，并做 5% 步进取整和显示滞回，降低 UI 抖动。
  */
 #include "service_battery.h"
 
@@ -40,9 +40,11 @@ static const service_battery_curve_point_t s_battery_curve[] = {
     {0, 1500},
 };
 
-#define SERVICE_BATTERY_FILTER_ALPHA_NUM    1
-#define SERVICE_BATTERY_FILTER_ALPHA_DEN    4
-#define SERVICE_BATTERY_PERCENT_STEP        5
+#define SERVICE_BATTERY_FILTER_ALPHA_NUM            1
+#define SERVICE_BATTERY_FILTER_ALPHA_DEN            8
+#define SERVICE_BATTERY_PERCENT_STEP                5
+#define SERVICE_BATTERY_DISPLAY_CONFIRM_COUNT       3u
+#define SERVICE_BATTERY_DISPLAY_FAST_DELTA          15
 
 /** @brief 电池服务是否已经绑定采样 ops。 */
 static uint8_t s_battery_inited = 0u;
@@ -53,14 +55,26 @@ static uint8_t s_filter_valid = 0u;
 /** @brief 一阶低通滤波后的 ADC 电压，单位 mV。 */
 static int s_filtered_adc_mv = 0;
 
+/** @brief 对外显示的稳定电量百分比。 */
+static int s_display_percent = 0;
+
+/** @brief 显示电量是否已有有效历史值。 */
+static uint8_t s_display_valid = 0u;
+
+/** @brief 待确认的新电量百分比。 */
+static int s_pending_percent = 0;
+
+/** @brief 新电量百分比连续出现次数。 */
+static uint8_t s_pending_count = 0u;
+
 /** @brief 当前绑定的电池采样 driver 能力函数表。 */
 static service_battery_sample_ops_t s_battery_ops;
 
 /**
  * @brief 对 ADC 电压做一阶低通滤波。
  *
- * 滤波公式：filtered = old * 3/4 + new * 1/4。
- * 这样可以压住 1% 精度显示时的跳动，同时保留较快的电量变化响应。
+ * 滤波公式：filtered = old * 7/8 + new * 1/8。
+ * 电量图标是低频状态，不需要跟随每秒 ADC 毛刺快速变化。
  *
  * @param[in] adc_mv 当前采样到的 ADC 电压，单位 mV。
  * @return 滤波后的 ADC 电压，单位 mV。
@@ -103,6 +117,56 @@ static int service_battery_round_percent(int percent)
     }
 
     return rounded;
+}
+
+/**
+ * @brief 对 UI 显示电量做滞回确认。
+ *
+ * 电池电压在负载变化时会回弹或下陷，单次换算出的 5% 档位仍可能来回跳。
+ * 这里要求新档位连续出现多次才更新；大幅变化则缩短确认时间。
+ *
+ * @param[in] rounded_percent 已按 5% 档位取整的电量。
+ * @return 稳定后的显示电量。
+ */
+static int service_battery_stabilize_percent(int rounded_percent)
+{
+    if (s_display_valid == 0u) {
+        s_display_percent = rounded_percent;
+        s_pending_percent = rounded_percent;
+        s_pending_count = 0u;
+        s_display_valid = 1u;
+        return s_display_percent;
+    }
+
+    if (rounded_percent == s_display_percent) {
+        s_pending_percent = rounded_percent;
+        s_pending_count = 0u;
+        return s_display_percent;
+    }
+
+    if (rounded_percent != s_pending_percent) {
+        s_pending_percent = rounded_percent;
+        s_pending_count = 1u;
+    } else if (s_pending_count < 255u) {
+        s_pending_count++;
+    }
+
+    int delta = rounded_percent - s_display_percent;
+    if (delta < 0) {
+        delta = -delta;
+    }
+
+    uint8_t confirm_count = SERVICE_BATTERY_DISPLAY_CONFIRM_COUNT;
+    if (delta >= SERVICE_BATTERY_DISPLAY_FAST_DELTA) {
+        confirm_count = 2u;
+    }
+
+    if (s_pending_count >= confirm_count) {
+        s_display_percent = rounded_percent;
+        s_pending_count = 0u;
+    }
+
+    return s_display_percent;
 }
 
 /**
@@ -197,6 +261,10 @@ int service_battery_deinit(void)
     s_battery_inited = 0u;
     s_filter_valid = 0u;
     s_filtered_adc_mv = 0;
+    s_display_percent = 0;
+    s_display_valid = 0u;
+    s_pending_percent = 0;
+    s_pending_count = 0u;
     s_battery_ops = (service_battery_sample_ops_t){0};
     return 0;
 }
@@ -242,9 +310,10 @@ int service_battery_get_status(int *voltage_mv, int *percent)
 
     int filtered_mv = service_battery_filter_voltage(adc_mv);
     int raw_percent = service_battery_voltage_to_percent(filtered_mv);
+    int rounded_percent = service_battery_round_percent(raw_percent);
 
-    /* 对外返回滤波后的电压和已取整的百分比，保证同一次采样数据一致。 */
+    /* 对外返回滤波后的电压和经过显示滞回的百分比，保证 UI 不随 ADC 毛刺跳动。 */
     *voltage_mv = filtered_mv;
-    *percent = service_battery_round_percent(raw_percent);
+    *percent = service_battery_stabilize_percent(rounded_percent);
     return 0;
 }

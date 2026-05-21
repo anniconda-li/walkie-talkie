@@ -35,11 +35,8 @@ typedef enum {
     UI_TEXT_AI_IMAGE_UPLOAD_FAILED, /**< 图片上传失败提示。 */
     UI_TEXT_AI_QUESTION_FAILED,     /**< AI 提问失败提示。 */
     UI_TEXT_AI_REPLY_FAILED,        /**< AI 回复接收失败提示。 */
-    UI_TEXT_SETTINGS_BRIGHTNESS,    /**< 亮度文本。 */
     UI_TEXT_SETTINGS_VOLUME,        /**< 音量文本。 */
-    UI_TEXT_SETTINGS_SERVER,        /**< 服务器文本。 */
-    UI_TEXT_SETTINGS_IP,            /**< IP 文本。 */
-    UI_TEXT_SETTINGS_PORT,          /**< 端口文本。 */
+    UI_TEXT_SETTINGS_FIRMWARE,      /**< 固件版本文本。 */
     UI_TEXT_COUNT                   /**< 文本 ID 数量。 */
 } ui_text_id_t;
 

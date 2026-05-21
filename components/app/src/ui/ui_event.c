@@ -16,9 +16,10 @@
  * - 对讲：频道切换（+/- 按钮）、PTT 按下/松开（长按/释放）
  * - 相机：拍照、上传、重拍
  * - AI：提问开始/停止（长按/释放）
- * - 设置：亮度/音量滑块变化
+ * - 设置：音量滑块变化
  */
 #include "ui_event.h"
+#include "ui_assets.h"
 #include "ui_i18n.h"
 #include "ui_shell.h"
 #include "ui_theme.h"
@@ -275,7 +276,7 @@ static void camera_capture_event_cb(lv_event_t *e)
 
     if(view->frozen) {
         view->frozen = false;
-        lv_label_set_text(view->capture_label, ui_i18n_text(UI_TEXT_CAMERA_CAPTURE));
+        lv_image_set_src(view->capture_icon, &icon_camera_capture);
         lv_obj_add_state(view->upload_button, LV_STATE_DISABLED);
 
         if(g_callbacks.camera_retake_requested != NULL) {
@@ -284,7 +285,7 @@ static void camera_capture_event_cb(lv_event_t *e)
     }
     else {
         view->frozen = true;
-        lv_label_set_text(view->capture_label, ui_i18n_text(UI_TEXT_CAMERA_RETAKE));
+        lv_image_set_src(view->capture_icon, &icon_camera_retake);
         lv_obj_remove_state(view->upload_button, LV_STATE_DISABLED);
 
         if(g_callbacks.camera_capture_requested != NULL) {
@@ -347,7 +348,7 @@ static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
 
     view->speaking = speaking;
     lv_obj_set_style_bg_color(view->ask_button,
-                              speaking ? UI_COLOR_AI : lv_color_make(0x36, 0x36, 0x36),
+                              speaking ? lv_color_make(0x1C, 0x4A, 0x54) : lv_color_make(0x36, 0x36, 0x36),
                               0);
     for(int32_t i = 0; i < 4; i++) {
         lv_obj_t *bar = view->voice_bars[i];
@@ -452,11 +453,7 @@ static void ai_camera_event_cb(lv_event_t *e)
  * ========================================================================== */
 
 /**
- * @brief 滑块事件：亮度或音量滑块值变化。
- *
- * 通过 user_data 区分亮度和音量滑块：
- * - user_data == brightness_slider → 调亮度
- * - user_data != brightness_slider → 调音量
+ * @brief 音量滑块事件。
  */
 static void settings_slider_event_cb(lv_event_t *e)
 {
@@ -468,12 +465,7 @@ static void settings_slider_event_cb(lv_event_t *e)
     }
 
     value = lv_slider_get_value(slider);
-    if(slider == lv_event_get_user_data(e)) {
-        if(g_callbacks.settings_brightness_changed != NULL) {
-            g_callbacks.settings_brightness_changed(value);
-        }
-    }
-    else if(g_callbacks.settings_volume_changed != NULL) {
+    if(g_callbacks.settings_volume_changed != NULL) {
         g_callbacks.settings_volume_changed(value);
     }
 }
@@ -613,6 +605,7 @@ void ui_event_register_settings(ui_settings_view_t *view)
         return;
     }
 
-    lv_obj_add_event_cb(view->brightness_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, view->brightness_slider);
-    lv_obj_add_event_cb(view->volume_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, view->brightness_slider);
+    if(view->volume_slider != NULL) {
+        lv_obj_add_event_cb(view->volume_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    }
 }
