@@ -7,6 +7,7 @@
 #ifndef BSP_CONFIG_H
 #define BSP_CONFIG_H
 
+#include "driver/uart.h"
 #include "hal/gpio_types.h"
 #include "osal_log.h"
 
@@ -79,6 +80,15 @@
 #define BSP_AUDIO_MAX98357A_WS_IO   GPIO_NUM_38 /**< MAX98357A LRC/WS。 */
 
 /**
+ * @brief ML307C/UART1 串口引脚和波特率定义。
+ */
+#define BSP_UART_TX_IO      GPIO_NUM_20        /**< ESP TX -> ML307C RX。 */
+#define BSP_UART_RX_IO      GPIO_NUM_21        /**< ESP RX <- ML307C TX。 */
+#define BSP_UART_RTS_IO     UART_PIN_NO_CHANGE /**< 未使用硬件流控。 */
+#define BSP_UART_CTS_IO     UART_PIN_NO_CHANGE /**< 未使用硬件流控。 */
+#define BSP_UART_BAUD_RATE  115200             /**< ML307C AT 串口波特率。 */
+
+/**
  * @brief ST7789 LCD SPI 引脚定义。
  */
 #define BSP_LCD_SCK_IO   GPIO_NUM_12 /**< SPI SCK。 */
@@ -115,18 +125,18 @@
  */
 #define BSP_CAMERA_SIOD_IO  BSP_I2C_SDA_IO /**< SCCB/I2C 数据线，复用项目 I2C SDA。 */
 #define BSP_CAMERA_SIOC_IO  BSP_I2C_SCL_IO /**< SCCB/I2C 时钟线，复用项目 I2C SCL。 */
-#define BSP_CAMERA_VSYNC_IO GPIO_NUM_4  /**< 场同步。 */
-#define BSP_CAMERA_HREF_IO  GPIO_NUM_5  /**< 行同步。 */
-#define BSP_CAMERA_PCLK_IO  GPIO_NUM_16 /**< 像素时钟。 */
-#define BSP_CAMERA_D0_IO    GPIO_NUM_39 /**< 数据 D0。 */
-#define BSP_CAMERA_D1_IO    GPIO_NUM_40 /**< 数据 D1。 */
-#define BSP_CAMERA_D2_IO    GPIO_NUM_42 /**< 数据 D2。 */
-#define BSP_CAMERA_D3_IO    GPIO_NUM_41 /**< 数据 D3。 */
-#define BSP_CAMERA_D4_IO    GPIO_NUM_17 /**< 数据 D4。 */
-#define BSP_CAMERA_D5_IO    GPIO_NUM_15 /**< 数据 D5。 */
-#define BSP_CAMERA_D6_IO    GPIO_NUM_7  /**< 数据 D6。 */
-#define BSP_CAMERA_D7_IO    GPIO_NUM_6  /**< 数据 D7。 */
-#define BSP_CAMERA_PWDN_IO  GPIO_NUM_NC /**< 电源关断未接。 */
+#define BSP_CAMERA_VSYNC_IO GPIO_NUM_46  /**< 场同步。 */
+#define BSP_CAMERA_HREF_IO  GPIO_NUM_41  /**< 行同步。 */
+#define BSP_CAMERA_PCLK_IO  GPIO_NUM_45 /**< 像素时钟。 */
+#define BSP_CAMERA_D0_IO    GPIO_NUM_3  /**< 数据 D0。 */
+#define BSP_CAMERA_D1_IO    GPIO_NUM_47 /**< 数据 D1。 */
+#define BSP_CAMERA_D2_IO    GPIO_NUM_48 /**< 数据 D2。 */
+#define BSP_CAMERA_D3_IO    GPIO_NUM_4 /**< 数据 D3。 */
+#define BSP_CAMERA_D4_IO    GPIO_NUM_0  /**< 数据 D4。 */
+#define BSP_CAMERA_D5_IO    GPIO_NUM_38 /**< 数据 D5。 */
+#define BSP_CAMERA_D6_IO    GPIO_NUM_39  /**< 数据 D6。 */
+#define BSP_CAMERA_D7_IO    GPIO_NUM_40  /**< 数据 D7。 */
+#define BSP_CAMERA_PWDN_IO  GPIO_NUM_42 /**< 摄像头普通 GPIO 开关/PWDN，低电平启用，高电平关断。 */
 #define BSP_CAMERA_RESET_IO GPIO_NUM_NC /**< 复位脚未接。 */
 #define BSP_CAMERA_XCLK_IO  GPIO_NUM_NC /**< XCLK 未接。 */
 

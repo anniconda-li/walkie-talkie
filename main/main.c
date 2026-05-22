@@ -11,8 +11,10 @@
 #include "osal_log.h"
 #include "osal_task.h"
 #include "service_init.h"
+#include "service_network.h"
 #include "service_screen.h"
 #include "ui_splash.h"
+#include <stdlib.h>
 
 /**
  * @brief 应用日志标签。
@@ -20,6 +22,57 @@
 static const char *TAG = "walkie_app";
 
 static int s_boot_ui_visible = 0;
+
+static const char *network_reg_desc(int reg_state)
+{
+    switch (reg_state) {
+    case 0:
+        return "未注册";
+    case 1:
+        return "已注册";
+    case 2:
+        return "正在搜索";
+    case 3:
+        return "注册被拒";
+    case 4:
+        return "未知";
+    case 5:
+        return "漫游注册";
+    default:
+        return "查询失败";
+    }
+}
+
+static const char *network_link_desc(int link_state)
+{
+    if (link_state == 1) {
+        return "已连接";
+    }
+    if (link_state == 0) {
+        return "未连接";
+    }
+    return "查询失败";
+}
+
+static const char *network_not_ready_reason(const service_network_status_t *status)
+{
+    if (status == NULL) {
+        return "状态为空";
+    }
+    if (status->at_ready != 1) {
+        return "AT 通信失败";
+    }
+    if (status->sim_ready != 1) {
+        return "SIM/ICCID 未就绪";
+    }
+    if (status->reg_state != 1 && status->reg_state != 5) {
+        return "蜂窝网络未注册";
+    }
+    if (status->link_state != 1) {
+        return "数据链路未连接";
+    }
+    return "未知";
+}
 
 static void boot_refresh_ui(void)
 {
@@ -58,6 +111,86 @@ static void boot_fatal(app_boot_stage_t stage, int code)
 
 void app_main(void)
 {
+    OSAL_LOGI(TAG, "开始临时 4G/ML307C 测试启动");
+
+    int ret = bsp_init();
+
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "4G 测试失败: BSP 初始化失败, ret=%d", ret);
+        while (1) {
+            osal_delay_ms(1000u);
+        }
+    }
+
+    ret = driver_network_init();
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "4G 测试失败: ML307C driver 初始化失败, ret=%d", ret);
+        while (1) {
+            osal_delay_ms(1000u);
+        }
+    }
+
+    ret = service_init_network();
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "4G 测试失败: network service 初始化失败, ret=%d", ret);
+        while (1) {
+            osal_delay_ms(1000u);
+        }
+    }
+
+    OSAL_LOGI(TAG, "4G 测试初始化完成，开始周期打印网络状态");
+
+    service_network_status_t last_status = {
+        .rssi = -999,
+        .reg_state = -999,
+        .link_state = -999,
+        .sim_ready = -999,
+        .at_ready = -999,
+    };
+    int last_ready = -999;
+    uint32_t loop_count = 0u;
+
+    while (1) {
+        service_network_status_t status = {0};
+        int status_ret = service_network_get_status(&status);
+        int ready = status.at_ready == 1 &&
+                    status.sim_ready == 1 &&
+                    (status.reg_state == 1 || status.reg_state == 5) &&
+                    status.link_state == 1;
+
+        if (status_ret == 0) {
+            int changed = ready != last_ready ||
+                          status.at_ready != last_status.at_ready ||
+                          status.sim_ready != last_status.sim_ready ||
+                          status.reg_state != last_status.reg_state ||
+                          status.link_state != last_status.link_state ||
+                          status.rssi != last_status.rssi;
+
+            if (changed || (loop_count % 4u) == 0u) {
+                OSAL_LOGI(TAG,
+                          "4G 状态: %s, 原因=%s, AT=%s, SIM=%s, 注册=%s(%d), 链路=%s(%d), RSSI=%d",
+                          ready == 1 ? "可用" : "不可用",
+                          ready == 1 ? "正常" : network_not_ready_reason(&status),
+                          status.at_ready == 1 ? "正常" : "失败",
+                          status.sim_ready == 1 ? "正常" : "失败",
+                          network_reg_desc(status.reg_state),
+                          status.reg_state,
+                          network_link_desc(status.link_state),
+                          status.link_state,
+                          status.rssi);
+
+                last_status = status;
+                last_ready = ready;
+            }
+        } else {
+            OSAL_LOGW(TAG, "4G 状态读取失败, ret=%d, ready=%d", status_ret, ready);
+        }
+
+        loop_count++;
+        osal_delay_ms(5000u);
+    }
+
+#if 0
     OSAL_LOGI(TAG, "开始启动业务应用");
 
     app_boot_status_reset();
@@ -165,4 +298,5 @@ void app_main(void)
     while (1) {
         osal_delay_ms(1000u);
     }
+#endif
 }

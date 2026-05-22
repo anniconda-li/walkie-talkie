@@ -35,6 +35,7 @@ static const char *TAG = "driver_ml307c";
 #define ML307C_HTTP_TASK_ID         1u
 #define ML307C_HTTP_ROUTE           "6[1]"
 #define DRIVER_ML307C_LOCK_TIMEOUT_MS 5000u
+#define ML307C_TIMEOUT_SNIPPET_LEN  160u
 
 typedef struct {
     int (*uart_write)(uint8_t *data, uint16_t len);
@@ -66,6 +67,10 @@ static uint8_t s_ml307c_tcp_connected = 0u;
 static uint8_t s_ml307c_udp_connected = 0u;
 
 static void ml307c_log_response(const char *title, const char *resp);
+static void ml307c_log_timeout_summary(const char *cmd,
+                                       const char *expect,
+                                       const uint8_t *data,
+                                       uint16_t len);
 static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value);
 static struct ml307c_dev * ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf);
 static void ml307c_deinit(struct ml307c_dev * dev);
@@ -179,6 +184,7 @@ static int ml307c_append_response(struct ml307c_dev * dev, const uint8_t *data, 
 }
 
 static int ml307c_wait_response(struct ml307c_dev * dev,
+                                const char *cmd,
                                 const char *expect,
                                 uint32_t timeout_ms,
                                 char *out,
@@ -222,8 +228,7 @@ static int ml307c_wait_response(struct ml307c_dev * dev,
         snprintf(out, out_size, "%s", (const char *)dev->rx_rb.buf);
     }
 
-    DRIVER_LOGW(TAG, "ML307C 等待响应超时, expect=%s",
-             (expect != NULL && expect[0] != '\0') ? expect : ML307C_OK);
+    ml307c_log_timeout_summary(cmd != NULL ? cmd : "raw data", expect, dev->rx_rb.buf, dev->rx_rb.head);
     return -3;
 }
 
@@ -250,9 +255,8 @@ static int ml307c_send_cmd_capture(struct ml307c_dev * dev,
         return -2;
     }
 
-    DRIVER_LOGI(TAG, "ML307C 发送命令: %s", cmd);
-
     return ml307c_wait_response(dev,
+                                cmd,
                                 expect != NULL ? expect : ML307C_OK,
                                 timeout_ms,
                                 out,
@@ -285,6 +289,70 @@ static void ml307c_log_response(const char *title, const char *resp)
 
     line[pos] = '\0';
     DRIVER_LOGI(TAG, "%s: %s", title, line);
+}
+
+static void ml307c_log_timeout_summary(const char *cmd,
+                                       const char *expect,
+                                       const uint8_t *data,
+                                       uint16_t len)
+{
+    const char *cmd_text = (cmd != NULL && cmd[0] != '\0') ? cmd : "unknown";
+    const char *expect_text = (expect != NULL && expect[0] != '\0') ? expect : ML307C_OK;
+    char clean_cmd[64];
+    uint16_t cmd_pos = 0;
+    for (uint16_t i = 0; cmd_text[i] != '\0' && cmd_pos < (sizeof(clean_cmd) - 1u); i++) {
+        char ch = cmd_text[i];
+        if (ch == '\r' || ch == '\n') {
+            break;
+        }
+        clean_cmd[cmd_pos++] = ch;
+    }
+    clean_cmd[cmd_pos] = '\0';
+
+    if (data == NULL || len == 0u) {
+        DRIVER_LOGW(TAG,
+                    "ML307C AT 超时: cmd=\"%s\", expect=\"%s\", 未收到任何字节。可能原因: 模块未上电/未开机、TX/RX 未交叉、引脚配置错误、波特率不匹配。",
+                    clean_cmd,
+                    expect_text);
+        return;
+    }
+
+    char snippet[ML307C_TIMEOUT_SNIPPET_LEN + 1u];
+    uint16_t copy_len = len;
+    if (copy_len > ML307C_TIMEOUT_SNIPPET_LEN) {
+        copy_len = ML307C_TIMEOUT_SNIPPET_LEN;
+    }
+
+    uint16_t pos = 0;
+    for (uint16_t i = 0; i < copy_len && pos < ML307C_TIMEOUT_SNIPPET_LEN; i++) {
+        char ch = (char)data[i];
+        if (ch == '\r') {
+            continue;
+        }
+        if (ch == '\n') {
+            ch = '|';
+        } else if (!isprint((unsigned char)ch)) {
+            ch = '.';
+        }
+        snippet[pos++] = ch;
+    }
+    snippet[pos] = '\0';
+
+    const char *reason = "收到数据但没有目标响应，可能是模块未进入 AT 模式、命令不被支持、响应格式和驱动预期不一致。";
+    if (strstr(snippet, "I (") != NULL ||
+        strstr(snippet, "bsp_") != NULL ||
+        strstr(snippet, "driver_") != NULL ||
+        strstr(snippet, "walkie_app") != NULL) {
+        reason = "串口收到的是 ESP 自己的日志，不是 ML307C 回包；优先检查 UART 引脚是否接到了日志串口、TX/RX 是否接反或引脚配置是否和硬件一致。";
+    }
+
+    DRIVER_LOGW(TAG,
+                "ML307C AT 超时: cmd=\"%s\", expect=\"%s\", 已收到 %u 字节，摘要=\"%s\"。可能原因: %s",
+                clean_cmd,
+                expect_text,
+                (unsigned int)len,
+                snippet,
+                reason);
 }
 
 static int ml307c_wait_alive(struct ml307c_dev * dev, uint32_t timeout_ms)
@@ -734,6 +802,7 @@ static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t
 
     char resp[ML307C_LINE_MAX_LEN];
     int ret = ml307c_wait_response(dev,
+                                   "AT+SENDR",
                                    "+SENDR",
                                    ml307c_get_timeout(dev),
                                    resp,
@@ -1068,9 +1137,19 @@ int driver_ml307c_init(const driver_ml307c_bsp_ops_t *ops, const ml307c_config_t
         return ret;
     }
 
+    DRIVER_LOGI(TAG, "ML307C 初始化步骤 1/2: 检测 AT 通信");
     ret = ml307c_check_alive(s_ml307c);
     if (ret == 0) {
+        DRIVER_LOGI(TAG, "ML307C 初始化步骤 1/2: AT 通信正常");
+        DRIVER_LOGI(TAG, "ML307C 初始化步骤 2/2: 检测 SIM 卡 ICCID");
         ret = ml307c_check_sim(s_ml307c);
+        if (ret == 0) {
+            DRIVER_LOGI(TAG, "ML307C 初始化步骤 2/2: SIM 卡正常");
+        } else {
+            DRIVER_LOGE(TAG, "ML307C 初始化失败: SIM 卡 ICCID 读取失败, ret=%d", ret);
+        }
+    } else {
+        DRIVER_LOGE(TAG, "ML307C 初始化失败: AT 通信无有效响应, ret=%d", ret);
     }
     driver_ml307c_unlock();
 

@@ -22,7 +22,7 @@
 
 static const char *TAG = "driver_init";
 
-#define DRIVER_INIT_ML307C_TIMEOUT_MS 5000u
+#define DRIVER_INIT_ML307C_TIMEOUT_MS 100000u
 #define DRIVER_INIT_ML307C_SOCKET_ID  1u
 
 int driver_network_init(void)

@@ -6,7 +6,7 @@
 
 #include "driver_config.h"
 #include "bsp_i2c.h"
-#include "driver_pca9557.h"
+#include "driver/gpio.h"
 
 #include <stdint.h>
 
@@ -47,6 +47,49 @@ static int driver_camera_err_to_int(int ret)
 }
 
 /**
+ * @brief 设置普通 GPIO 摄像头 PWDN/开关脚。
+ *
+ * 当前硬件已把摄像头开关从 PCA9557 迁移到 ESP32 普通 GPIO。PWDN 低电平
+ * 表示退出关断/上电，高电平表示关断。
+ */
+static int driver_camera_set_pwdn_level(int level)
+{
+    if ((int)driver_camera_PWDN_IO < 0) {
+        return 0;
+    }
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << (uint32_t)driver_camera_PWDN_IO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    int ret = driver_camera_err_to_int(gpio_config(&io_conf));
+    if (ret != 0) {
+        DRIVER_LOGE(TAG, "摄像头 PWDN GPIO 配置失败, io=%d, ret=%d",
+                    (int)driver_camera_PWDN_IO,
+                    ret);
+        return ret;
+    }
+
+    ret = driver_camera_err_to_int(gpio_set_level(driver_camera_PWDN_IO, level));
+    if (ret != 0) {
+        DRIVER_LOGE(TAG, "摄像头 PWDN GPIO 设置失败, io=%d, level=%d, ret=%d",
+                    (int)driver_camera_PWDN_IO,
+                    level,
+                    ret);
+        return ret;
+    }
+
+    DRIVER_LOGI(TAG, "摄像头 PWDN GPIO 已设置, io=%d, level=%d",
+                (int)driver_camera_PWDN_IO,
+                level);
+    return 0;
+}
+
+/**
  * @brief 打印当前 esp-camera 自动识别到的传感器信息。
  *
  * 当前驱动不再绑定固定传感器型号，OV2640/OV5640 都交给 esp-camera
@@ -84,8 +127,9 @@ static int driver_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
         return -1;
     }
 
-    if (driver_pca9557_is_initialized() != 0) {
-        (void)driver_pca9557_set_camera_pwdn(PCA9557_LEVEL_LOW);
+    int ret = driver_camera_set_pwdn_level(0);
+    if (ret != 0) {
+        return ret;
     }
 
     camera_config_t camera_config = {
@@ -122,7 +166,7 @@ static int driver_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
         .sccb_i2c_port = BSP_I2C_PORT,
     };
 
-    int ret = driver_camera_err_to_int(esp_camera_init(&camera_config));
+    ret = driver_camera_err_to_int(esp_camera_init(&camera_config));
     if (ret != 0) {
         DRIVER_LOGE(TAG, "摄像头初始化失败, ret=%d, pixformat=%d, frame_size=%d",
                     ret,
@@ -181,9 +225,7 @@ int driver_camera_deinit(void)
 {
     int ret = driver_camera_err_to_int(esp_camera_deinit());
     if (ret == 0) {
-        if (driver_pca9557_is_initialized() != 0) {
-            (void)driver_pca9557_set_camera_pwdn(PCA9557_LEVEL_HIGH);
-        }
+        (void)driver_camera_set_pwdn_level(1);
         DRIVER_LOGI(TAG, "摄像头驱动释放成功");
     } else {
         DRIVER_LOGE(TAG, "摄像头驱动释放失败, ret=%d", ret);

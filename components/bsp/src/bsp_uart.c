@@ -37,7 +37,7 @@ int bsp_uart_init(void)
     }
 
     uart_config_t uart_config = {
-        .baud_rate = 115200,
+        .baud_rate = BSP_UART_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -45,14 +45,18 @@ int bsp_uart_init(void)
     };
 
     ESP_ERROR_CHECK(uart_param_config(BSP_UART_PORT, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(BSP_UART_PORT, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_set_pin(BSP_UART_PORT,
+                                 BSP_UART_TX_IO,
+                                 BSP_UART_RX_IO,
+                                 BSP_UART_RTS_IO,
+                                 BSP_UART_CTS_IO));
 
     uart_queue = osal_queue_create(10, sizeof(uint8_t));
     ESP_ERROR_CHECK(uart_driver_install(BSP_UART_PORT, 1024, 1024, 10,
                                        (QueueHandle_t *)uart_queue, 0));
 
     s_uart_inited = 1;
-    BSP_LOGI(TAG, "UART 初始化成功, port=%d, baud=%d", BSP_UART_PORT, 115200);
+    BSP_LOGI(TAG, "UART 初始化成功, port=%d, baud=%d", BSP_UART_PORT, BSP_UART_BAUD_RATE);
     return 0;
 }
 
@@ -66,10 +70,7 @@ int bsp_uart_init(void)
 int bsp_uart_write(uint8_t *data, uint16_t len)
 {
     int ret = uart_write_bytes(BSP_UART_PORT, (const char *)data, len);
-    if (ret >= 0) {
-        BSP_LOGI(TAG, "UART 发送完成, request=%u, written=%d",
-                 (unsigned int)len, ret);
-    } else {
+    if (ret < 0) {
         BSP_LOGE(TAG, "UART 发送失败, ret=%d", ret);
     }
 
@@ -88,8 +89,6 @@ int bsp_uart_read(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     int read_len = uart_read_bytes(BSP_UART_PORT, buf, len, pdMS_TO_TICKS(timeout_ms));
     if (read_len >= 0) {
-        BSP_LOGI(TAG, "UART 接收完成, request=%u, read=%d",
-                 (unsigned int)len, read_len);
         return read_len;
     }
 

@@ -17,29 +17,29 @@ static const char *TAG = "bsp";
 
 int bsp_init(void)
 {
-    int ret = bsp_i2c_init();
-    if (ret != 0) {
-        BSP_LOGE(TAG, "BSP 初始化失败: I2C 初始化失败, ret=%d", ret);
-        return ret;
-    }
+    // int ret = bsp_i2c_init();
+    // if (ret != 0) {
+    //     BSP_LOGE(TAG, "BSP 初始化失败: I2C 初始化失败, ret=%d", ret);
+    //     return ret;
+    // }
 
-    ret = bsp_spi_init();
-    if (ret != 0) {
-        BSP_LOGE(TAG, "BSP 初始化失败: SPI 初始化失败, ret=%d", ret);
-        return ret;
-    }
+    // //ret = bsp_spi_init();
+    // if (ret != 0) {
+    //     BSP_LOGE(TAG, "BSP 初始化失败: SPI 初始化失败, ret=%d", ret);
+    //     return ret;
+    // }
 
-    ret = bsp_uart_init();
+    int ret = bsp_uart_init();
     if (ret != 0) {
         BSP_LOGE(TAG, "BSP 初始化失败: UART 初始化失败, ret=%d", ret);
         return ret;
     }
 
-    ret = bsp_i2s_init();
-    if (ret != 0) {
-        BSP_LOGE(TAG, "BSP 初始化失败: I2S 初始化失败, ret=%d", ret);
-        return ret;
-    }
+    //ret = bsp_i2s_init();
+    // if (ret != 0) {
+    //     BSP_LOGE(TAG, "BSP 初始化失败: I2S 初始化失败, ret=%d", ret);
+    //     return ret;
+    // }
 
     BSP_LOGI(TAG, "BSP 基础资源初始化完成");
     return 0;
