@@ -47,6 +47,96 @@ static int driver_camera_err_to_int(int ret)
 }
 
 /**
+ * @brief 调整 sensor 默认画面参数。
+ *
+ * 只在 RGB565 预览模式做轻量调校，改善默认画面偏白、偏灰的问题。不同
+ * sensor 对取值范围和支持项的实现可能不同，因此这里按 best-effort 调用。
+ */
+static void driver_camera_apply_preview_tuning(pixformat_t pixformat)
+{
+    if (pixformat != PIXFORMAT_RGB565) {
+        return;
+    }
+
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor == NULL) {
+        DRIVER_LOGW(TAG, "摄像头预览参数调校跳过: sensor 不可用");
+        return;
+    }
+
+    int ret = 0;
+    if (sensor->set_special_effect != NULL) {
+        ret = sensor->set_special_effect(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头特效关闭失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_whitebal != NULL) {
+        ret = sensor->set_whitebal(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动白平衡设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_awb_gain != NULL) {
+        ret = sensor->set_awb_gain(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头 AWB gain 设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_wb_mode != NULL) {
+        ret = sensor->set_wb_mode(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头白平衡模式设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_gain_ctrl != NULL) {
+        ret = sensor->set_gain_ctrl(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动增益设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_exposure_ctrl != NULL) {
+        ret = sensor->set_exposure_ctrl(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动曝光设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_aec2 != NULL) {
+        ret = sensor->set_aec2(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头 AEC2 设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_saturation != NULL) {
+        ret = sensor->set_saturation(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头饱和度设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_contrast != NULL) {
+        ret = sensor->set_contrast(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头对比度设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_brightness != NULL) {
+        ret = sensor->set_brightness(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头亮度设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_ae_level != NULL) {
+        ret = sensor->set_ae_level(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动曝光等级设置失败, ret=%d", ret);
+        }
+    }
+
+    DRIVER_LOGI(TAG,
+                "摄像头预览参数已调校: awb=on, agc=on, aec=on, wb=auto, effect=none, saturation=1, contrast=1");
+}
+
+/**
  * @brief 打印当前 esp-camera 自动识别到的传感器信息。
  *
  * 当前驱动不再绑定固定传感器型号，OV2640/OV5640 都交给 esp-camera
@@ -134,6 +224,7 @@ static int driver_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
     s_camera_pixformat = pixformat;
     s_camera_framesize = framesize;
     s_camera_inited = 1u;
+    driver_camera_apply_preview_tuning(pixformat);
     driver_camera_log_sensor_info();
     DRIVER_LOGI(TAG, "摄像头初始化成功, frame_size=%d, pixel_format=%d",
                 (int)framesize,

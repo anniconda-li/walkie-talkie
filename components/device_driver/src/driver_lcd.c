@@ -43,12 +43,29 @@ static const char *TAG = "driver_lcd";
 #define DRIVER_LCD_CMD_RAMWR 0x2C
 
 /**
+ * @brief 摄像头预览整帧 polling RAMWR 开关。
+ *
+ * 当前 esp_lcd_panel_io_tx_param() 不能发送完整预览帧，默认关闭，走小块
+ * polling RAMWR，避免每帧触发 SPI 单次长度限制。
+ */
+#ifndef DRIVER_LCD_PREVIEW_DIRECT_RAMWR
+#define DRIVER_LCD_PREVIEW_DIRECT_RAMWR 0
+#endif
+
+/**
  * @brief 摄像头预览直绘 DMA 中转缓冲行数。
  *
- * camera frame 在 PSRAM，SPI LCD IO 在当前配置下不能直接拿 PSRAM 指针排队。
- * 每块发送完成后会同步等待，因此这里只需要一块内部 DMA buffer。
+ * camera frame 在 PSRAM，分块拷贝到内部 DMA buffer 后用 polling RAMWR 发屏。
  */
 #define DRIVER_LCD_DMA_BOUNCE_LINES 8u
+
+/**
+ * @brief 直刷 RGB565 数据发送前交换字节。
+ *
+ * 摄像头 RGB565 帧当前已经匹配 LCD 直刷字节序，保持关闭。LVGL 自身的
+ * swap_bytes 配置只适用于 LVGL draw buffer，不套用到 camera frame。
+ */
+#define DRIVER_LCD_PREVIEW_SWAP_RGB565_BYTES 0
 
 /**
  * @brief LCD 显示面板 IO 句柄。
@@ -76,7 +93,18 @@ static uint8_t *s_lcd_dma_bounce_buf = NULL;
 /** @brief 内部 DMA 中转缓冲大小。 */
 static size_t s_lcd_dma_bounce_size = 0u;
 
+#if DRIVER_LCD_PREVIEW_DIRECT_RAMWR
+/** @brief 整帧 polling RAMWR 是否仍可尝试。 */
+static uint8_t s_lcd_direct_ramwr_available = 1u;
+#endif
+
 static int driver_lcd_err_to_int(int ret);
+static int driver_lcd_draw_bitmap_bounced(int x_start,
+                                          int y_start,
+                                          int x_end,
+                                          int y_end,
+                                          const void *color_data);
+static void driver_lcd_copy_rgb565_for_panel(uint8_t *dst, const uint8_t *src, size_t bytes);
 
 /**
  * @brief 生成 ST7789 地址参数。
@@ -131,6 +159,18 @@ static int driver_lcd_ensure_dma_bounce(size_t min_bytes)
 static int driver_lcd_err_to_int(int ret)
 {
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
+}
+
+static void driver_lcd_copy_rgb565_for_panel(uint8_t *dst, const uint8_t *src, size_t bytes)
+{
+#if DRIVER_LCD_PREVIEW_SWAP_RGB565_BYTES
+    for (size_t i = 0u; i + 1u < bytes; i += 2u) {
+        dst[i] = src[i + 1u];
+        dst[i + 1u] = src[i];
+    }
+#else
+    memcpy(dst, src, bytes);
+#endif
 }
 
 int driver_lcd_display_init(void)
@@ -411,6 +451,63 @@ int driver_lcd_draw_bitmap(int x_start,
         return -1;
     }
 
+#if DRIVER_LCD_PREVIEW_DIRECT_RAMWR
+    if (s_lcd_direct_ramwr_available == 0u) {
+        return driver_lcd_draw_bitmap_bounced(x_start, y_start, x_end, y_end, color_data);
+    }
+
+    uint8_t x_param[4];
+    uint8_t y_param[4];
+    driver_lcd_make_addr_param(x_param, x_start, x_end);
+    driver_lcd_make_addr_param(y_param, y_start, y_end);
+
+    /*
+     * 使用 polling tx_param 直接写完整 RAMWR 数据。这样既避开 LVGL 的
+     * on_color_trans_done 回调，又避免把预览帧拆成多条横带发送。
+     */
+    int ret = driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                              DRIVER_LCD_CMD_CASET,
+                                                              x_param,
+                                                              sizeof(x_param)));
+    if (ret == 0) {
+        ret = driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                              DRIVER_LCD_CMD_RASET,
+                                                              y_param,
+                                                              sizeof(y_param)));
+    }
+    if (ret == 0) {
+        const size_t draw_bytes = (size_t)(x_end - x_start) *
+                                  (size_t)(y_end - y_start) *
+                                  sizeof(uint16_t);
+        ret = driver_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_panel_io,
+                                                              DRIVER_LCD_CMD_RAMWR,
+                                                              color_data,
+                                                              draw_bytes));
+    }
+    if (ret == 0) {
+        return 0;
+    }
+
+    DRIVER_LOGW(TAG,
+                "LCD 整帧 RAMWR 不可用，后续直接使用分块发送, ret=%d, area=(%d,%d)-(%d,%d)",
+                ret,
+                x_start,
+                y_start,
+                x_end,
+                y_end);
+    s_lcd_direct_ramwr_available = 0u;
+    return driver_lcd_draw_bitmap_bounced(x_start, y_start, x_end, y_end, color_data);
+#else
+    return driver_lcd_draw_bitmap_bounced(x_start, y_start, x_end, y_end, color_data);
+#endif
+}
+
+static int driver_lcd_draw_bitmap_bounced(int x_start,
+                                          int y_start,
+                                          int x_end,
+                                          int y_end,
+                                          const void *color_data)
+{
     const int width = x_end - x_start;
     const int height = y_end - y_start;
     const size_t line_bytes = (size_t)width * sizeof(uint16_t);
@@ -428,9 +525,8 @@ int driver_lcd_draw_bitmap(int x_start,
     }
 
     /*
-     * 预览帧来自 PSRAM，当前 SPI LCD IO 不能直接使用 PSRAM 指针排队发送。
-     * 因此按几行一块拷贝到内部 DMA buffer。每块发送后都等待颜色事务完成，
-     * 再复用同一块 buffer，避免异步 SPI 还没读完数据就被下一块覆盖。
+     * 兼容回退路径：把 PSRAM 中的预览帧按较大的横带拷贝到内部 DMA buffer，
+     * 每块发送完成后再复用 buffer。
      */
     const uint8_t *src = (const uint8_t *)color_data;
     int y = y_start;
@@ -439,9 +535,9 @@ int driver_lcd_draw_bitmap(int x_start,
         const int draw_lines = remain_lines > (int)chunk_lines ? (int)chunk_lines : remain_lines;
         const size_t draw_bytes = line_bytes * (size_t)draw_lines;
 
-        memcpy(s_lcd_dma_bounce_buf,
-               src + ((size_t)(y - y_start) * line_bytes),
-               draw_bytes);
+        driver_lcd_copy_rgb565_for_panel(s_lcd_dma_bounce_buf,
+                                         src + ((size_t)(y - y_start) * line_bytes),
+                                         draw_bytes);
 
         uint8_t x_param[4];
         uint8_t y_param[4];
