@@ -43,7 +43,7 @@ extern "C" {
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           9000
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
-#define APP_BUSINESS_HTTP_BASE_URL      "http://10.224.127.28:8000"
+#define APP_BUSINESS_HTTP_BASE_URL      "http://10.224.127.251:8000"
 /** @brief AI 创建会话路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_START        "/ai/start"
 /** @brief AI 上传请求 WAV 分片路由。 */

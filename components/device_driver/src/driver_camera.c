@@ -95,6 +95,12 @@ static void driver_camera_apply_preview_tuning(pixformat_t pixformat)
             DRIVER_LOGW(TAG, "摄像头自动增益设置失败, ret=%d", ret);
         }
     }
+    if (sensor->set_agc_gain != NULL) {
+        ret = sensor->set_agc_gain(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头增益档位设置失败, ret=%d", ret);
+        }
+    }
     if (sensor->set_exposure_ctrl != NULL) {
         ret = sensor->set_exposure_ctrl(sensor, 1);
         if (ret != 0) {
@@ -108,32 +114,32 @@ static void driver_camera_apply_preview_tuning(pixformat_t pixformat)
         }
     }
     if (sensor->set_saturation != NULL) {
-        ret = sensor->set_saturation(sensor, 1);
+        ret = sensor->set_saturation(sensor, 2);
         if (ret != 0) {
             DRIVER_LOGW(TAG, "摄像头饱和度设置失败, ret=%d", ret);
         }
     }
     if (sensor->set_contrast != NULL) {
-        ret = sensor->set_contrast(sensor, 1);
+        ret = sensor->set_contrast(sensor, 2);
         if (ret != 0) {
             DRIVER_LOGW(TAG, "摄像头对比度设置失败, ret=%d", ret);
         }
     }
     if (sensor->set_brightness != NULL) {
-        ret = sensor->set_brightness(sensor, 0);
+        ret = sensor->set_brightness(sensor, -2);
         if (ret != 0) {
             DRIVER_LOGW(TAG, "摄像头亮度设置失败, ret=%d", ret);
         }
     }
     if (sensor->set_ae_level != NULL) {
-        ret = sensor->set_ae_level(sensor, 0);
+        ret = sensor->set_ae_level(sensor, -2);
         if (ret != 0) {
             DRIVER_LOGW(TAG, "摄像头自动曝光等级设置失败, ret=%d", ret);
         }
     }
 
     DRIVER_LOGI(TAG,
-                "摄像头预览参数已调校: awb=on, agc=on, aec=on, wb=auto, effect=none, saturation=1, contrast=1");
+                "摄像头预览参数已调校: awb=on, agc=on, agc_gain=0, aec=on, ae_level=-2, brightness=-2, saturation=2, contrast=2");
 }
 
 /**
