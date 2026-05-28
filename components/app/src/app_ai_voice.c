@@ -9,7 +9,7 @@
  * 4. 用户松手 → UI 回调触发 app_ai_voice_record_stop()
  * 5. 停止录音 → 通过 OSAL task notification 唤醒 biz_ai 任务
  * 6. biz_ai 任务：取出 PCM → 封装 WAV 文件头 → 分片 POST 到 AI 服务器
- * 7. 分片拉取服务器返回的 WAV 响应 → 通过扬声器播放 AI 回答
+ * 7. 分片拉取服务器返回的 WAV 响应 → 边解析边播放 AI 回答
  * 8. 释放音频会话互斥锁，等待下一次唤醒
  *
  * ## 任务调度关系
@@ -50,9 +50,11 @@ static volatile int s_started = 0;
  *  record_stop 会检查此标志，防止重复停止。 */
 static volatile int s_ai_recording = 0;
 
-/** @brief AI WAV 收发复用缓冲区，分配到 PSRAM。
- *  上传阶段保存 60 秒内请求 WAV；上传结束后被 120 秒内回复 WAV 覆盖。 */
+/** @brief AI 请求 WAV 缓冲区，分配到 PSRAM，保存 60 秒内请求 WAV。 */
 static uint8_t *s_ai_wav_buf = NULL;
+
+/** @brief AI 回复分片缓冲区，播放完当前分片后直接复用，不缓存完整回复。 */
+static uint8_t *s_ai_reply_chunk_buf = NULL;
 
 /** @brief AI 分片协议 JSON 响应临时缓冲，避免覆盖正在上传的 WAV 数据。 */
 static uint8_t s_ai_resp_buf[512];
@@ -98,30 +100,6 @@ static uint32_t app_ai_voice_wav_read_u32(const uint8_t *buf)
 }
 
 /**
- * @brief 在字节缓冲区中搜索 "RIFF" 魔数。
- *
- * ML307C 4G 模块通过 AT 指令做 HTTP POST 时，响应 body 前可能混入
- * 若干 AT 前缀字节（如 "\r\n" 或 "+HTTP:" 状态行），不能直接当 WAV 解析。
- * 此函数扫描整个响应，定位 RIFF 头在缓冲区中的偏移。
- *
- * @return RIFF 偏移位置；未找到返回 -1。
- */
-static int app_ai_voice_find_riff(const uint8_t *buf, uint32_t len)
-{
-    if (buf == NULL || len < 4u) {
-        return -1;
-    }
-
-    for (uint32_t i = 0; i <= (len - 4u); i++) {
-        if (memcmp(&buf[i], "RIFF", 4u) == 0) {
-            return (int)i;
-        }
-    }
-
-    return -1;
-}
-
-/**
  * @brief 写入标准 PCM WAV 文件头（44 字节）。
  *
  * 结构：RIFF(4) + 文件总长(4) + "WAVEfmt "(8) + fmt chunk(16+4) + "data"(4) + data 长度(4)
@@ -152,60 +130,304 @@ static void app_ai_voice_wav_write_header(uint8_t *buf, uint32_t pcm_bytes)
     app_ai_voice_wav_write_u32(&buf[40], pcm_bytes);
 }
 
-/**
- * @brief 解析 WAV 文件，提取 PCM 数据指针和样本数。
- *
- * 不仅校验 RIFF/WAVE 魔数，还校验音频格式是否与本机一致
- * （PCM 编码、1 声道、16000Hz、16bit），不匹配则拒绝，避免播放噪声。
- *
- * WAV 文件可能包含额外 chunk（如 LIST、fact 等），本函数按 chunk header
- * 顺序扫描，定位到 "data" chunk 后返回其内容和长度。
- *
- * @param[in]  wav     WAV 文件缓冲区。
- * @param[in]  wav_len WAV 文件总长度。
- * @param[out] pcm     提取到的 PCM 数据指针（指向 wav 内部，不复制）。
- * @param[out] samples 提取到的样本数（以 int16_t 为单位）。
- * @return 成功返回 0；失败返回负值（-1=参数无效, -2=魔数错误, -3=格式不匹配, -4=数据越界, -5=找不到 data chunk）。
- */
-static int app_ai_voice_wav_parse_pcm(const uint8_t *wav,
-                                      uint32_t wav_len,
-                                      const int16_t **pcm,
-                                      uint32_t *samples)
+#define APP_AI_WAV_FMT_MIN_BYTES      16u
+#define APP_AI_PLAY_CHUNK_SAMPLES     256u
+
+typedef enum {
+    APP_AI_WAV_STREAM_FIND_RIFF = 0,
+    APP_AI_WAV_STREAM_RIFF_HEADER,
+    APP_AI_WAV_STREAM_CHUNK_HEADER,
+    APP_AI_WAV_STREAM_FMT_PAYLOAD,
+    APP_AI_WAV_STREAM_SKIP_PAYLOAD,
+    APP_AI_WAV_STREAM_DATA_PAYLOAD,
+    APP_AI_WAV_STREAM_PAD_BYTE,
+} app_ai_voice_wav_stream_state_t;
+
+typedef struct {
+    app_ai_voice_wav_stream_state_t state;
+    app_ai_voice_wav_stream_state_t state_after_pad;
+    uint8_t riff_buf[12];
+    uint32_t riff_len;
+    uint32_t riff_match;
+    uint8_t chunk_header[8];
+    uint32_t chunk_header_len;
+    uint32_t chunk_size;
+    uint32_t chunk_read;
+    uint8_t fmt_buf[APP_AI_WAV_FMT_MIN_BYTES];
+    uint32_t fmt_len;
+    uint8_t fmt_valid;
+    uint8_t data_started;
+    uint8_t playback_started;
+    uint8_t pending_pcm_byte;
+    uint8_t pending_pcm_len;
+} app_ai_voice_wav_stream_t;
+
+static void app_ai_voice_wav_stream_init(app_ai_voice_wav_stream_t *stream)
 {
-    if (wav == NULL || wav_len < APP_BUSINESS_WAV_HEADER_LEN || pcm == NULL || samples == NULL) {
+    memset(stream, 0, sizeof(*stream));
+    stream->state = APP_AI_WAV_STREAM_FIND_RIFF;
+    stream->state_after_pad = APP_AI_WAV_STREAM_CHUNK_HEADER;
+}
+
+static uint32_t app_ai_voice_min_u32(uint32_t a, uint32_t b)
+{
+    return a < b ? a : b;
+}
+
+static int app_ai_voice_wav_stream_validate_fmt(app_ai_voice_wav_stream_t *stream)
+{
+    if (stream == NULL || stream->fmt_len < APP_AI_WAV_FMT_MIN_BYTES) {
         return -1;
     }
-    if (memcmp(&wav[0], "RIFF", 4u) != 0 || memcmp(&wav[8], "WAVE", 4u) != 0) {
+
+    uint16_t audio_format = app_ai_voice_wav_read_u16(&stream->fmt_buf[0]);
+    uint16_t channels = app_ai_voice_wav_read_u16(&stream->fmt_buf[2]);
+    uint32_t sample_rate = app_ai_voice_wav_read_u32(&stream->fmt_buf[4]);
+    uint16_t bits = app_ai_voice_wav_read_u16(&stream->fmt_buf[14]);
+
+    if (audio_format != 1u ||
+        channels != APP_BUSINESS_AUDIO_CHANNELS ||
+        sample_rate != APP_BUSINESS_AUDIO_SAMPLE_RATE ||
+        bits != APP_BUSINESS_AUDIO_BITS) {
         return -2;
     }
 
-    uint16_t audio_format = app_ai_voice_wav_read_u16(&wav[20]);
-    uint16_t channels = app_ai_voice_wav_read_u16(&wav[22]);
-    uint32_t sample_rate = app_ai_voice_wav_read_u32(&wav[24]);
-    uint16_t bits = app_ai_voice_wav_read_u16(&wav[34]);
+    stream->fmt_valid = 1u;
+    return 0;
+}
 
-    /* 只接受和本机音频链路一致的 PCM 格式，避免错误播放噪声数据。 */
-    if (audio_format != 1u || channels != APP_BUSINESS_AUDIO_CHANNELS ||
-        sample_rate != APP_BUSINESS_AUDIO_SAMPLE_RATE || bits != APP_BUSINESS_AUDIO_BITS) {
+static void app_ai_voice_wav_stream_finish_chunk(app_ai_voice_wav_stream_t *stream)
+{
+    stream->chunk_header_len = 0u;
+    stream->chunk_read = 0u;
+    if ((stream->chunk_size & 1u) != 0u) {
+        stream->state = APP_AI_WAV_STREAM_PAD_BYTE;
+        stream->state_after_pad = APP_AI_WAV_STREAM_CHUNK_HEADER;
+    } else {
+        stream->state = APP_AI_WAV_STREAM_CHUNK_HEADER;
+    }
+}
+
+static int app_ai_voice_play_pcm_bytes(app_ai_voice_wav_stream_t *stream,
+                                       const uint8_t *data,
+                                       uint32_t len)
+{
+    if (stream == NULL || (data == NULL && len > 0u)) {
+        return -1;
+    }
+
+    uint32_t pos = 0u;
+    int16_t pcm[APP_AI_PLAY_CHUNK_SAMPLES];
+
+    if (stream->pending_pcm_len != 0u && len > 0u) {
+        pcm[0] = (int16_t)((uint16_t)stream->pending_pcm_byte | ((uint16_t)data[0] << 8));
+        int ret = service_audio_play(pcm, 1u, 100u);
+        if (ret <= 0) {
+            return ret != 0 ? ret : -2;
+        }
+        stream->pending_pcm_len = 0u;
+        pos = 1u;
+    }
+
+    while ((pos + 1u) < len) {
+        uint32_t samples = 0u;
+        while ((pos + 1u) < len && samples < APP_AI_PLAY_CHUNK_SAMPLES) {
+            pcm[samples] = (int16_t)((uint16_t)data[pos] | ((uint16_t)data[pos + 1u] << 8));
+            samples++;
+            pos += 2u;
+        }
+
+        int ret = service_audio_play(pcm, samples, 100u);
+        if (ret <= 0) {
+            return ret != 0 ? ret : -3;
+        }
+    }
+
+    if (pos < len) {
+        stream->pending_pcm_byte = data[pos];
+        stream->pending_pcm_len = 1u;
+    }
+
+    return 0;
+}
+
+static int app_ai_voice_wav_stream_start_playback(app_ai_voice_wav_stream_t *stream)
+{
+    if (stream->playback_started != 0u) {
+        return 0;
+    }
+
+    (void)app_ui_set_ai_waiting(0);
+    int ret = service_audio_start_playback();
+    if (ret != 0) {
+        return ret;
+    }
+    stream->playback_started = 1u;
+    return 0;
+}
+
+static int app_ai_voice_wav_stream_feed(app_ai_voice_wav_stream_t *stream,
+                                        const uint8_t *data,
+                                        uint32_t len)
+{
+    static const uint8_t riff_magic[] = {'R', 'I', 'F', 'F'};
+
+    if (stream == NULL || (data == NULL && len > 0u)) {
+        return -1;
+    }
+
+    uint32_t pos = 0u;
+    while (pos < len) {
+        switch (stream->state) {
+        case APP_AI_WAV_STREAM_FIND_RIFF:
+            while (pos < len && stream->state == APP_AI_WAV_STREAM_FIND_RIFF) {
+                uint8_t b = data[pos++];
+                if (b == riff_magic[stream->riff_match]) {
+                    stream->riff_match++;
+                    if (stream->riff_match == sizeof(riff_magic)) {
+                        memcpy(stream->riff_buf, riff_magic, sizeof(riff_magic));
+                        stream->riff_len = sizeof(riff_magic);
+                        stream->riff_match = 0u;
+                        stream->state = APP_AI_WAV_STREAM_RIFF_HEADER;
+                    }
+                } else {
+                    stream->riff_match = b == riff_magic[0] ? 1u : 0u;
+                }
+            }
+            break;
+
+        case APP_AI_WAV_STREAM_RIFF_HEADER: {
+            uint32_t need = (uint32_t)sizeof(stream->riff_buf) - stream->riff_len;
+            uint32_t take = app_ai_voice_min_u32(need, len - pos);
+            memcpy(&stream->riff_buf[stream->riff_len], &data[pos], take);
+            stream->riff_len += take;
+            pos += take;
+            if (stream->riff_len == sizeof(stream->riff_buf)) {
+                if (memcmp(&stream->riff_buf[8], "WAVE", 4u) != 0) {
+                    return -2;
+                }
+                stream->state = APP_AI_WAV_STREAM_CHUNK_HEADER;
+            }
+            break;
+        }
+
+        case APP_AI_WAV_STREAM_CHUNK_HEADER: {
+            uint32_t need = (uint32_t)sizeof(stream->chunk_header) - stream->chunk_header_len;
+            uint32_t take = app_ai_voice_min_u32(need, len - pos);
+            memcpy(&stream->chunk_header[stream->chunk_header_len], &data[pos], take);
+            stream->chunk_header_len += take;
+            pos += take;
+            if (stream->chunk_header_len == sizeof(stream->chunk_header)) {
+                stream->chunk_size = app_ai_voice_wav_read_u32(&stream->chunk_header[4]);
+                stream->chunk_read = 0u;
+                if (memcmp(stream->chunk_header, "fmt ", 4u) == 0) {
+                    stream->fmt_len = 0u;
+                    stream->state = APP_AI_WAV_STREAM_FMT_PAYLOAD;
+                } else if (memcmp(stream->chunk_header, "data", 4u) == 0) {
+                    if (stream->fmt_valid == 0u || (stream->chunk_size & 1u) != 0u) {
+                        return -3;
+                    }
+                    stream->data_started = 1u;
+                    stream->state = APP_AI_WAV_STREAM_DATA_PAYLOAD;
+                } else {
+                    stream->state = APP_AI_WAV_STREAM_SKIP_PAYLOAD;
+                }
+                if (stream->chunk_size == 0u) {
+                    if (stream->state == APP_AI_WAV_STREAM_FMT_PAYLOAD ||
+                        stream->state == APP_AI_WAV_STREAM_DATA_PAYLOAD) {
+                        return -4;
+                    }
+                    app_ai_voice_wav_stream_finish_chunk(stream);
+                }
+            }
+            break;
+        }
+
+        case APP_AI_WAV_STREAM_FMT_PAYLOAD: {
+            uint32_t remain = stream->chunk_size - stream->chunk_read;
+            uint32_t take = app_ai_voice_min_u32(remain, len - pos);
+            uint32_t copy_room = APP_AI_WAV_FMT_MIN_BYTES - stream->fmt_len;
+            uint32_t copy_len = app_ai_voice_min_u32(take, copy_room);
+            if (copy_len > 0u) {
+                memcpy(&stream->fmt_buf[stream->fmt_len], &data[pos], copy_len);
+                stream->fmt_len += copy_len;
+            }
+            stream->chunk_read += take;
+            pos += take;
+            if (stream->chunk_read == stream->chunk_size) {
+                int ret = app_ai_voice_wav_stream_validate_fmt(stream);
+                if (ret != 0) {
+                    return ret;
+                }
+                app_ai_voice_wav_stream_finish_chunk(stream);
+            }
+            break;
+        }
+
+        case APP_AI_WAV_STREAM_SKIP_PAYLOAD: {
+            uint32_t remain = stream->chunk_size - stream->chunk_read;
+            uint32_t take = app_ai_voice_min_u32(remain, len - pos);
+            stream->chunk_read += take;
+            pos += take;
+            if (stream->chunk_read == stream->chunk_size) {
+                app_ai_voice_wav_stream_finish_chunk(stream);
+            }
+            break;
+        }
+
+        case APP_AI_WAV_STREAM_DATA_PAYLOAD: {
+            uint32_t remain = stream->chunk_size - stream->chunk_read;
+            uint32_t take = app_ai_voice_min_u32(remain, len - pos);
+            int ret = app_ai_voice_wav_stream_start_playback(stream);
+            if (ret != 0) {
+                return ret;
+            }
+            ret = app_ai_voice_play_pcm_bytes(stream, &data[pos], take);
+            if (ret != 0) {
+                return ret;
+            }
+            stream->chunk_read += take;
+            pos += take;
+            if (stream->chunk_read == stream->chunk_size) {
+                app_ai_voice_wav_stream_finish_chunk(stream);
+            }
+            break;
+        }
+
+        case APP_AI_WAV_STREAM_PAD_BYTE:
+            pos++;
+            stream->state = stream->state_after_pad;
+            break;
+
+        default:
+            return -5;
+        }
+    }
+
+    return 0;
+}
+
+static int app_ai_voice_wav_stream_finish(const app_ai_voice_wav_stream_t *stream)
+{
+    if (stream == NULL) {
+        return -1;
+    }
+    if (stream->fmt_valid == 0u || stream->data_started == 0u) {
+        return -2;
+    }
+    if (stream->state == APP_AI_WAV_STREAM_FIND_RIFF ||
+        stream->state == APP_AI_WAV_STREAM_RIFF_HEADER ||
+        stream->state == APP_AI_WAV_STREAM_PAD_BYTE ||
+        stream->chunk_header_len != 0u) {
         return -3;
     }
-
-    uint32_t data_offset = 36u;
-    while ((data_offset + 8u) <= wav_len) {
-        uint32_t chunk_size = app_ai_voice_wav_read_u32(&wav[data_offset + 4u]);
-        /* WAV 可能带有额外 chunk，按 chunk header 顺序查找 data。 */
-        if (memcmp(&wav[data_offset], "data", 4u) == 0) {
-            if ((data_offset + 8u + chunk_size) > wav_len) {
-                return -4;
-            }
-            *pcm = (const int16_t *)&wav[data_offset + 8u];
-            *samples = chunk_size / sizeof(int16_t);
-            return 0;
-        }
-        data_offset += 8u + chunk_size + (chunk_size & 1u);
+    if ((stream->state == APP_AI_WAV_STREAM_FMT_PAYLOAD ||
+         stream->state == APP_AI_WAV_STREAM_SKIP_PAYLOAD ||
+         stream->state == APP_AI_WAV_STREAM_DATA_PAYLOAD) &&
+        stream->chunk_read != stream->chunk_size) {
+        return -4;
     }
-
-    return -5;
+    return stream->pending_pcm_len == 0u ? 0 : -5;
 }
 
 /**
@@ -491,13 +713,17 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
     return -3;
 }
 
-/** @brief 按 offset/len 拉取回复 WAV 分片并写入复用大缓冲。 */
-static int app_ai_voice_download_result_chunks(const char *session, uint32_t total)
+/** @brief 按 offset/len 拉取回复 WAV 分片，边解析边播放，播放后丢弃分片。 */
+static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
 {
     if (session == NULL || total < APP_BUSINESS_WAV_HEADER_LEN ||
-        total > APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES) {
+        total > APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES ||
+        s_ai_reply_chunk_buf == NULL) {
         return -1;
     }
+
+    app_ai_voice_wav_stream_t stream;
+    app_ai_voice_wav_stream_init(&stream);
 
     uint32_t offset = 0u;
     while (offset < total) {
@@ -524,7 +750,7 @@ static int app_ai_voice_download_result_chunks(const char *session, uint32_t tot
                                             "application/json",
                                             empty_json,
                                             sizeof(empty_json) - 1u,
-                                            &s_ai_wav_buf[offset],
+                                            s_ai_reply_chunk_buf,
                                             chunk_len,
                                             &resp_len,
                                             APP_AI_HTTP_CHUNK_TIMEOUT_MS);
@@ -538,10 +764,20 @@ static int app_ai_voice_download_result_chunks(const char *session, uint32_t tot
             return ret != 0 ? ret : -3;
         }
 
+        ret = app_ai_voice_wav_stream_feed(&stream, s_ai_reply_chunk_buf, resp_len);
+        if (ret != 0) {
+            APP_LOGW(TAG,
+                     "AI 回复 WAV 流式解析/播放失败, offset=%u, len=%u, ret=%d",
+                     (unsigned int)offset,
+                     (unsigned int)resp_len,
+                     ret);
+            return ret;
+        }
+
         offset += chunk_len;
     }
 
-    return 0;
+    return app_ai_voice_wav_stream_finish(&stream);
 }
 
 /* ==========================================================================
@@ -559,17 +795,16 @@ static int app_ai_voice_download_result_chunks(const char *session, uint32_t tot
  * 4. 写入 WAV 文件头（44 字节），封装成标准 WAV 格式
  * 5. 创建服务器 session，按 32KB 分片上传请求 WAV
  * 6. finish 后轮询 result_info，拿到回复 WAV 总长度
- * 7. 按 32KB 拉取 result_chunk，覆盖写回同一块 s_ai_wav_buf
- * 8. 校验回复 WAV 格式并播放 PCM
- * 9. 调用 app_business_audio_session_end() 释放音频会话锁
- * 10. 回到步骤 1，等待下一次录音完成
+ * 7. 按 32KB 拉取 result_chunk，边解析 WAV 边播放 PCM，播放后丢弃分片
+ * 8. 调用 app_business_audio_session_end() 释放音频会话锁
+ * 9. 回到步骤 1，等待下一次录音完成
  *
  * ## 错误处理
  * - 任何步骤失败都通过 app_business_audio_session_end() 释放锁
  * - 不会因为单次失败导致锁泄漏或任务死锁
  *
  * ## 内存策略
- * - 请求 WAV 和响应 WAV 复用 s_ai_wav_buf（按 120 秒回复上限分配，PSRAM）
+ * - 请求 WAV 使用 s_ai_wav_buf；回复 WAV 只使用单个 HTTP 分片缓冲，边播边丢弃
  * - 录音 PCM 在 service_audio 的 s_record_buf 中，通过指针引用，不额外复制
  *
  * @param arg 未使用。
@@ -633,33 +868,14 @@ static void app_ai_voice_task(void *arg)
                     ret = -10;
                     (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
                 } else {
-                    ret = app_ai_voice_download_result_chunks(session, reply_len);
+                    ret = app_ai_voice_play_result_chunks(session, reply_len);
                     if (ret != 0) {
                         (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
                     }
                 }
             }
 
-            /* 步骤 5-7：解析回复 WAV → 播放 AI 回答 */
-            if (ret == 0 && reply_len > 0u) {
-                const int16_t *resp_pcm = NULL;
-                uint32_t resp_samples = 0u;
-                /* HTTP body 经 AT 口返回时可能混入前缀字节，先定位 RIFF 再解析。 */
-                int riff_pos = app_ai_voice_find_riff(s_ai_wav_buf, reply_len);
-                if (riff_pos > 0) {
-                    memmove(s_ai_wav_buf, &s_ai_wav_buf[riff_pos], reply_len - (uint32_t)riff_pos);
-                    reply_len = reply_len - (uint32_t)riff_pos;
-                }
-                ret = app_ai_voice_wav_parse_pcm(s_ai_wav_buf, reply_len, &resp_pcm, &resp_samples);
-                if (ret == 0 && resp_samples > 0u) {
-                    (void)app_ui_set_ai_waiting(0);
-                    (void)service_audio_start_playback();
-                    (void)service_audio_play(resp_pcm, resp_samples, 100u);
-                } else {
-                    APP_LOGW(TAG, "AI 响应 WAV 解析失败, ret=%d, len=%u", ret, (unsigned int)reply_len);
-                    (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
-                }
-            } else if (ret != 0) {
+            if (ret != 0) {
                 APP_LOGW(TAG, "AI 分片问答失败, ret=%d", ret);
             }
         } else {
@@ -703,9 +919,26 @@ int app_ai_voice_start(void)
              "AI WAV 缓存已分配到 PSRAM, bytes=%u",
              (unsigned int)APP_BUSINESS_AI_WAV_BUF_BYTES);
 
+    s_ai_reply_chunk_buf = (uint8_t *)osal_heap_alloc_external(APP_AI_HTTP_CHUNK_BYTES);
+    if (s_ai_reply_chunk_buf == NULL) {
+        APP_LOGE(TAG,
+                 "AI 回复分片缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
+                 (unsigned int)APP_AI_HTTP_CHUNK_BYTES,
+                 (unsigned int)osal_heap_get_external_free_size());
+        osal_heap_free(s_ai_wav_buf);
+        s_ai_wav_buf = NULL;
+        return -2;
+    }
+
+    APP_LOGI(TAG,
+             "AI 回复分片缓存已分配到 PSRAM, bytes=%u",
+             (unsigned int)APP_AI_HTTP_CHUNK_BYTES);
+
     int ret = osal_task_create("biz_ai", app_ai_voice_task, NULL, 4096u, 5u, &s_ai_task);
     if (ret != 0) {
         APP_LOGE(TAG, "AI 语音任务启动失败, ret=%d", ret);
+        osal_heap_free(s_ai_reply_chunk_buf);
+        s_ai_reply_chunk_buf = NULL;
         osal_heap_free(s_ai_wav_buf);
         s_ai_wav_buf = NULL;
         return ret;

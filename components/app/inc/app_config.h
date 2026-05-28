@@ -120,8 +120,8 @@ extern "C" {
 /** @brief AI 回复 WAV 最大字节数。 */
 #define APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES \
     (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_REPLY_MAX_SAMPLES * sizeof(int16_t)))
-/** @brief AI 请求/回复复用 WAV 缓冲区字节数，按回复最大值分配。 */
-#define APP_BUSINESS_AI_WAV_BUF_BYTES   APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES
+/** @brief AI 请求 WAV 缓冲区字节数；回复分片边播边丢弃，不再按回复最大值缓存。 */
+#define APP_BUSINESS_AI_WAV_BUF_BYTES   APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES
 
 #ifdef __cplusplus
 }

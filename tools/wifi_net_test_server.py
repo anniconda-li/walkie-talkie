@@ -42,6 +42,8 @@ DEFAULT_HTTP_PORT = 8000
 DEFAULT_WAV_SAVE_DIR = Path("tools/received_wav")
 DEFAULT_JPG_SAVE_DIR = Path("tools/received_jpg")
 DEFAULT_CHUNK_SIZE = 32768
+DEFAULT_AI_REPLY_REPEAT = 1
+DEFAULT_AI_REPLY_EXTRA_CHUNK = False
 
 PKT_TYPES = {
     1: "register",
@@ -239,6 +241,61 @@ def validate_and_log_wav(body: bytes, save_dir: Path, prefix: str) -> tuple[bool
     return True, save_path
 
 
+def build_pcm_wav(
+    pcm: bytes,
+    *,
+    sample_rate: int,
+    channels: int,
+    bits_per_sample: int,
+    add_extra_chunk: bool,
+) -> bytes:
+    if bits_per_sample % 8 != 0:
+        raise ValueError("bits_per_sample must be byte aligned")
+
+    block_align = channels * bits_per_sample // 8
+    byte_rate = sample_rate * block_align
+    fmt_chunk = struct.pack(
+        "<4sIHHIIHH",
+        b"fmt ",
+        16,
+        1,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+    )
+    chunks = [fmt_chunk]
+    if add_extra_chunk:
+        # Forces the device to find data after an extra chunk instead of assuming
+        # the standard 44-byte WAV header layout.
+        junk_payload = b"stream-test-extra"
+        chunks.append(struct.pack("<4sI", b"JUNK", len(junk_payload)) + junk_payload)
+        if len(junk_payload) & 1:
+            chunks.append(b"\x00")
+    chunks.append(struct.pack("<4sI", b"data", len(pcm)) + pcm)
+    body = b"".join(chunks)
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body
+
+
+def make_ai_reply_wav(upload_wav: bytes, repeat: int, add_extra_chunk: bool) -> bytes | None:
+    wav = parse_wav(upload_wav)
+    if wav is None:
+        return None
+    if wav.audio_format != 1:
+        return None
+    pcm = upload_wav[wav.data_offset : wav.data_offset + wav.data_size]
+    if repeat > 1:
+        pcm = pcm * repeat
+    return build_pcm_wav(
+        pcm,
+        sample_rate=wav.sample_rate,
+        channels=wav.channels,
+        bits_per_sample=wav.bits_per_sample,
+        add_extra_chunk=add_extra_chunk,
+    )
+
+
 def parse_jpeg(body: bytes) -> JpegInfo | None:
     if len(body) < 4 or body[:2] != b"\xFF\xD8" or body[-2:] != b"\xFF\xD9":
         return None
@@ -357,11 +414,18 @@ def run_udp(host: str, port: int) -> None:
                 sock.sendto(make_server_echo(data), addr)
 
 
-def create_http_app(wav_save_dir: Path, jpg_save_dir: Path) -> FastAPI:
+def create_http_app(
+    wav_save_dir: Path,
+    jpg_save_dir: Path,
+    ai_reply_repeat: int,
+    ai_reply_extra_chunk: bool,
+) -> FastAPI:
     app = FastAPI(title="Walkie Talkie Test Server")
     app.state.save_dir = wav_save_dir
     app.state.jpg_save_dir = jpg_save_dir
     app.state.ai_sessions = {}
+    app.state.ai_reply_repeat = max(ai_reply_repeat, 1)
+    app.state.ai_reply_extra_chunk = ai_reply_extra_chunk
 
     def get_session(session_id: str) -> AiSession:
         session = app.state.ai_sessions.get(session_id)
@@ -421,9 +485,28 @@ def create_http_app(wav_save_dir: Path, jpg_save_dir: Path) -> FastAPI:
         ok, save_path = validate_and_log_wav(full_wav, app.state.save_dir, f"AI finish session={session}")
         if not ok:
             raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid wav"})
-        # Link test: echo uploaded WAV as AI reply. This validates upload,
-        # polling, chunk download and device-side playback without a real AI backend.
-        ai_session.reply = full_wav
+        # Link test: echo uploaded PCM as a generated WAV reply. The repeat and
+        # extra-chunk knobs validate chunked playback without a real AI backend.
+        reply = make_ai_reply_wav(
+            full_wav,
+            app.state.ai_reply_repeat,
+            app.state.ai_reply_extra_chunk,
+        )
+        if reply is None:
+            raise HTTPException(status_code=400, detail={"ok": False, "error": "invalid reply wav"})
+        reply_wav = parse_wav(reply)
+        reply_data = reply_wav.data_size if reply_wav is not None else 0
+        reply_duration = 0.0
+        if reply_wav is not None:
+            bytes_per_sample = reply_wav.channels * reply_wav.bits_per_sample // 8
+            if bytes_per_sample > 0 and reply_wav.sample_rate > 0:
+                reply_duration = reply_data / bytes_per_sample / reply_wav.sample_rate
+        log(
+            f"AI reply session={session} len={len(reply)} data={reply_data} "
+            f"duration={reply_duration:.2f}s repeat={app.state.ai_reply_repeat} "
+            f"extra_chunk={int(app.state.ai_reply_extra_chunk)}"
+        )
+        ai_session.reply = reply
         ai_session.save_path = save_path
         return {"ok": True, "status": "processing"}
 
@@ -497,10 +580,18 @@ def create_http_app(wav_save_dir: Path, jpg_save_dir: Path) -> FastAPI:
     return app
 
 
-def run_http(host: str, port: int, wav_save_dir: Path, jpg_save_dir: Path) -> None:
-    app = create_http_app(wav_save_dir, jpg_save_dir)
+def run_http(
+    host: str,
+    port: int,
+    wav_save_dir: Path,
+    jpg_save_dir: Path,
+    ai_reply_repeat: int,
+    ai_reply_extra_chunk: bool,
+) -> None:
+    app = create_http_app(wav_save_dir, jpg_save_dir, ai_reply_repeat, ai_reply_extra_chunk)
     log(f"FastAPI AI WAV + camera JPEG test listening on {host}:{port}")
     log(f"AI base URL: http://<PC_LAN_IP>:{port}")
+    log(f"AI reply repeat={max(ai_reply_repeat, 1)} extra_chunk={int(ai_reply_extra_chunk)}")
     log(f"Camera upload URL: http://<PC_LAN_IP>:{port}/camera/upload")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
@@ -512,12 +603,31 @@ def main() -> None:
     parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT, help="AI WAV HTTP port")
     parser.add_argument("--wav-save-dir", default=str(DEFAULT_WAV_SAVE_DIR), help="directory for received WAV files")
     parser.add_argument("--jpg-save-dir", default=str(DEFAULT_JPG_SAVE_DIR), help="directory for received JPEG files")
+    parser.add_argument(
+        "--ai-reply-repeat",
+        type=int,
+        default=DEFAULT_AI_REPLY_REPEAT,
+        help="repeat uploaded PCM this many times in AI reply WAV",
+    )
+    parser.add_argument(
+        "--ai-reply-extra-chunk",
+        action="store_true",
+        default=DEFAULT_AI_REPLY_EXTRA_CHUNK,
+        help="insert a JUNK chunk before reply data to test non-44-byte WAV data offsets",
+    )
     args = parser.parse_args()
 
     threading.Thread(target=run_udp, args=(args.host, args.udp_port), daemon=True).start()
     threading.Thread(
         target=run_http,
-        args=(args.host, args.http_port, Path(args.wav_save_dir), Path(args.jpg_save_dir)),
+        args=(
+            args.host,
+            args.http_port,
+            Path(args.wav_save_dir),
+            Path(args.jpg_save_dir),
+            args.ai_reply_repeat,
+            args.ai_reply_extra_chunk,
+        ),
         daemon=True,
     ).start()
 
