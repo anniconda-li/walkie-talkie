@@ -35,22 +35,15 @@ typedef struct {
 } service_screen_device_ops_t;
 
 /**
- * @brief 屏幕服务初始化配置。
- */
-typedef struct {
-    service_screen_device_ops_t device_ops; /**< 下层显示与触摸能力函数表。 */
-} service_screen_config_t;
-
-/**
  * @brief 初始化屏幕服务。
  *
  * 初始化时会复制下层屏幕能力函数表，并把 driver 已创建的 LCD panel/touch
  * 句柄接入 LVGL port。service 不负责初始化具体 LCD 或触摸芯片。
  *
- * @param[in] cfg 屏幕 service 初始化配置。
+ * @param[in] ops 下层显示与触摸能力函数表。
  * @return 成功返回 0；失败返回负值。
  */
-int service_screen_init(const service_screen_config_t *cfg);
+int service_screen_init(const service_screen_device_ops_t *ops);
 
 /**
  * @brief 释放屏幕服务。
@@ -108,20 +101,6 @@ int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data);
  * @return 成功返回 0；失败返回负值。
  */
 int service_screen_display_on(int on);
-
-/**
- * @brief 获取屏幕水平分辨率。
- *
- * @return 水平分辨率。
- */
-uint16_t service_screen_get_hres(void);
-
-/**
- * @brief 获取屏幕垂直分辨率。
- *
- * @return 垂直分辨率。
- */
-uint16_t service_screen_get_vres(void);
 
 #ifdef __cplusplus
 }

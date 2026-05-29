@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** @brief 网络 service 日志标签。 */
 static const char *TAG = "service_network";
 
 /** @brief 当前绑定的网络 driver 能力函数表。 */
@@ -50,29 +51,29 @@ static int service_network_ops_is_valid(const service_network_ops_t *ops)
     return 0;
 }
 
-int service_network_init(const service_network_config_t *cfg)
+int service_network_init(const service_network_ops_t *ops)
 {
     /*
-     * cfg == NULL 表示“只检查当前 service 是否已经初始化”。
+     * ops == NULL 表示“只检查当前 service 是否已经初始化”。
      * 状态监控任务掉线重试时会调用这个路径，不重新选择 driver。
      */
-    if (cfg == NULL) {
+    if (ops == NULL) {
         return s_network_ops_ready != 0u ? 0 : -1;
     }
 
-    if (service_network_ops_is_valid(&cfg->ops) != 0) {
+    if (service_network_ops_is_valid(ops) != 0) {
         SERVICE_LOGE(TAG, "网络服务初始化失败: ops 无效");
         s_network_ops_ready = 0u;
         return -2;
     }
 
-    if (cfg->ops.is_initialized() != 1) {
+    if (ops->is_initialized() != 1) {
         SERVICE_LOGE(TAG, "网络服务初始化失败: 下层网络 driver 未初始化");
         s_network_ops_ready = 0u;
         return -3;
     }
 
-    s_network_ops = cfg->ops;
+    s_network_ops = *ops;
     s_network_ops_ready = 1u;
     return 0;
 }

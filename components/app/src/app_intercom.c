@@ -49,16 +49,22 @@
 
 static const char *TAG = "app_intercom";
 
-/* 协议常量 */
+/** @brief 对讲应用层协议魔数，用于在 UART 透传字节流中定位包头。 */
 #define APP_INTERCOM_PACKET_MAGIC       "WTK1"
+/** @brief 协议头中设备名字段固定长度，短设备名使用 0 填充。 */
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
+/** @brief WTK1 协议固定包头长度。 */
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES   /* 640 字节 = 320 samples × 2 */
+/** @brief 单个 AUDIO 包最大 payload，等于一帧 20ms PCM 字节数。 */
+#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES
+/** @brief 单个 WTK1 包最大总长度，包含固定头和最大音频 payload。 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
 
-/* 各任务栈大小——PTT 发送栈最大，因为需要构造协议包 + 调用 service_audio_read */
+/** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     6144u
+/** @brief UDP 接收解析任务栈大小。 */
 #define APP_INTERCOM_RX_TASK_STACK      4096u
+/** @brief 心跳和 UDP 重连任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    3072u
 
 /** @brief 自定义应用层协议包类型枚举。 */
@@ -91,7 +97,7 @@ typedef struct {
  * 全局状态变量
  * ========================================================================== */
 
-/** @brief PTT 发送任务句柄，优先级 6（高于 biz_ai 和 svc_audio_rec），
+/** @brief PTT 发送任务句柄，优先级 6（高于 biz_ai），
  *  确保 PTT 实时音频采集不被 AI 任务抢占。 */
 static osal_task_t s_ptt_task = NULL;
 

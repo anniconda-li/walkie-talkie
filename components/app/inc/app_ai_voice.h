@@ -27,7 +27,7 @@ int app_ai_voice_start(void);
  * @brief 开始 AI 问答录音。
  *
  * UI 长按 AI 按钮时调用。若当前已有 PTT 或其他音频会话占用，则本次请求会被忽略。
- * 本函数不阻塞等待录音完成，只负责抢占音频会话并启动 service_audio 录音。
+ * 本函数不阻塞等待录音完成，只负责抢占音频会话并唤醒 AI 任务采集 PCM。
  */
 void app_ai_voice_record_start(void);
 

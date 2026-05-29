@@ -26,6 +26,7 @@
 
 #include <stddef.h>
 
+/** @brief service 装配层日志标签。 */
 static const char *TAG = "service_init";
 
 /**
@@ -199,37 +200,35 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
 int service_init_network(void)
 {
     /*
-     * 局部 cfg 是安全的：service_network_init() 会复制 ops 到自身静态变量。
-     * 初始化返回后 cfg 生命周期结束，不影响后续 service 调用。
+     * 局部 ops 是安全的：service_network_init() 会复制 ops 到自身静态变量。
+     * 初始化返回后 ops 生命周期结束，不影响后续 service 调用。
      */
-    service_network_config_t network_cfg = {
-        .ops = {
+    service_network_ops_t network_ops = {
 #if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
-            .is_initialized = d_wifi_is_initialized,
-            .get_status = service_init_network_wifi_get_status,
-            .is_ready = d_wifi_is_ready,
-            .tcp_connect = d_wifi_tcp_connect,
-            .tcp_send = d_wifi_tcp_send,
-            .tcp_close = d_wifi_tcp_close,
-            .udp_connect = d_wifi_udp_connect,
-            .udp_send = d_wifi_udp_send,
-            .read_downlink = d_wifi_read_downlink,
-            .http_post = d_wifi_http_post,
+        .is_initialized = d_wifi_is_initialized,
+        .get_status = service_init_network_wifi_get_status,
+        .is_ready = d_wifi_is_ready,
+        .tcp_connect = d_wifi_tcp_connect,
+        .tcp_send = d_wifi_tcp_send,
+        .tcp_close = d_wifi_tcp_close,
+        .udp_connect = d_wifi_udp_connect,
+        .udp_send = d_wifi_udp_send,
+        .read_downlink = d_wifi_read_downlink,
+        .http_post = d_wifi_http_post,
 #else
-            .is_initialized = d_ml307c_is_initialized,
-            .get_status = service_init_network_ml307c_get_status,
-            .is_ready = d_ml307c_is_ready,
-            .tcp_connect = d_ml307c_tcp_connect,
-            .tcp_send = d_ml307c_tcp_send,
-            .tcp_close = d_ml307c_tcp_close,
-            .udp_connect = d_ml307c_udp_connect,
-            .udp_send = d_ml307c_udp_send,
-            .read_downlink = d_ml307c_read_downlink,
-            .http_post = d_ml307c_http_post,
+        .is_initialized = d_ml307c_is_initialized,
+        .get_status = service_init_network_ml307c_get_status,
+        .is_ready = d_ml307c_is_ready,
+        .tcp_connect = d_ml307c_tcp_connect,
+        .tcp_send = d_ml307c_tcp_send,
+        .tcp_close = d_ml307c_tcp_close,
+        .udp_connect = d_ml307c_udp_connect,
+        .udp_send = d_ml307c_udp_send,
+        .read_downlink = d_ml307c_read_downlink,
+        .http_post = d_ml307c_http_post,
 #endif
-        },
     };
-    int ret = service_network_init(&network_cfg);
+    int ret = service_network_init(&network_ops);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "网络服务初始化失败, ret=%d", ret);
     }
@@ -278,7 +277,6 @@ int service_init_audio(void)
 #endif
         },
         .volume = 80u,
-        .passthrough_gain = 1u,
     };
     int ret = service_audio_init(&audio_cfg);
     if (ret != 0) {
@@ -310,23 +308,21 @@ int service_init_camera(void)
 
 int service_init_screen(void)
 {
-    service_screen_config_t screen_cfg = {
-        .device_ops = {
-            .is_initialized = d_lcd_is_initialized,
-            .get_panel_io = service_init_screen_get_panel_io,
-            .get_panel = service_init_screen_get_panel,
-            .get_touch = service_init_screen_get_touch,
-            .display_on = d_lcd_display_on,
-            .draw_rgb565 = service_init_screen_draw_rgb565,
-            .hres = d_lcd_H_RES,
-            .vres = d_lcd_V_RES,
-            .swap_xy = d_lcd_SWAP_XY,
-            .mirror_x = d_lcd_MIRROR_X,
-            .mirror_y = d_lcd_MIRROR_Y,
-        },
+    service_screen_device_ops_t screen_ops = {
+        .is_initialized = d_lcd_is_initialized,
+        .get_panel_io = service_init_screen_get_panel_io,
+        .get_panel = service_init_screen_get_panel,
+        .get_touch = service_init_screen_get_touch,
+        .display_on = d_lcd_display_on,
+        .draw_rgb565 = service_init_screen_draw_rgb565,
+        .hres = d_lcd_H_RES,
+        .vres = d_lcd_V_RES,
+        .swap_xy = d_lcd_SWAP_XY,
+        .mirror_x = d_lcd_MIRROR_X,
+        .mirror_y = d_lcd_MIRROR_Y,
     };
 
-    int ret = service_screen_init(&screen_cfg);
+    int ret = service_screen_init(&screen_ops);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "屏幕服务初始化失败, ret=%d", ret);
     }
@@ -336,13 +332,11 @@ int service_init_screen(void)
 
 int service_init_battery(void)
 {
-    service_battery_config_t battery_cfg = {
-        .sample_ops = {
-            .is_initialized = d_battery_is_initialized,
-            .read_voltage_mv = d_battery_read_voltage_mv,
-        },
+    service_battery_sample_ops_t battery_ops = {
+        .is_initialized = d_battery_is_initialized,
+        .read_voltage_mv = d_battery_read_voltage_mv,
     };
-    int ret = service_battery_init(&battery_cfg);
+    int ret = service_battery_init(&battery_ops);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "电池服务初始化失败, ret=%d", ret);
     }

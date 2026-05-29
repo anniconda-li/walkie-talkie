@@ -129,24 +129,3 @@ void service_camera_return_frame(service_camera_frame_t *frame)
     s_camera_ops.return_frame(frame->opaque);
     memset(frame, 0, sizeof(*frame));
 }
-
-int service_camera_discard_frames(uint8_t count)
-{
-    if (s_camera_ops_ready == 0u) {
-        return -1;
-    }
-
-    for (uint8_t i = 0; i < count; i++) {
-        service_camera_frame_t frame;
-        int ret = service_camera_get_frame(&frame);
-        if (ret != 0) {
-            SERVICE_LOGW(TAG, "摄像头丢帧失败, index=%u, ret=%d",
-                         (unsigned int)i,
-                         ret);
-            return ret;
-        }
-        service_camera_return_frame(&frame);
-    }
-
-    return 0;
-}

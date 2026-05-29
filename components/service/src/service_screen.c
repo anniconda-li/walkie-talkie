@@ -83,32 +83,32 @@ static int service_screen_ops_is_valid(const service_screen_device_ops_t *ops)
     return 0;
 }
 
-int service_screen_init(const service_screen_config_t *cfg)
+int service_screen_init(const service_screen_device_ops_t *ops)
 {
     if (s_screen_display != NULL) {
         SERVICE_LOGI(TAG, "屏幕服务已初始化");
         return 0;
     }
 
-    if (cfg == NULL || service_screen_ops_is_valid(&cfg->device_ops) != 0) {
+    if (ops == NULL || service_screen_ops_is_valid(ops) != 0) {
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: 未提供屏幕能力");
         return -3;
     }
 
-    if (cfg->device_ops.is_initialized() != 1) {
+    if (ops->is_initialized() != 1) {
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕 driver 未初始化");
         return -4;
     }
-    void *panel_io = cfg->device_ops.get_panel_io();
-    void *panel = cfg->device_ops.get_panel();
-    void *touch = cfg->device_ops.get_touch();
+    void *panel_io = ops->get_panel_io();
+    void *panel = ops->get_panel();
+    void *touch = ops->get_touch();
     if (panel_io == NULL || panel == NULL || touch == NULL) {
         /* driver 已初始化但关键句柄为空时，说明底层 LCD/touch 初始化不完整。 */
         SERVICE_LOGE(TAG, "屏幕服务初始化失败: 下层屏幕句柄无效");
         return -5;
     }
 
-    s_screen_ops = cfg->device_ops;
+    s_screen_ops = *ops;
     s_screen_ops_ready = 1u;
 
     lvgl_port_cfg_t lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
@@ -291,14 +291,4 @@ int service_screen_display_on(int on)
     }
 
     return ret;
-}
-
-uint16_t service_screen_get_hres(void)
-{
-    return s_screen_ops_ready != 0u ? s_screen_ops.hres : 0u;
-}
-
-uint16_t service_screen_get_vres(void)
-{
-    return s_screen_ops_ready != 0u ? s_screen_ops.vres : 0u;
 }

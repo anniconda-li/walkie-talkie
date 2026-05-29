@@ -65,6 +65,7 @@ int d_network_init(void)
     return ret;
 }
 
+#if D_INIT_AUDIO == D_INIT_AUDIO_ES
 static int d_init_audio_es(void)
 {
     d_es7210_wdriver_ops_t es7210_wdriver_ops = {
@@ -84,7 +85,9 @@ static int d_init_audio_es(void)
     };
     return d_es8311_init(&es8311_wdriver_ops);
 }
+#endif
 
+#if D_INIT_AUDIO == D_INIT_AUDIO_I2S
 static int d_init_audio_i2s(void)
 {
     d_inmp441_wdriver_ops_t inmp441_wdriver_ops = {
@@ -100,6 +103,7 @@ static int d_init_audio_i2s(void)
     };
     return d_max98357a_init(&max98357a_wdriver_ops);
 }
+#endif
 
 int d_audio_init(void)
 {

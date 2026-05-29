@@ -3,12 +3,12 @@
  * @brief UI 状态监听业务——电池电量和网络信号周期性刷新。
  *
  * ## 模块职责
- * - 周期性采集电池 ADC 电压并换算为电量百分比，更新 UI 电池图标
+ * - 周期性读取 battery service 给出的电量百分比，更新 UI 电池图标
  * - 周期性查询 4G/WiFi 网络状态（信号格数），更新 UI 信号图标
  * - 维护 s_network_ready 标志供心跳任务检测断线重连
  *
  * ## 任务列表
- * - biz_battery（优先级 5, 1s 周期）—— 读 ADC → 滤波 → 查表和滞回 → 更新 UI
+ * - biz_battery（优先级 5, 1s 周期）—— 读电量百分比 → 更新 UI
  * - biz_network（优先级 4, 3s 周期）—— 查 AT 信号 → 换算格数 → 更新 UI + s_network_ready
  *
  * ## 调度方式
@@ -78,7 +78,7 @@ static int app_status_monitor_csq_to_bars(const service_network_status_t *status
 /**
  * @brief 电池电量轮询任务（1s 周期）。
  *
- * service_battery_get_status() 内部完成了 ADC 读取 → 一阶低通滤波 → 放电曲线查表 →
+ * service_battery_get() 内部完成了 ADC 读取 → 一阶低通滤波 → 放电曲线查表 →
  * 5% 步进取整和显示滞回。本任务只将最终百分比推送给 UI。
  *
  * @param arg 未使用。
@@ -89,10 +89,9 @@ static void app_status_monitor_battery_task(void *arg)
 
     while (1) {
         /* service 层已经完成 ADC 滤波、百分比映射和显示滞回，UI 只消费百分比。 */
-        int voltage_mv = 0;
-        int percent = 0;
-        if (service_battery_get_status(&voltage_mv, &percent) == 0) {
-            (void)app_ui_set_battery_level(percent);
+        int level = 0;
+        if (service_battery_get(&level) == 0) {
+            (void)app_ui_set_battery_level(level);
         }
         osal_delay_ms(1000u);
     }

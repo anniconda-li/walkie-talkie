@@ -4,18 +4,17 @@
  *
  * ## 业务流程概述
  * 1. 用户长按 UI 上的 AI 按钮 → UI 回调触发 app_ai_voice_record_start()
- * 2. 抢占音频会话互斥锁（与 PTT 互斥）→ 启动 service 层录音
- * 3. service 层录音任务循环采集麦克风 PCM 数据到 PSRAM 缓冲区
+ * 2. 抢占音频会话互斥锁（与 PTT 互斥）→ 唤醒 AI 任务采集 PCM
+ * 3. AI 任务循环读取 service_audio PCM，直接写入请求 WAV 缓冲区
  * 4. 用户松手 → UI 回调触发 app_ai_voice_record_stop()
- * 5. 停止录音 → 通过 OSAL task notification 唤醒 biz_ai 任务
- * 6. biz_ai 任务：取出 PCM → 封装 WAV 文件头 → 分片 POST 到 AI 服务器
+ * 5. 停止录音 → biz_ai 任务退出采集循环
+ * 6. biz_ai 任务：写 WAV 文件头 → 分片 POST 到 AI 服务器
  * 7. 分片拉取服务器返回的 WAV 响应 → 边解析边播放 AI 回答
  * 8. 释放音频会话互斥锁，等待下一次唤醒
  *
  * ## 任务调度关系
  * - UI 线程（LVGL）→ 调用 record_start/stop → 设置标志位 + notify 目标任务
- * - svc_audio_rec（优先级5）→ 录音采集循环，由 s_recording 标志控制
- * - biz_ai（优先级5）→ 等待 notify，处理 WAV 上传和回答播放
+ * - biz_ai（优先级5）→ 等待 notify，采集录音、处理 WAV 上传和回答播放
  */
 #include "app_ai_voice.h"
 
@@ -130,38 +129,58 @@ static void app_ai_voice_wav_write_header(uint8_t *buf, uint32_t pcm_bytes)
     app_ai_voice_wav_write_u32(&buf[40], pcm_bytes);
 }
 
+/** @brief WAV fmt chunk 中当前解析器至少需要的 PCM 格式字段长度。 */
 #define APP_AI_WAV_FMT_MIN_BYTES      16u
+/** @brief AI 回复播放时单次提交给 service_audio 的最大 PCM 样本数。 */
 #define APP_AI_PLAY_CHUNK_SAMPLES     256u
+/** @brief AI 录音任务单次读取超时时间，单位 ms。 */
+#define APP_AI_RECORD_READ_TIMEOUT_MS 30u
 
+/**
+ * @brief AI 回复 WAV 流式解析状态。
+ *
+ * HTTP 回复按分片下载，不能假设每次拿到完整 WAV chunk，因此用状态机跨分片
+ * 保存 RIFF、chunk header、fmt 和 data 的解析进度。
+ */
 typedef enum {
-    APP_AI_WAV_STREAM_FIND_RIFF = 0,
-    APP_AI_WAV_STREAM_RIFF_HEADER,
-    APP_AI_WAV_STREAM_CHUNK_HEADER,
-    APP_AI_WAV_STREAM_FMT_PAYLOAD,
-    APP_AI_WAV_STREAM_SKIP_PAYLOAD,
-    APP_AI_WAV_STREAM_DATA_PAYLOAD,
-    APP_AI_WAV_STREAM_PAD_BYTE,
+    APP_AI_WAV_STREAM_FIND_RIFF = 0,  /**< 扫描字节流，查找 RIFF 魔数。 */
+    APP_AI_WAV_STREAM_RIFF_HEADER,    /**< 读取 RIFF 头剩余字段并校验 WAVE 标识。 */
+    APP_AI_WAV_STREAM_CHUNK_HEADER,   /**< 读取 8 字节 chunk 头，判断后续 payload 类型。 */
+    APP_AI_WAV_STREAM_FMT_PAYLOAD,    /**< 读取 fmt chunk 并校验采样率、声道和位宽。 */
+    APP_AI_WAV_STREAM_SKIP_PAYLOAD,   /**< 跳过当前业务不关心的 chunk payload。 */
+    APP_AI_WAV_STREAM_DATA_PAYLOAD,   /**< 读取 data chunk，边解析 PCM 边播放。 */
+    APP_AI_WAV_STREAM_PAD_BYTE,       /**< 跳过奇数字节 chunk 后的 1 字节对齐填充。 */
 } app_ai_voice_wav_stream_state_t;
 
+/**
+ * @brief AI 回复 WAV 流式解析上下文。
+ *
+ * 该结构体只保存解析状态和小型临时字段，不缓存完整回复音频。
+ */
 typedef struct {
-    app_ai_voice_wav_stream_state_t state;
-    app_ai_voice_wav_stream_state_t state_after_pad;
-    uint8_t riff_buf[12];
-    uint32_t riff_len;
-    uint32_t riff_match;
-    uint8_t chunk_header[8];
-    uint32_t chunk_header_len;
-    uint32_t chunk_size;
-    uint32_t chunk_read;
-    uint8_t fmt_buf[APP_AI_WAV_FMT_MIN_BYTES];
-    uint32_t fmt_len;
-    uint8_t fmt_valid;
-    uint8_t data_started;
-    uint8_t playback_started;
-    uint8_t pending_pcm_byte;
-    uint8_t pending_pcm_len;
+    app_ai_voice_wav_stream_state_t state;           /**< 当前解析状态。 */
+    app_ai_voice_wav_stream_state_t state_after_pad; /**< 跳过 pad 字节后恢复到的状态。 */
+    uint8_t riff_buf[12];                            /**< RIFF 头缓存：RIFF + size + WAVE。 */
+    uint32_t riff_len;                               /**< riff_buf 中已缓存的字节数。 */
+    uint32_t riff_match;                             /**< 查找 RIFF 魔数时已经匹配的字节数。 */
+    uint8_t chunk_header[8];                         /**< 当前 chunk 头缓存：id + size。 */
+    uint32_t chunk_header_len;                       /**< chunk_header 中已缓存的字节数。 */
+    uint32_t chunk_size;                             /**< 当前 chunk payload 总长度。 */
+    uint32_t chunk_read;                             /**< 当前 chunk payload 已处理长度。 */
+    uint8_t fmt_buf[APP_AI_WAV_FMT_MIN_BYTES];       /**< fmt chunk 关键字段缓存。 */
+    uint32_t fmt_len;                                /**< fmt_buf 中已缓存的字节数。 */
+    uint8_t fmt_valid;                               /**< fmt chunk 是否已通过格式校验。 */
+    uint8_t data_started;                            /**< 是否已经遇到并开始处理 data chunk。 */
+    uint8_t playback_started;                        /**< 本次回复播放会话是否已启动。 */
+    uint8_t pending_pcm_byte;                        /**< 跨分片残留的单个 PCM 低字节。 */
+    uint8_t pending_pcm_len;                         /**< pending_pcm_byte 是否有效，0 或 1。 */
 } app_ai_voice_wav_stream_t;
 
+/**
+ * @brief 初始化 AI 回复 WAV 流解析上下文。
+ *
+ * @param[out] stream 待初始化的解析上下文。
+ */
 static void app_ai_voice_wav_stream_init(app_ai_voice_wav_stream_t *stream)
 {
     memset(stream, 0, sizeof(*stream));
@@ -169,11 +188,22 @@ static void app_ai_voice_wav_stream_init(app_ai_voice_wav_stream_t *stream)
     stream->state_after_pad = APP_AI_WAV_STREAM_CHUNK_HEADER;
 }
 
+/**
+ * @brief 返回两个 uint32_t 中较小的值。
+ */
 static uint32_t app_ai_voice_min_u32(uint32_t a, uint32_t b)
 {
     return a < b ? a : b;
 }
 
+/**
+ * @brief 校验 WAV fmt chunk 是否符合本业务支持的 PCM 格式。
+ *
+ * 当前只支持 16kHz、单声道、16bit、PCM 编码。
+ *
+ * @param[in,out] stream WAV 流解析上下文。
+ * @return 成功返回 0；格式不支持或参数错误返回负值。
+ */
 static int app_ai_voice_wav_stream_validate_fmt(app_ai_voice_wav_stream_t *stream)
 {
     if (stream == NULL || stream->fmt_len < APP_AI_WAV_FMT_MIN_BYTES) {
@@ -196,6 +226,13 @@ static int app_ai_voice_wav_stream_validate_fmt(app_ai_voice_wav_stream_t *strea
     return 0;
 }
 
+/**
+ * @brief 结束当前 WAV chunk，并根据长度奇偶决定是否跳过 pad 字节。
+ *
+ * WAV chunk payload 为奇数字节时会附带 1 字节对齐填充，解析器需要显式跳过。
+ *
+ * @param[in,out] stream WAV 流解析上下文。
+ */
 static void app_ai_voice_wav_stream_finish_chunk(app_ai_voice_wav_stream_t *stream)
 {
     stream->chunk_header_len = 0u;
@@ -208,6 +245,17 @@ static void app_ai_voice_wav_stream_finish_chunk(app_ai_voice_wav_stream_t *stre
     }
 }
 
+/**
+ * @brief 将 data chunk 中的 PCM 字节流转换为 int16_t 并播放。
+ *
+ * HTTP 分片可能切在 PCM 样本的两个字节之间，函数会通过 pending_pcm_byte
+ * 保存半个样本，等下一片到来后再补齐播放。
+ *
+ * @param[in,out] stream WAV 流解析上下文。
+ * @param[in] data PCM 字节流。
+ * @param[in] len PCM 字节流长度。
+ * @return 成功返回 0；播放失败返回负值。
+ */
 static int app_ai_voice_play_pcm_bytes(app_ai_voice_wav_stream_t *stream,
                                        const uint8_t *data,
                                        uint32_t len)
@@ -266,6 +314,17 @@ static int app_ai_voice_wav_stream_start_playback(app_ai_voice_wav_stream_t *str
     return 0;
 }
 
+/**
+ * @brief 向 AI 回复 WAV 流解析器喂入一个 HTTP 分片。
+ *
+ * 本函数可处理 RIFF/chunk/data 被任意拆分的情况；遇到 data chunk 后会
+ * 边解析 PCM 边调用 service_audio_play() 播放。
+ *
+ * @param[in,out] stream WAV 流解析上下文。
+ * @param[in] data 当前 HTTP 分片数据。
+ * @param[in] len 当前 HTTP 分片长度。
+ * @return 成功返回 0；WAV 格式错误或播放失败返回负值。
+ */
 static int app_ai_voice_wav_stream_feed(app_ai_voice_wav_stream_t *stream,
                                         const uint8_t *data,
                                         uint32_t len)
@@ -407,6 +466,12 @@ static int app_ai_voice_wav_stream_feed(app_ai_voice_wav_stream_t *stream,
     return 0;
 }
 
+/**
+ * @brief 校验 AI 回复 WAV 流是否完整结束。
+ *
+ * @param[in] stream WAV 流解析上下文。
+ * @return 完整结束返回 0；fmt/data 缺失或 chunk 未完整返回负值。
+ */
 static int app_ai_voice_wav_stream_finish(const app_ai_voice_wav_stream_t *stream)
 {
     if (stream == NULL) {
@@ -780,6 +845,46 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
     return app_ai_voice_wav_stream_finish(&stream);
 }
 
+/**
+ * @brief 录制一次 AI 请求 PCM，直接追加到请求 WAV 缓冲区的 data 区。
+ *
+ * s_ai_wav_buf 前 44 字节预留给 WAV 头；录音阶段只写 PCM，停止后再根据
+ * 实际样本数回填 WAV 头，避免 service 层再维护一份整段录音缓存。
+ *
+ * @return 实际录到的 int16_t 单声道样本数。
+ */
+static uint32_t app_ai_voice_record_to_wav_buffer(void)
+{
+    int16_t frame[APP_BUSINESS_FRAME_SAMPLES];
+    int16_t *record_pcm = (int16_t *)&s_ai_wav_buf[APP_BUSINESS_WAV_HEADER_LEN];
+    uint32_t samples_total = 0u;
+
+    while (s_ai_recording && samples_total < APP_BUSINESS_AI_MAX_SAMPLES) {
+        uint32_t room = APP_BUSINESS_AI_MAX_SAMPLES - samples_total;
+        uint32_t request = room > APP_BUSINESS_FRAME_SAMPLES ?
+                           APP_BUSINESS_FRAME_SAMPLES :
+                           room;
+        int read_samples = service_audio_read(frame,
+                                              request,
+                                              APP_AI_RECORD_READ_TIMEOUT_MS);
+        if (read_samples <= 0) {
+            osal_delay_ms(5u);
+            continue;
+        }
+
+        memcpy(&record_pcm[samples_total],
+               frame,
+               (uint32_t)read_samples * sizeof(int16_t));
+        samples_total += (uint32_t)read_samples;
+    }
+
+    if (samples_total >= APP_BUSINESS_AI_MAX_SAMPLES) {
+        s_ai_recording = 0;
+    }
+
+    return samples_total;
+}
+
 /* ==========================================================================
  * AI 语音处理任务
  * ========================================================================== */
@@ -789,10 +894,9 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
  *
  * ## 执行流程（每次被 notify 唤醒一次→处理一次完整的问答）：
  *
- * 1. 阻塞等待 notify（来自 app_ai_voice_record_stop()）
- * 2. 从 service_audio 获取本次录音的 PCM 数据和长度
- * 3. 将 PCM 拷贝到 s_ai_wav_buf 中 WAV 头之后的位置
- * 4. 写入 WAV 文件头（44 字节），封装成标准 WAV 格式
+ * 1. 阻塞等待 notify（来自 app_ai_voice_record_start()）
+ * 2. 循环读取 service_audio PCM，直接写入 s_ai_wav_buf 的 WAV data 区
+ * 3. 写入 WAV 文件头（44 字节），封装成标准 WAV 格式
  * 5. 创建服务器 session，按 32KB 分片上传请求 WAV
  * 6. finish 后轮询 result_info，拿到回复 WAV 总长度
  * 7. 按 32KB 拉取 result_chunk，边解析 WAV 边播放 PCM，播放后丢弃分片
@@ -804,8 +908,8 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
  * - 不会因为单次失败导致锁泄漏或任务死锁
  *
  * ## 内存策略
- * - 请求 WAV 使用 s_ai_wav_buf；回复 WAV 只使用单个 HTTP 分片缓冲，边播边丢弃
- * - 录音 PCM 在 service_audio 的 s_record_buf 中，通过指针引用，不额外复制
+ * - 请求 WAV 使用 s_ai_wav_buf；录音 PCM 直接写到 WAV data 区，不经过 service 缓冲
+ * - 回复 WAV 只使用单个 HTTP 分片缓冲，边播边丢弃
  *
  * @param arg 未使用。
  */
@@ -814,14 +918,11 @@ static void app_ai_voice_task(void *arg)
     (void)arg;
 
     while (1) {
-        /* 阻塞等待：录音完成并停止后，由 record_stop() 发通知唤醒 */
+        /* 阻塞等待：AI 按下后由 record_start() 唤醒，随后在本任务内采集 PCM。 */
         (void)osal_task_notify_take(OSAL_WAIT_FOREVER);
-        const int16_t *record_pcm = NULL;
-        uint32_t samples_total = 0u;
 
-        /* 步骤 1：获取录音数据（指针指向 service 层内部缓冲区） */
-        int ret = service_audio_get_record_data(&record_pcm, &samples_total);
-        if (ret != 0 || record_pcm == NULL || samples_total == 0u) {
+        uint32_t samples_total = app_ai_voice_record_to_wav_buffer();
+        if (samples_total == 0u) {
             (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
             app_business_audio_session_end();
             continue;
@@ -833,16 +934,14 @@ static void app_ai_voice_task(void *arg)
             continue;
         }
 
-        /* 步骤 2-3：构造请求 WAV 文件（拷贝 PCM + 写文件头） */
+        /* 构造请求 WAV 文件：录音 PCM 已在 data 区，这里只回填 WAV 头。 */
         uint32_t pcm_bytes = samples_total * sizeof(int16_t);
         uint32_t wav_len = APP_BUSINESS_WAV_HEADER_LEN + pcm_bytes;
         if (pcm_bytes > 0u && wav_len <= APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES) {
-            int16_t *pcm = (int16_t *)&s_ai_wav_buf[APP_BUSINESS_WAV_HEADER_LEN];
-            memcpy(pcm, record_pcm, pcm_bytes);
             app_ai_voice_wav_write_header(s_ai_wav_buf, pcm_bytes);
 
             char session[64];
-            ret = app_ai_voice_start_session(session, sizeof(session));
+            int ret = app_ai_voice_start_session(session, sizeof(session));
             if (ret == 0) {
                 ret = app_ai_voice_upload_wav_chunks(session, wav_len);
             }
@@ -955,14 +1054,8 @@ int app_ai_voice_start(void)
  * 1. 检查模块是否已启动（s_started）
  * 2. 检查音频会话是否被 PTT 占用（app_business_audio_session_is_busy）
  * 3. 非阻塞尝试抢占音频会话锁（app_business_audio_session_try_begin）
- * 4. 清空上次录音数据，启动 service 层录音
- * 5. 设置 s_ai_recording = 1
- *
- * ## 调度细节
- * service_audio_start_record() 内部会：
- * - 清零 s_record_samples
- * - 设置 s_recording = 1u
- * - notify_give(s_record_task) → 唤醒 svc_audio_rec 开始采集循环
+ * 4. 设置 s_ai_recording = 1
+ * 5. notify_give(s_ai_task) → 唤醒 AI 任务开始循环读取 PCM
  *
  * ## 互斥保护
  * 若当前 PTT 已占用音频会话（s_audio_session_busy == 1），本次请求会被静默忽略。
@@ -979,12 +1072,11 @@ void app_ai_voice_record_start(void)
     if (app_business_audio_session_try_begin() != 0) {
         return;
     }
-    if (service_audio_start_record() != 0) {
-        app_business_audio_session_end();
-        return;
-    }
 
     s_ai_recording = 1;
+    if (s_ai_task != NULL) {
+        (void)osal_task_notify_give(s_ai_task);
+    }
 }
 
 /**
@@ -993,10 +1085,7 @@ void app_ai_voice_record_start(void)
  * ## 执行流程
  * 1. 检查 s_ai_recording 是否为 1（防止重复停止）
  * 2. 清零 s_ai_recording
- * 3. 调用 service_audio_stop_record()：
- *    - 清零 s_recording → 录音任务在循环中检测到此标志后退出内层循环
- *    - 等待 svc_audio_rec 任务退出（最多 150ms）
- * 4. notify_give(s_ai_task) → 唤醒 biz_ai 任务开始处理
+ * 3. biz_ai 任务在下一次 read 超时或读完一帧后退出采集循环并开始处理
  *
  * ## 调度细节
  * biz_ai 任务被唤醒后执行以下流程（详见 app_ai_voice_task）：
@@ -1011,8 +1100,4 @@ void app_ai_voice_record_stop(void)
         return;
     }
     s_ai_recording = 0;
-    (void)service_audio_stop_record();
-    if (s_ai_task != NULL) {
-        (void)osal_task_notify_give(s_ai_task);
-    }
 }

@@ -189,6 +189,32 @@ static int app_camera_frame_is_valid_jpeg(const service_camera_frame_t *frame)
             frame->data[frame->len - 1u] == 0xD9u) ? 1 : 0;
 }
 
+/**
+ * @brief 丢弃若干帧，等待摄像头模式切换后的输出稳定。
+ *
+ * RGB565/JPEG 模式切换后，底层可能还会返回旧模式缓冲或曝光未稳定的帧。
+ * 这是相机业务自己的稳定策略，因此放在 app_camera 内部，而不是 service API。
+ *
+ * @param[in] count 需要丢弃的帧数。
+ * @return 成功返回 0；取帧失败返回负值。
+ */
+static int app_camera_discard_frames(uint8_t count)
+{
+    for (uint8_t i = 0; i < count; i++) {
+        service_camera_frame_t frame;
+        int ret = service_camera_get_frame(&frame);
+        if (ret != 0) {
+            APP_LOGW(TAG, "相机丢帧失败, index=%u, ret=%d",
+                     (unsigned int)i,
+                     ret);
+            return ret;
+        }
+        service_camera_return_frame(&frame);
+    }
+
+    return 0;
+}
+
 #if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
 /**
  * @brief 绘制固定 RGB565 色块。
@@ -311,7 +337,7 @@ static void app_camera_do_capture(void)
 
     int ret = service_camera_set_jpeg_mode();
     if (ret == 0) {
-        ret = service_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
+        ret = app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
     }
     if (ret != 0) {
         APP_LOGW(TAG, "相机切换 JPEG 模式失败, ret=%d", ret);
@@ -439,7 +465,7 @@ static void app_camera_do_retake(void)
 #endif
     s_frozen = 0;
     if (s_page_active != 0 && service_camera_set_rgb565_mode() == 0) {
-        (void)service_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
+        (void)app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
         s_preview_active = 1;
     }
 }

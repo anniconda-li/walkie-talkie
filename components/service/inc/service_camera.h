@@ -100,8 +100,7 @@ int service_camera_set_rgb565_mode(void);
 /**
  * @brief 切换到 JPEG 拍照模式。
  *
- * 该模式用于获取 JPEG 压缩图像。切换后建议调用 service_camera_discard_frames()
- * 丢弃 1-2 帧，等待传感器输出稳定。
+ * 该模式用于获取 JPEG 压缩图像。模式切换后的丢帧稳定策略由 app 层决定。
  *
  * @return 成功返回 0；失败返回负值。
  */
@@ -128,17 +127,6 @@ int service_camera_get_frame(service_camera_frame_t *frame);
  * @param[in,out] frame 待归还的帧视图。
  */
 void service_camera_return_frame(service_camera_frame_t *frame);
-
-/**
- * @brief 丢弃若干帧。
- *
- * 模式切换后传感器前几帧可能仍是旧格式或曝光未稳定。此接口循环取帧并立即
- * 归还，用于稳定 RGB565/JPEG 切换后的输出。
- *
- * @param[in] count 需要丢弃的帧数。
- * @return 成功返回 0；失败返回负值。
- */
-int service_camera_discard_frames(uint8_t count);
 
 #ifdef __cplusplus
 }

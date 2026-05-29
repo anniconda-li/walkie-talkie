@@ -12,8 +12,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** @brief 电池 service 日志标签。 */
 static const char *TAG = "service_battery";
 
+/**
+ * @brief 电池放电曲线表项。
+ *
+ * service 内部使用 ADC 分压后电压查表并插值成百分比，上层不感知电压。
+ */
 typedef struct {
     int percent; /**< 电量百分比。 */
     int adc_mv;  /**< 分压后 ADC 输入电压，单位 mV。 */
@@ -40,10 +46,15 @@ static const service_battery_curve_point_t s_battery_curve[] = {
     {0, 1500},
 };
 
+/** @brief 一阶低通滤波新采样权重分子。 */
 #define SERVICE_BATTERY_FILTER_ALPHA_NUM            1
+/** @brief 一阶低通滤波权重分母，当前等效为 new * 1/8。 */
 #define SERVICE_BATTERY_FILTER_ALPHA_DEN            8
+/** @brief 对外显示电量的取整步进，单位百分比。 */
 #define SERVICE_BATTERY_PERCENT_STEP                5
+/** @brief 普通电量档位变化需要连续确认的采样次数。 */
 #define SERVICE_BATTERY_DISPLAY_CONFIRM_COUNT       3u
+/** @brief 大幅电量变化阈值，达到后缩短显示确认次数。 */
 #define SERVICE_BATTERY_DISPLAY_FAST_DELTA          15
 
 /** @brief 电池服务是否已经绑定采样 ops。 */
@@ -229,29 +240,29 @@ static int service_battery_ops_is_valid(const service_battery_sample_ops_t *ops)
     return 0;
 }
 
-int service_battery_init(const service_battery_config_t *cfg)
+int service_battery_init(const service_battery_sample_ops_t *ops)
 {
     /*
-     * cfg == NULL 表示只检查当前 service 是否已初始化。
+     * ops == NULL 表示只检查当前 service 是否已初始化。
      * 便于上层在不重新装配 ops 的情况下做容错检查。
      */
-    if (cfg == NULL) {
+    if (ops == NULL) {
         return s_battery_inited != 0u ? 0 : -2;
     }
 
-    if (service_battery_ops_is_valid(&cfg->sample_ops) != 0) {
+    if (service_battery_ops_is_valid(ops) != 0) {
         SERVICE_LOGE(TAG, "电池服务初始化失败: ops 无效");
         s_battery_inited = 0u;
         return -3;
     }
 
-    if (cfg->sample_ops.is_initialized() != 1) {
+    if (ops->is_initialized() != 1) {
         SERVICE_LOGE(TAG, "电池服务初始化失败: 下层电池 driver 未初始化");
         s_battery_inited = 0u;
         return -4;
     }
 
-    s_battery_ops = cfg->sample_ops;
+    s_battery_ops = *ops;
     s_battery_inited = 1u;
     return 0;
 }
@@ -269,7 +280,15 @@ int service_battery_deinit(void)
     return 0;
 }
 
-int service_battery_get_adc_voltage_mv(int *voltage_mv)
+/**
+ * @brief 读取一次底层 ADC 电压。
+ *
+ * 该函数只在 service 内部使用；对上层隐藏 ADC 电压细节，只暴露最终电量。
+ *
+ * @param[out] voltage_mv ADC 引脚电压，单位 mV。
+ * @return 成功返回 0；失败返回负值。
+ */
+static int service_battery_read_adc_voltage_mv(int *voltage_mv)
 {
     if (voltage_mv == NULL) {
         return -1;
@@ -285,24 +304,14 @@ int service_battery_get_adc_voltage_mv(int *voltage_mv)
     return s_battery_ops.read_voltage_mv(voltage_mv);
 }
 
-int service_battery_get_percent(int *percent)
+int service_battery_get(int *level)
 {
-    if (percent == NULL) {
+    if (level == NULL) {
         return -1;
     }
 
     int adc_mv = 0;
-    return service_battery_get_status(&adc_mv, percent);
-}
-
-int service_battery_get_status(int *voltage_mv, int *percent)
-{
-    if (voltage_mv == NULL || percent == NULL) {
-        return -1;
-    }
-
-    int adc_mv = 0;
-    int ret = service_battery_get_adc_voltage_mv(&adc_mv);
+    int ret = service_battery_read_adc_voltage_mv(&adc_mv);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "电池电压读取失败, ret=%d", ret);
         return ret;
@@ -312,8 +321,7 @@ int service_battery_get_status(int *voltage_mv, int *percent)
     int raw_percent = service_battery_voltage_to_percent(filtered_mv);
     int rounded_percent = service_battery_round_percent(raw_percent);
 
-    /* 对外返回滤波后的电压和经过显示滞回的百分比，保证 UI 不随 ADC 毛刺跳动。 */
-    *voltage_mv = filtered_mv;
-    *percent = service_battery_stabilize_percent(rounded_percent);
+    /* 对外只返回经过显示滞回的电量百分比，保证 UI 不随 ADC 毛刺跳动。 */
+    *level = service_battery_stabilize_percent(rounded_percent);
     return 0;
 }

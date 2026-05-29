@@ -14,8 +14,6 @@
 extern "C" {
 #endif
 
-typedef struct service_network_config service_network_config_t;
-
 /**
  * @brief 通用网络状态快照。
  */
@@ -51,22 +49,15 @@ typedef struct {
 } service_network_ops_t;
 
 /**
- * @brief 网络服务初始化配置。
- */
-struct service_network_config {
-    service_network_ops_t ops; /**< 下层网络能力函数表。 */
-};
-
-/**
  * @brief 初始化网络服务。
  *
- * 初始化时会复制 cfg 中的网络 ops，并检查下层 driver 是否已经初始化。
+ * 初始化时会复制 ops 中的网络能力函数表，并检查下层 driver 是否已经初始化。
  * 后续所有网络 API 都通过 service 内部保存的 ops 调用。
  *
- * @param[in] cfg 初始化配置；为 NULL 时仅检查 service 是否已经初始化。
+ * @param[in] ops 网络能力函数表；为 NULL 时仅检查 service 是否已经初始化。
  * @return 成功返回 0；失败返回负值。
  */
-int service_network_init(const service_network_config_t *cfg);
+int service_network_init(const service_network_ops_t *ops);
 
 /**
  * @brief 释放网络服务。

@@ -2,8 +2,8 @@
  * @file service_audio.h
  * @brief 音频能力服务接口。
  *
- * 本服务对上提供单声道 PCM 录放能力。底层采集和播放设备通过能力接口绑定，
- * service 负责录放状态、参数检查和业务友好的录放 API。
+ * 本服务对上提供单声道 PCM 读写能力。底层采集和播放设备通过能力接口绑定，
+ * service 负责参数检查、分块读写和播放状态，不持有具体业务的整段录音缓存。
  */
 #ifndef SERVICE_AUDIO_H
 #define SERVICE_AUDIO_H
@@ -43,7 +43,6 @@ typedef struct {
     service_audio_capture_ops_t capture_ops;   /**< 下层采集能力函数表。 */
     service_audio_playback_ops_t playback_ops; /**< 下层播放能力函数表。 */
     uint8_t volume;              /**< 播放音量，范围 0-100；填 0 使用默认值 100。 */
-    uint8_t passthrough_gain;    /**< 本地直通软件增益；填 0 使用默认值 1。 */
 } service_audio_config_t;
 
 /**
@@ -63,36 +62,6 @@ int service_audio_init(const service_audio_config_t *cfg);
  * @return 成功返回 0；失败返回负值。
  */
 int service_audio_deinit(void);
-
-/**
- * @brief 开始录音。
- *
- * 清空内部录音缓冲区并唤醒录音任务。录音数据会被写入 service 内部 PSRAM
- * 缓冲区，直到 stop_record 或达到最大录音时长。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int service_audio_start_record(void);
-
-/**
- * @brief 停止录音。
- *
- * 通知录音任务退出采集循环，并等待当前帧读取结束。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int service_audio_stop_record(void);
-
-/**
- * @brief 获取最近一次录音 PCM 数据。
- *
- * 指针指向 service 内部静态缓冲区，在下一次开始录音前有效。
- *
- * @param[out] pcm 录音 PCM 指针。
- * @param[out] samples 录音样本数。
- * @return 成功返回 0；失败返回负值。
- */
-int service_audio_get_record_data(const int16_t **pcm, uint32_t *samples);
 
 /**
  * @brief 开始播放。
@@ -148,26 +117,6 @@ int service_audio_set_volume(uint8_t volume);
  * @return 成功返回 0；失败返回负值。
  */
 int service_audio_set_mute(int mute);
-
-/**
- * @brief 设置本地直通软件增益。
- *
- * @param[in] gain 软件增益，填 0 等同于 1。
- * @return 成功返回 0；失败返回负值。
- */
-int service_audio_set_passthrough_gain(uint8_t gain);
-
-/**
- * @brief 执行一次本地直通调试。
- *
- * @param[in,out] pcm_buf 单声道 PCM 中间缓冲区。
- * @param[in] samples 中间缓冲区可容纳的 int16_t 样本数。
- * @param[in] timeout_ms 单次底层读写超时时间，单位毫秒。
- * @return 成功返回实际播放的单声道样本数；失败返回负值。
- */
-int service_audio_passthrough_once(int16_t *pcm_buf,
-                                   uint32_t samples,
-                                   uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }
