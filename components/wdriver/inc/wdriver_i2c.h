@@ -1,6 +1,6 @@
 /**
  * @file wdriver_i2c.h
- * @brief WDRIVER I2C bus adapter.
+ * @brief WDRIVER I2C 总线适配接口。
  */
 #ifndef WDRIVER_I2C_H
 #define WDRIVER_I2C_H
@@ -13,22 +13,37 @@
 extern "C" {
 #endif
 
+/**
+ * @brief 板级 I2C 控制器端口号。
+ */
 #ifndef WDRIVER_I2C_PORT
 #define WDRIVER_I2C_PORT 0
 #endif
 
+/**
+ * @brief 板级 I2C SDA 引脚。
+ */
 #ifndef WDRIVER_I2C_SDA_IO
 #define WDRIVER_I2C_SDA_IO GPIO_NUM_1
 #endif
 
+/**
+ * @brief 板级 I2C SCL 引脚。
+ */
 #ifndef WDRIVER_I2C_SCL_IO
 #define WDRIVER_I2C_SCL_IO GPIO_NUM_2
 #endif
 
+/**
+ * @brief 板级 I2C 默认时钟频率，单位为 Hz。
+ */
 #ifndef WDRIVER_I2C_SCL_SPEED_HZ
 #define WDRIVER_I2C_SCL_SPEED_HZ 100000u
 #endif
 
+/**
+ * @brief 板级 I2C 单次传输超时时间，单位为毫秒。
+ */
 #ifndef WDRIVER_I2C_XFER_TIMEOUT_MS
 #define WDRIVER_I2C_XFER_TIMEOUT_MS 1000
 #endif
