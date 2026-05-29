@@ -7,7 +7,7 @@
 static app_boot_stage_status_t s_boot_status[APP_BOOT_STAGE_COUNT];
 
 static const char *const s_stage_names[APP_BOOT_STAGE_COUNT] = {
-    "BSP",
+    "WDRIVER",
     "Screen",
     "Audio",
     "Battery",

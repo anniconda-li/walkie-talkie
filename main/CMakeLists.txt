@@ -7,8 +7,8 @@ idf_component_register(
 
     REQUIRES
         app
-        bsp
-        device_driver
+        wdriver
+        device
         osal
         service
 )

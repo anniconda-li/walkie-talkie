@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 typedef enum {
-    APP_BOOT_STAGE_BSP = 0,
+    APP_BOOT_STAGE_WDRIVER = 0,
     APP_BOOT_STAGE_SCREEN,
     APP_BOOT_STAGE_AUDIO,
     APP_BOOT_STAGE_BATTERY,

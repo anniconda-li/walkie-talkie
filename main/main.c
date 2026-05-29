@@ -6,8 +6,8 @@
 #include "app_business.h"
 #include "app_boot_status.h"
 #include "app_ui.h"
-#include "bsp.h"
-#include "driver_init.h"
+#include "wdriver.h"
+#include "d_init.h"
 #include "osal_log.h"
 #include "osal_task.h"
 #include "service_init.h"
@@ -113,16 +113,16 @@ void app_main(void)
 {
     OSAL_LOGI(TAG, "开始临时 4G/ML307C 测试启动");
 
-    int ret = bsp_init();
+    int ret = wdriver_init();
 
     if (ret != 0) {
-        OSAL_LOGE(TAG, "4G 测试失败: BSP 初始化失败, ret=%d", ret);
+        OSAL_LOGE(TAG, "4G 测试失败: WDRIVER 初始化失败, ret=%d", ret);
         while (1) {
             osal_delay_ms(1000u);
         }
     }
 
-    ret = driver_network_init();
+    ret = d_network_init();
     if (ret != 0) {
         OSAL_LOGE(TAG, "4G 测试失败: ML307C driver 初始化失败, ret=%d", ret);
         while (1) {
@@ -195,16 +195,16 @@ void app_main(void)
 
     app_boot_status_reset();
 
-    boot_mark(APP_BOOT_STAGE_BSP, APP_BOOT_STATE_RUNNING, 0);
-    int ret = bsp_init();
+    boot_mark(APP_BOOT_STAGE_WDRIVER, APP_BOOT_STATE_RUNNING, 0);
+    int ret = wdriver_init();
     if (ret != 0) {
-        OSAL_LOGE(TAG, "BSP 基础资源初始化失败, ret=%d", ret);
-        boot_fatal(APP_BOOT_STAGE_BSP, ret);
+        OSAL_LOGE(TAG, "WDRIVER 基础资源初始化失败, ret=%d", ret);
+        boot_fatal(APP_BOOT_STAGE_WDRIVER, ret);
     }
-    boot_mark(APP_BOOT_STAGE_BSP, APP_BOOT_STATE_OK, 0);
+    boot_mark(APP_BOOT_STAGE_WDRIVER, APP_BOOT_STATE_OK, 0);
 
     boot_mark(APP_BOOT_STAGE_SCREEN, APP_BOOT_STATE_RUNNING, 0);
-    ret = driver_screen_init();
+    ret = d_screen_init();
     if (ret != 0) {
         OSAL_LOGE(TAG, "屏幕 driver 初始化失败, ret=%d", ret);
         boot_fatal(APP_BOOT_STAGE_SCREEN, ret);
@@ -226,7 +226,7 @@ void app_main(void)
     boot_mark(APP_BOOT_STAGE_UI, APP_BOOT_STATE_OK, 0);
 
     boot_mark(APP_BOOT_STAGE_AUDIO, APP_BOOT_STATE_RUNNING, 0);
-    ret = driver_audio_init();
+    ret = d_audio_init();
     if (ret != 0) {
         OSAL_LOGE(TAG, "音频 driver 初始化失败, ret=%d", ret);
         boot_fatal(APP_BOOT_STAGE_AUDIO, ret);
@@ -239,7 +239,7 @@ void app_main(void)
     boot_mark(APP_BOOT_STAGE_AUDIO, APP_BOOT_STATE_OK, 0);
 
     boot_mark(APP_BOOT_STAGE_BATTERY, APP_BOOT_STATE_RUNNING, 0);
-    ret = driver_power_init();
+    ret = d_power_init();
     if (ret != 0) {
         OSAL_LOGW(TAG, "电池 driver 初始化失败，电量显示将不可用, ret=%d", ret);
         boot_mark(APP_BOOT_STAGE_BATTERY, APP_BOOT_STATE_WARN, ret);
@@ -254,7 +254,7 @@ void app_main(void)
     }
 
     boot_mark(APP_BOOT_STAGE_NETWORK, APP_BOOT_STATE_RUNNING, 0);
-    ret = driver_network_init();
+    ret = d_network_init();
     if (ret != 0) {
         OSAL_LOGW(TAG, "网络 driver 初始化失败，业务将以未联网状态继续, ret=%d", ret);
     }
@@ -268,7 +268,7 @@ void app_main(void)
     }
 
     boot_mark(APP_BOOT_STAGE_CAMERA, APP_BOOT_STATE_RUNNING, 0);
-    ret = driver_optional_camera_init();
+    ret = d_optional_camera_init();
     if (ret != 0) {
         boot_mark(APP_BOOT_STAGE_CAMERA, APP_BOOT_STATE_WARN, ret);
     } else {

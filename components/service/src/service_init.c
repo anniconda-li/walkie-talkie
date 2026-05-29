@@ -8,16 +8,16 @@
  */
 #include "service_init.h"
 
-#include "driver_battery.h"
-#include "driver_camera.h"
-#include "driver_es8311.h"
-#include "driver_es7210.h"
-#include "driver_init.h"
-#include "driver_inmp441.h"
-#include "driver_lcd.h"
-#include "driver_max98357a.h"
-#include "driver_ml307c.h"
-#include "driver_wifi.h"
+#include "d_battery.h"
+#include "d_camera.h"
+#include "d_es8311.h"
+#include "d_es7210.h"
+#include "d_init.h"
+#include "d_inmp441.h"
+#include "d_lcd.h"
+#include "d_max98357a.h"
+#include "d_ml307c.h"
+#include "d_wifi.h"
 #include "service_audio.h"
 #include "service_battery.h"
 #include "service_camera.h"
@@ -31,11 +31,11 @@ static const char *TAG = "service_init";
 /**
  * @brief 将 LCD driver 的坐标接口适配为 service_screen 的 x/y/w/h 接口。
  *
- * App 只看到 service_screen_draw_rgb565(x, y, w, h)，不直接依赖 driver_lcd。
+ * App 只看到 service_screen_draw_rgb565(x, y, w, h)，不直接依赖 d_lcd。
  */
 static int service_init_screen_draw_rgb565(int x, int y, int w, int h, const void *data)
 {
-    return driver_lcd_draw_bitmap(x, y, x + w, y + h, data);
+    return d_lcd_draw_bitmap(x, y, x + w, y + h, data);
 }
 
 /**
@@ -46,7 +46,7 @@ static int service_init_screen_draw_rgb565(int x, int y, int w, int h, const voi
  */
 static void *service_init_screen_get_panel_io(void)
 {
-    return (void *)driver_lcd_get_panel_io_handle();
+    return (void *)d_lcd_get_panel_io_handle();
 }
 
 /**
@@ -54,7 +54,7 @@ static void *service_init_screen_get_panel_io(void)
  */
 static void *service_init_screen_get_panel(void)
 {
-    return (void *)driver_lcd_get_panel_handle();
+    return (void *)d_lcd_get_panel_handle();
 }
 
 /**
@@ -62,7 +62,7 @@ static void *service_init_screen_get_panel(void)
  */
 static void *service_init_screen_get_touch(void)
 {
-    return (void *)driver_lcd_get_touch_handle();
+    return (void *)d_lcd_get_touch_handle();
 }
 
 /**
@@ -92,7 +92,7 @@ static int service_init_camera_get_frame(service_camera_frame_t *frame)
         return -1;
     }
 
-    camera_fb_t *fb = driver_camera_get_frame();
+    camera_fb_t *fb = d_camera_get_frame();
     if (fb == NULL) {
         return -2;
     }
@@ -127,7 +127,7 @@ static int service_init_camera_get_frame(service_camera_frame_t *frame)
 static void service_init_camera_return_frame(void *opaque)
 {
     if (opaque != NULL) {
-        driver_camera_return_frame((camera_fb_t *)opaque);
+        d_camera_return_frame((camera_fb_t *)opaque);
     }
 }
 
@@ -147,17 +147,17 @@ static int service_init_network_ml307c_get_status(service_network_status_t *stat
         return -1;
     }
 
-    driver_ml307c_status_t driver_status;
-    int ret = driver_ml307c_get_status(&driver_status);
+    d_ml307c_status_t d_status;
+    int ret = d_ml307c_get_status(&d_status);
     if (ret != 0) {
         return ret;
     }
 
-    status->rssi = driver_status.rssi;
-    status->reg_state = driver_status.reg_state;
-    status->link_state = driver_status.link_state;
-    status->sim_ready = driver_status.sim_ready;
-    status->at_ready = driver_status.at_ready;
+    status->rssi = d_status.rssi;
+    status->reg_state = d_status.reg_state;
+    status->link_state = d_status.link_state;
+    status->sim_ready = d_status.sim_ready;
+    status->at_ready = d_status.at_ready;
     return 0;
 }
 
@@ -180,8 +180,8 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
         return -1;
     }
 
-    driver_wifi_status_t wifi_status;
-    int ret = driver_wifi_get_status(&wifi_status);
+    d_wifi_status_t wifi_status;
+    int ret = d_wifi_get_status(&wifi_status);
     if (ret != 0) {
         return ret;
     }
@@ -205,29 +205,29 @@ int service_init_network(void)
     service_network_config_t network_cfg = {
         .ops = {
 #if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
-            .is_initialized = driver_wifi_is_initialized,
+            .is_initialized = d_wifi_is_initialized,
             .get_status = service_init_network_wifi_get_status,
-            .is_ready = driver_wifi_is_ready,
-            .tcp_connect = driver_wifi_tcp_connect,
-            .tcp_send = driver_wifi_tcp_send,
-            .tcp_close = driver_wifi_tcp_close,
-            .udp_connect = driver_wifi_udp_connect,
-            .udp_send = driver_wifi_udp_send,
-            .read_downlink = driver_wifi_read_downlink,
-            .http_post = driver_wifi_http_post,
-            .http_post_wav = driver_wifi_http_post_wav,
+            .is_ready = d_wifi_is_ready,
+            .tcp_connect = d_wifi_tcp_connect,
+            .tcp_send = d_wifi_tcp_send,
+            .tcp_close = d_wifi_tcp_close,
+            .udp_connect = d_wifi_udp_connect,
+            .udp_send = d_wifi_udp_send,
+            .read_downlink = d_wifi_read_downlink,
+            .http_post = d_wifi_http_post,
+            .http_post_wav = d_wifi_http_post_wav,
 #else
-            .is_initialized = driver_ml307c_is_initialized,
+            .is_initialized = d_ml307c_is_initialized,
             .get_status = service_init_network_ml307c_get_status,
-            .is_ready = driver_ml307c_is_ready,
-            .tcp_connect = driver_ml307c_tcp_connect,
-            .tcp_send = driver_ml307c_tcp_send,
-            .tcp_close = driver_ml307c_tcp_close,
-            .udp_connect = driver_ml307c_udp_connect,
-            .udp_send = driver_ml307c_udp_send,
-            .read_downlink = driver_ml307c_read_downlink,
-            .http_post = driver_ml307c_http_post,
-            .http_post_wav = driver_ml307c_http_post_wav,
+            .is_ready = d_ml307c_is_ready,
+            .tcp_connect = d_ml307c_tcp_connect,
+            .tcp_send = d_ml307c_tcp_send,
+            .tcp_close = d_ml307c_tcp_close,
+            .udp_connect = d_ml307c_udp_connect,
+            .udp_send = d_ml307c_udp_send,
+            .read_downlink = d_ml307c_read_downlink,
+            .http_post = d_ml307c_http_post,
+            .http_post_wav = d_ml307c_http_post_wav,
 #endif
         },
     };
@@ -241,7 +241,7 @@ int service_init_network(void)
 
 int service_init_network_recover(void)
 {
-    int ret = driver_network_init();
+    int ret = d_network_init();
     if (ret != 0) {
         SERVICE_LOGW(TAG, "网络 driver 恢复失败, ret=%d", ret);
         return ret;
@@ -259,24 +259,24 @@ int service_init_audio(void)
     service_audio_config_t audio_cfg = {
         .capture_ops = {
 #if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
-            .is_initialized = driver_inmp441_is_initialized,
-            .read_pcm = driver_inmp441_read_pcm,
+            .is_initialized = d_inmp441_is_initialized,
+            .read_pcm = d_inmp441_read_pcm,
 #else
-            .is_initialized = driver_es7210_is_initialized,
-            .read_pcm = driver_es7210_read_pcm,
+            .is_initialized = d_es7210_is_initialized,
+            .read_pcm = d_es7210_read_pcm,
 #endif
         },
         .playback_ops = {
 #if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
-            .is_initialized = driver_max98357a_is_initialized,
-            .play_pcm = driver_max98357a_play_pcm,
-            .set_volume = driver_max98357a_set_volume,
-            .set_mute = driver_max98357a_set_mute,
+            .is_initialized = d_max98357a_is_initialized,
+            .play_pcm = d_max98357a_play_pcm,
+            .set_volume = d_max98357a_set_volume,
+            .set_mute = d_max98357a_set_mute,
 #else
-            .is_initialized = driver_es8311_is_initialized,
-            .play_pcm = driver_es8311_play_pcm,
-            .set_volume = driver_es8311_set_volume,
-            .set_mute = driver_es8311_set_mute,
+            .is_initialized = d_es8311_is_initialized,
+            .play_pcm = d_es8311_play_pcm,
+            .set_volume = d_es8311_set_volume,
+            .set_mute = d_es8311_set_mute,
 #endif
         },
         .volume = 80u,
@@ -294,9 +294,9 @@ int service_init_camera(void)
 {
     service_camera_config_t camera_cfg = {
         .ops = {
-            .is_initialized = driver_camera_is_initialized,
-            .set_rgb565_mode = driver_camera_set_rgb565_mode,
-            .set_jpeg_mode = driver_camera_set_jpeg_mode,
+            .is_initialized = d_camera_is_initialized,
+            .set_rgb565_mode = d_camera_set_rgb565_mode,
+            .set_jpeg_mode = d_camera_set_jpeg_mode,
             .get_frame = service_init_camera_get_frame,
             .return_frame = service_init_camera_return_frame,
         },
@@ -314,17 +314,17 @@ int service_init_screen(void)
 {
     service_screen_config_t screen_cfg = {
         .device_ops = {
-            .is_initialized = driver_lcd_is_initialized,
+            .is_initialized = d_lcd_is_initialized,
             .get_panel_io = service_init_screen_get_panel_io,
             .get_panel = service_init_screen_get_panel,
             .get_touch = service_init_screen_get_touch,
-            .display_on = driver_lcd_display_on,
+            .display_on = d_lcd_display_on,
             .draw_rgb565 = service_init_screen_draw_rgb565,
-            .hres = driver_lcd_H_RES,
-            .vres = driver_lcd_V_RES,
-            .swap_xy = driver_lcd_SWAP_XY,
-            .mirror_x = driver_lcd_MIRROR_X,
-            .mirror_y = driver_lcd_MIRROR_Y,
+            .hres = d_lcd_H_RES,
+            .vres = d_lcd_V_RES,
+            .swap_xy = d_lcd_SWAP_XY,
+            .mirror_x = d_lcd_MIRROR_X,
+            .mirror_y = d_lcd_MIRROR_Y,
         },
     };
 
@@ -340,8 +340,8 @@ int service_init_battery(void)
 {
     service_battery_config_t battery_cfg = {
         .sample_ops = {
-            .is_initialized = driver_battery_is_initialized,
-            .read_voltage_mv = driver_battery_read_voltage_mv,
+            .is_initialized = d_battery_is_initialized,
+            .read_voltage_mv = d_battery_read_voltage_mv,
         },
     };
     int ret = service_battery_init(&battery_cfg);
@@ -379,7 +379,7 @@ int service_init(void)
         return ret;
     }
 
-#if DRIVER_INIT_ENABLE_CAMERA
+#if D_INIT_ENABLE_CAMERA
     /*
      * 摄像头当前仍是可选业务：只有 driver 层明确启用 camera 初始化时，
      * 才在总 service_init() 中装配 camera service。这样未接摄像头时不会

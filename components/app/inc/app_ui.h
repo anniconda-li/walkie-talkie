@@ -2,7 +2,7 @@
  * @file app_ui.h
  * @brief 应用 UI 页面接口。
  *
- * UI 页面属于 app 层，只表达产品界面和业务状态，不直接访问 BSP。
+ * UI 页面属于 app 层，只表达产品界面和业务状态，不直接访问 WDRIVER。
  */
 #ifndef APP_UI_H
 #define APP_UI_H

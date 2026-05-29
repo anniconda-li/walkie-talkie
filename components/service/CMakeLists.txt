@@ -7,7 +7,7 @@ idf_component_register(
         "inc"
 
     REQUIRES 
-        device_driver
+        device
         espressif__esp_lvgl_port
         esp_lcd
         espressif__esp_lcd_touch
