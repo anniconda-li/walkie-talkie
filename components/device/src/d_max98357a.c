@@ -12,12 +12,24 @@ static const char *TAG = "d_max98357a";
 
 #define D_MAX98357A_MAX_FRAMES 256u
 
+/** @brief 初始化时承接并保存的 WDRIVER 能力函数表。 */
 static d_max98357a_wdriver_ops_t s_d_ops;
+
+/** @brief MAX98357A 驱动是否已完成初始化。 */
 static uint8_t s_d_inited = 0u;
+
+/** @brief 软件音量百分比，写入 I2S 前按该值缩放。 */
 static uint8_t s_d_volume = 80u;
+
+/** @brief 软件静音标志，非 0 时输出静音样本。 */
 static uint8_t s_d_mute = 0u;
+
+/** @brief MAX98357A 单次播放前的 PCM 缩放缓存。 */
 static int16_t s_d_mono_buf[D_MAX98357A_MAX_FRAMES];
 
+/**
+ * @brief 根据当前音量和静音状态缩放单个 PCM 样本。
+ */
 static int16_t d_max98357a_scale_sample(int16_t sample)
 {
     if (s_d_mute || s_d_volume == 0u) {

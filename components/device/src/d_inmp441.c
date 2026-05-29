@@ -12,8 +12,13 @@ static const char *TAG = "d_inmp441";
 
 #define D_INMP441_MAX_SAMPLES 256u
 
+/** @brief 初始化时承接并保存的 WDRIVER 能力函数表。 */
 static d_inmp441_wdriver_ops_t s_d_ops;
+
+/** @brief INMP441 驱动是否已完成初始化。 */
 static uint8_t s_d_inited = 0u;
+
+/** @brief INMP441 单次 I2S 读取的临时 PCM 缓存。 */
 static int16_t s_d_raw_buf[D_INMP441_MAX_SAMPLES];
 
 int d_inmp441_init(const d_inmp441_wdriver_ops_t *ops)

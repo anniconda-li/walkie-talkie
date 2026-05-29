@@ -11,64 +11,65 @@
 
 static const char *TAG = "d_es7210";
 
-#define ES7210_RESET_REG00          0x00u
-#define ES7210_MAINCLK_REG02        0x02u
-#define ES7210_LRCK_DIVH_REG04      0x04u
-#define ES7210_LRCK_DIVL_REG05      0x05u
-#define ES7210_POWER_DOWN_REG06     0x06u
-#define ES7210_OSR_REG07            0x07u
-#define ES7210_TIME_CONTROL0_REG09  0x09u
-#define ES7210_TIME_CONTROL1_REG0A  0x0Au
-#define ES7210_SDP_INTERFACE1_REG11 0x11u
-#define ES7210_SDP_INTERFACE2_REG12 0x12u
-#define ES7210_ADC1_VOLUME_REG1B    0x1Bu
-#define ES7210_ADC2_VOLUME_REG1C    0x1Cu
-#define ES7210_ADC3_VOLUME_REG1D    0x1Du
-#define ES7210_ADC4_VOLUME_REG1E    0x1Eu
-#define ES7210_ADC34_HPF2_REG20     0x20u
-#define ES7210_ADC34_HPF1_REG21     0x21u
-#define ES7210_ADC12_HPF2_REG22     0x22u
-#define ES7210_ADC12_HPF1_REG23     0x23u
-#define ES7210_ANALOG_REG40         0x40u
-#define ES7210_MIC12_BIAS_REG41     0x41u
-#define ES7210_MIC34_BIAS_REG42     0x42u
-#define ES7210_MIC1_GAIN_REG43      0x43u
-#define ES7210_MIC2_GAIN_REG44      0x44u
-#define ES7210_MIC3_GAIN_REG45      0x45u
-#define ES7210_MIC4_GAIN_REG46      0x46u
-#define ES7210_MIC1_POWER_REG47     0x47u
-#define ES7210_MIC2_POWER_REG48     0x48u
-#define ES7210_MIC3_POWER_REG49     0x49u
-#define ES7210_MIC4_POWER_REG4A     0x4Au
-#define ES7210_MIC12_POWER_REG4B    0x4Bu
-#define ES7210_MIC34_POWER_REG4C    0x4Cu
-#define D_ES7210_I2C_SPEED_HZ  100000u
-#define D_ES7210_I2C_ADDR      0x40u
-#define D_ES7210_I2C_ADDR_ALT  0x20u
-#define D_ES7210_MAX_FRAMES    256u
+#define ES7210_RESET_REG00          0x00u /**< 复位和芯片状态控制寄存器。 */
+#define ES7210_MAINCLK_REG02        0x02u /**< 主时钟配置寄存器。 */
+#define ES7210_LRCK_DIVH_REG04      0x04u /**< LRCK 分频高字节寄存器。 */
+#define ES7210_LRCK_DIVL_REG05      0x05u /**< LRCK 分频低字节寄存器。 */
+#define ES7210_POWER_DOWN_REG06     0x06u /**< ADC 数字电源控制寄存器。 */
+#define ES7210_OSR_REG07            0x07u /**< ADC 过采样率配置寄存器。 */
+#define ES7210_TIME_CONTROL0_REG09  0x09u /**< ADC 时序控制寄存器 0。 */
+#define ES7210_TIME_CONTROL1_REG0A  0x0Au /**< ADC 时序控制寄存器 1。 */
+#define ES7210_SDP_INTERFACE1_REG11 0x11u /**< 串行音频接口格式寄存器 1。 */
+#define ES7210_SDP_INTERFACE2_REG12 0x12u /**< 串行音频接口格式寄存器 2。 */
+#define ES7210_ADC1_VOLUME_REG1B    0x1Bu /**< ADC1 数字音量寄存器。 */
+#define ES7210_ADC2_VOLUME_REG1C    0x1Cu /**< ADC2 数字音量寄存器。 */
+#define ES7210_ADC3_VOLUME_REG1D    0x1Du /**< ADC3 数字音量寄存器。 */
+#define ES7210_ADC4_VOLUME_REG1E    0x1Eu /**< ADC4 数字音量寄存器。 */
+#define ES7210_ADC34_HPF2_REG20     0x20u /**< ADC3/4 高通滤波配置寄存器 2。 */
+#define ES7210_ADC34_HPF1_REG21     0x21u /**< ADC3/4 高通滤波配置寄存器 1。 */
+#define ES7210_ADC12_HPF2_REG22     0x22u /**< ADC1/2 高通滤波配置寄存器 2。 */
+#define ES7210_ADC12_HPF1_REG23     0x23u /**< ADC1/2 高通滤波配置寄存器 1。 */
+#define ES7210_ANALOG_REG40         0x40u /**< 模拟前端全局配置寄存器。 */
+#define ES7210_MIC12_BIAS_REG41     0x41u /**< MIC1/2 偏置配置寄存器。 */
+#define ES7210_MIC34_BIAS_REG42     0x42u /**< MIC3/4 偏置配置寄存器。 */
+#define ES7210_MIC1_GAIN_REG43      0x43u /**< MIC1 模拟增益寄存器。 */
+#define ES7210_MIC2_GAIN_REG44      0x44u /**< MIC2 模拟增益寄存器。 */
+#define ES7210_MIC3_GAIN_REG45      0x45u /**< MIC3 模拟增益寄存器。 */
+#define ES7210_MIC4_GAIN_REG46      0x46u /**< MIC4 模拟增益寄存器。 */
+#define ES7210_MIC1_POWER_REG47     0x47u /**< MIC1 输入电源控制寄存器。 */
+#define ES7210_MIC2_POWER_REG48     0x48u /**< MIC2 输入电源控制寄存器。 */
+#define ES7210_MIC3_POWER_REG49     0x49u /**< MIC3 输入电源控制寄存器。 */
+#define ES7210_MIC4_POWER_REG4A     0x4Au /**< MIC4 输入电源控制寄存器。 */
+#define ES7210_MIC12_POWER_REG4B    0x4Bu /**< MIC1/2 通道电源控制寄存器。 */
+#define ES7210_MIC34_POWER_REG4C    0x4Cu /**< MIC3/4 通道电源控制寄存器。 */
 
-typedef struct {
-    int (*write_reg)(uint8_t reg, const uint8_t *data, uint16_t len);
-    int (*read_reg)(uint8_t reg, uint8_t *data, uint16_t len);
-    int (*read)(uint8_t *data, uint32_t len, uint32_t timeout_ms);
-} es7210_interface_t;
-
-struct es7210_dev {
-    es7210_interface_t itf;
-    uint32_t read_log_count;
-};
-
-static struct es7210_dev s_es7210;
+/** @brief ES7210 驱动是否已完成初始化。 */
 static uint8_t s_es7210_inited = 0u;
+
+/** @brief 初始化时承接并保存的 WDRIVER 能力函数表。 */
 static d_es7210_wdriver_ops_t s_d_ops;
-static uint16_t s_d_addr = D_ES7210_I2C_ADDR;
+
+/** @brief 读取日志节流计数器，避免高频 PCM 读取刷屏。 */
+static uint32_t s_d_read_log_count = 0u;
+
+/** @brief ES7210 原始双通道 PCM 读取缓存。 */
 static uint8_t s_d_raw_buf[D_ES7210_MAX_FRAMES * 4u];
 
+/**
+ * @brief 向 ES7210 写入一个 8 位寄存器值。
+ */
 static int es7210_write_u8(uint8_t reg, uint8_t value)
 {
-    return s_es7210.itf.write_reg(reg, &value, 1u);
+    return s_d_ops.i2c_write_reg(D_ES7210_I2C_ADDR,
+                                      D_ES7210_I2C_SPEED_HZ,
+                                      reg,
+                                      &value,
+                                      1u);
 }
 
+/**
+ * @brief 写入 ES7210 默认初始化寄存器序列。
+ */
 static int es7210_config_default(void)
 {
     static const struct {
@@ -76,16 +77,21 @@ static int es7210_config_default(void)
         uint8_t value;
         uint16_t delay_ms;
     } init_seq[] = {
+        /* 复位芯片并等待内部状态稳定。 */
         {ES7210_RESET_REG00, 0xFF},
         {ES7210_RESET_REG00, 0x32, 20u},
+
+        /* 配置采样时序、高通滤波和 I2S 数据格式。 */
         {ES7210_TIME_CONTROL0_REG09, 0x30},
         {ES7210_TIME_CONTROL1_REG0A, 0x30},
         {ES7210_ADC12_HPF1_REG23, 0x2A},
         {ES7210_ADC12_HPF2_REG22, 0x0A},
         {ES7210_ADC34_HPF1_REG21, 0x2A},
         {ES7210_ADC34_HPF2_REG20, 0x0A},
-        {ES7210_SDP_INTERFACE1_REG11, 0x60}, /* I2S, 16 bit */
-        {ES7210_SDP_INTERFACE2_REG12, 0x00}, /* standard I2S, TDM disabled */
+        {ES7210_SDP_INTERFACE1_REG11, 0x60}, /* I2S，16 bit。 */
+        {ES7210_SDP_INTERFACE2_REG12, 0x00}, /* 标准 I2S，关闭 TDM。 */
+
+        /* 配置模拟前端、MIC 偏置、通道增益和通道电源。 */
         {ES7210_ANALOG_REG40, 0xC3},
         {ES7210_MIC12_BIAS_REG41, 0x70},
         {ES7210_MIC34_BIAS_REG42, 0x70},
@@ -97,10 +103,14 @@ static int es7210_config_default(void)
         {ES7210_MIC2_POWER_REG48, 0x08},
         {ES7210_MIC3_POWER_REG49, 0xFF},
         {ES7210_MIC4_POWER_REG4A, 0xFF},
+
+        /* 配置 16 kHz 采样所需的 OSR、MCLK 和 LRCK 分频。 */
         {ES7210_OSR_REG07, 0x20},
-        {ES7210_MAINCLK_REG02, 0xC1, 20u}, /* 16 kHz, MCLK=4.096 MHz */
+        {ES7210_MAINCLK_REG02, 0xC1, 20u}, /* 16 kHz，MCLK=4.096 MHz。 */
         {ES7210_LRCK_DIVH_REG04, 0x01},
         {ES7210_LRCK_DIVL_REG05, 0x00},
+
+        /* 打开 ADC 通路并设置四路 ADC 音量。 */
         {ES7210_POWER_DOWN_REG06, 0x04},
         {ES7210_MIC12_POWER_REG4B, 0x0F},
         {ES7210_MIC34_POWER_REG4C, 0x00},
@@ -108,6 +118,8 @@ static int es7210_config_default(void)
         {ES7210_ADC2_VOLUME_REG1C, 0xBF},
         {ES7210_ADC3_VOLUME_REG1D, 0xBF},
         {ES7210_ADC4_VOLUME_REG1E, 0xBF},
+
+        /* 退出复位，开始正常采集。 */
         {ES7210_RESET_REG00, 0x71},
         {ES7210_RESET_REG00, 0x41, 20u},
     };
@@ -128,37 +140,9 @@ static int es7210_config_default(void)
     return 0;
 }
 
-static int es7210_init(es7210_interface_t *itf)
-{
-    if (itf == NULL || itf->write_reg == NULL || itf->read_reg == NULL || itf->read == NULL) {
-        D_LOGE(TAG, "ES7210 初始化失败: 底层能力为空");
-        return -1;
-    }
-
-    memset(&s_es7210, 0, sizeof(s_es7210));
-    s_es7210.itf = *itf;
-    if (es7210_config_default() != 0) {
-        memset(&s_es7210, 0, sizeof(s_es7210));
-        return -2;
-    }
-
-    s_es7210_inited = 1u;
-    D_LOGI(TAG, "ES7210 驱动初始化成功");
-    return 0;
-}
-
-static void es7210_deinit(void)
-{
-    if (s_es7210_inited == 0u) {
-        return;
-    }
-
-    (void)es7210_write_u8(ES7210_RESET_REG00, 0xFF);
-    memset(&s_es7210, 0, sizeof(s_es7210));
-    s_es7210_inited = 0u;
-    D_LOGI(TAG, "ES7210 驱动已释放");
-}
-
+/**
+ * @brief 读取一段 ES7210 PCM 原始数据并做日志节流。
+ */
 static int es7210_read(uint8_t *data,
                        uint32_t len,
                        uint32_t timeout_ms)
@@ -169,10 +153,10 @@ static int es7210_read(uint8_t *data,
         return -1;
     }
 
-    int ret = s_es7210.itf.read(data, len, timeout_ms);
+    int ret = s_d_ops.i2s_read(data, len, timeout_ms);
     if (ret >= 0) {
-        s_es7210.read_log_count++;
-        if ((s_es7210.read_log_count % 100u) != 0u) {
+        s_d_read_log_count++;
+        if ((s_d_read_log_count % 100u) != 0u) {
             return ret;
         }
         D_LOGI(TAG, "ES7210 读取完成, request=%u, read=%d",
@@ -184,38 +168,9 @@ static int es7210_read(uint8_t *data,
     return ret;
 }
 
-static int d_es7210_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
-{
-    int ret = s_d_ops.i2c_write_reg(s_d_addr,
-                                         D_ES7210_I2C_SPEED_HZ,
-                                         reg,
-                                         data,
-                                         len);
-    if (ret == 0 || reg != 0x00u || s_d_addr == D_ES7210_I2C_ADDR_ALT) {
-        return ret;
-    }
-
-    s_d_addr = D_ES7210_I2C_ADDR_ALT;
-    ret = s_d_ops.i2c_write_reg(s_d_addr,
-                                     D_ES7210_I2C_SPEED_HZ,
-                                     reg,
-                                     data,
-                                     len);
-    if (ret != 0) {
-        s_d_addr = D_ES7210_I2C_ADDR;
-    }
-    return ret;
-}
-
-static int d_es7210_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
-{
-    return s_d_ops.i2c_read_reg(s_d_addr,
-                                     D_ES7210_I2C_SPEED_HZ,
-                                     reg,
-                                     data,
-                                     len);
-}
-
+/**
+ * @brief 从小端 PCM 字节流中取出一个 16 位样本。
+ */
 static int16_t d_es7210_read_i16_le(const uint8_t *data, uint32_t sample_index)
 {
     uint32_t offset = sample_index * 2u;
@@ -237,19 +192,26 @@ int d_es7210_init(const d_es7210_wdriver_ops_t *ops)
     }
 
     s_d_ops = *ops;
-    s_d_addr = D_ES7210_I2C_ADDR;
-    es7210_interface_t itf = {
-        .write_reg = d_es7210_write_reg,
-        .read_reg = d_es7210_read_reg,
-        .read = s_d_ops.i2s_read,
-    };
+    s_d_read_log_count = 0u;
+    int ret = es7210_config_default();
+    if (ret != 0) {
+        memset(&s_d_ops, 0, sizeof(s_d_ops));
+        return -2;
+    }
 
-    return es7210_init(&itf);
+    s_es7210_inited = 1u;
+    D_LOGI(TAG, "ES7210 驱动初始化成功");
+    return 0;
 }
 
 int d_es7210_deinit(void)
 {
-    es7210_deinit();
+    if (s_es7210_inited != 0u) {
+        (void)es7210_write_u8(ES7210_RESET_REG00, 0xFF);
+        D_LOGI(TAG, "ES7210 驱动已释放");
+    }
+    s_es7210_inited = 0u;
+    s_d_read_log_count = 0u;
     memset(&s_d_ops, 0, sizeof(s_d_ops));
     return 0;
 }

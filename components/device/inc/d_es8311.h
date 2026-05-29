@@ -14,6 +14,15 @@
 extern "C" {
 #endif
 
+/** @brief ES8311 I2C 通信速率。 */
+#define D_ES8311_I2C_SPEED_HZ 100000u
+
+/** @brief ES8311 7 位 I2C 地址。 */
+#define D_ES8311_I2C_ADDR 0x18u
+
+/** @brief ES8311 单次 PCM 播放最多处理的帧数。 */
+#define D_ES8311_MAX_FRAMES 256u
+
 /**
  * @brief ES8311 驱动初始化所需的 WDRIVER 能力。
  */

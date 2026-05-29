@@ -11,53 +11,56 @@
 
 static const char *TAG = "d_es8311";
 
-#define ES8311_RESET_REG00       0x00u
-#define ES8311_CLK_MANAGER_REG01 0x01u
-#define ES8311_CLK_MANAGER_REG02 0x02u
-#define ES8311_CLK_MANAGER_REG03 0x03u
-#define ES8311_CLK_MANAGER_REG04 0x04u
-#define ES8311_CLK_MANAGER_REG05 0x05u
-#define ES8311_CLK_MANAGER_REG06 0x06u
-#define ES8311_CLK_MANAGER_REG07 0x07u
-#define ES8311_CLK_MANAGER_REG08 0x08u
-#define ES8311_SDPIN_REG09       0x09u
-#define ES8311_SDPOUT_REG0A      0x0Au
-#define ES8311_SYSTEM_REG0D      0x0Du
-#define ES8311_SYSTEM_REG0E      0x0Eu
-#define ES8311_SYSTEM_REG12      0x12u
-#define ES8311_SYSTEM_REG13      0x13u
-#define ES8311_SYSTEM_REG14      0x14u
-#define ES8311_ADC_REG16         0x16u
-#define ES8311_ADC_REG17         0x17u
-#define ES8311_ADC_REG1C         0x1Cu
-#define ES8311_DAC_REG31         0x31u
-#define ES8311_DAC_REG32         0x32u
-#define ES8311_DAC_REG37         0x37u
-#define D_ES8311_I2C_SPEED_HZ 100000u
-#define D_ES8311_I2C_ADDR     0x18u
-#define D_ES8311_MAX_FRAMES   256u
+#define ES8311_RESET_REG00       0x00u /**< 复位和芯片控制寄存器。 */
+#define ES8311_CLK_MANAGER_REG01 0x01u /**< 时钟管理寄存器 1。 */
+#define ES8311_CLK_MANAGER_REG02 0x02u /**< 时钟管理寄存器 2。 */
+#define ES8311_CLK_MANAGER_REG03 0x03u /**< 时钟管理寄存器 3。 */
+#define ES8311_CLK_MANAGER_REG04 0x04u /**< 时钟管理寄存器 4。 */
+#define ES8311_CLK_MANAGER_REG05 0x05u /**< 时钟管理寄存器 5。 */
+#define ES8311_CLK_MANAGER_REG06 0x06u /**< 时钟管理寄存器 6。 */
+#define ES8311_CLK_MANAGER_REG07 0x07u /**< 时钟管理寄存器 7。 */
+#define ES8311_CLK_MANAGER_REG08 0x08u /**< 时钟管理寄存器 8。 */
+#define ES8311_SDPIN_REG09       0x09u /**< 串行音频输入接口配置寄存器。 */
+#define ES8311_SDPOUT_REG0A      0x0Au /**< 串行音频输出接口配置寄存器。 */
+#define ES8311_SYSTEM_REG0D      0x0Du /**< 系统模拟通路控制寄存器 0D。 */
+#define ES8311_SYSTEM_REG0E      0x0Eu /**< 系统模拟通路控制寄存器 0E。 */
+#define ES8311_SYSTEM_REG12      0x12u /**< 系统电源控制寄存器 12。 */
+#define ES8311_SYSTEM_REG13      0x13u /**< 系统电源控制寄存器 13。 */
+#define ES8311_SYSTEM_REG14      0x14u /**< 系统电源控制寄存器 14。 */
+#define ES8311_ADC_REG16         0x16u /**< ADC 配置寄存器 16。 */
+#define ES8311_ADC_REG17         0x17u /**< ADC 配置寄存器 17。 */
+#define ES8311_ADC_REG1C         0x1Cu /**< ADC 音量和自动控制寄存器。 */
+#define ES8311_DAC_REG31         0x31u /**< DAC 静音和输出控制寄存器。 */
+#define ES8311_DAC_REG32         0x32u /**< DAC 数字音量寄存器。 */
+#define ES8311_DAC_REG37         0x37u /**< DAC 输出功放控制寄存器。 */
 
-typedef struct {
-    int (*write_reg)(uint8_t reg, const uint8_t *data, uint16_t len);
-    int (*read_reg)(uint8_t reg, uint8_t *data, uint16_t len);
-    int (*write)(const uint8_t *data, uint32_t len, uint32_t timeout_ms);
-} es8311_interface_t;
-
-struct es8311_dev {
-    es8311_interface_t itf;
-    uint32_t play_log_count;
-};
-
-static struct es8311_dev s_es8311;
+/** @brief ES8311 驱动是否已完成初始化。 */
 static uint8_t s_es8311_inited = 0u;
+
+/** @brief 初始化时承接并保存的 WDRIVER 能力函数表。 */
 static d_es8311_wdriver_ops_t s_d_ops;
+
+/** @brief 播放日志节流计数器，避免高频 PCM 写入刷屏。 */
+static uint32_t s_d_play_log_count = 0u;
+
+/** @brief ES8311 单声道转双声道播放缓存。 */
 static int16_t s_d_stereo_buf[D_ES8311_MAX_FRAMES * 2u];
 
+/**
+ * @brief 向 ES8311 写入一个 8 位寄存器值。
+ */
 static int es8311_write_u8(uint8_t reg, uint8_t value)
 {
-    return s_es8311.itf.write_reg(reg, &value, 1u);
+    return s_d_ops.i2c_write_reg(D_ES8311_I2C_ADDR,
+                                      D_ES8311_I2C_SPEED_HZ,
+                                      reg,
+                                      &value,
+                                      1u);
 }
 
+/**
+ * @brief 写入 ES8311 默认初始化寄存器序列。
+ */
 static int es8311_config_default(void)
 {
     int ret = es8311_write_u8(ES8311_RESET_REG00, 0x1F);
@@ -70,18 +73,25 @@ static int es8311_config_default(void)
         uint8_t reg;
         uint8_t value;
     } init_seq[] = {
+        /* 复位芯片并重新打开寄存器控制。 */
         {ES8311_RESET_REG00, 0x00},
         {ES8311_RESET_REG00, 0x80},
-        {ES8311_CLK_MANAGER_REG01, 0x3F}, /* enable clocks, MCLK pin source */
-        {ES8311_CLK_MANAGER_REG02, 0x00}, /* 16 kHz, MCLK=4.096 MHz */
+
+        /* 配置 16 kHz 播放所需的时钟树和分频。 */
+        {ES8311_CLK_MANAGER_REG01, 0x3F}, /* 使能时钟，MCLK 来自外部引脚。 */
+        {ES8311_CLK_MANAGER_REG02, 0x00}, /* 16 kHz，MCLK=4.096 MHz。 */
         {ES8311_CLK_MANAGER_REG03, 0x10},
         {ES8311_CLK_MANAGER_REG04, 0x10},
         {ES8311_CLK_MANAGER_REG05, 0x00},
         {ES8311_CLK_MANAGER_REG06, 0x03},
         {ES8311_CLK_MANAGER_REG07, 0x00},
         {ES8311_CLK_MANAGER_REG08, 0xFF},
-        {ES8311_SDPIN_REG09, 0x0C},  /* I2S input, 16 bit */
-        {ES8311_SDPOUT_REG0A, 0x0C}, /* I2S output, 16 bit */
+
+        /* 配置 I2S 输入输出格式。 */
+        {ES8311_SDPIN_REG09, 0x0C},  /* I2S 输入，16 bit。 */
+        {ES8311_SDPOUT_REG0A, 0x0C}, /* I2S 输出，16 bit。 */
+
+        /* 打开系统模拟通路和 ADC 侧基础配置。 */
         {ES8311_SYSTEM_REG0D, 0x01},
         {ES8311_SYSTEM_REG0E, 0x02},
         {ES8311_SYSTEM_REG12, 0x00},
@@ -90,6 +100,8 @@ static int es8311_config_default(void)
         {ES8311_ADC_REG16, 0x00},
         {ES8311_ADC_REG17, 0xC8},
         {ES8311_ADC_REG1C, 0x6A},
+
+        /* 配置 DAC 输出、默认音量和功放输出状态。 */
         {ES8311_DAC_REG31, 0x00},
         {ES8311_DAC_REG32, 0xBF},
         {ES8311_DAC_REG37, 0x08},
@@ -108,37 +120,9 @@ static int es8311_config_default(void)
     return 0;
 }
 
-static int es8311_init(es8311_interface_t *itf)
-{
-    if (itf == NULL || itf->write_reg == NULL || itf->read_reg == NULL || itf->write == NULL) {
-        D_LOGE(TAG, "ES8311 初始化失败: 底层能力为空");
-        return -1;
-    }
-
-    memset(&s_es8311, 0, sizeof(s_es8311));
-    s_es8311.itf = *itf;
-    if (es8311_config_default() != 0) {
-        memset(&s_es8311, 0, sizeof(s_es8311));
-        return -2;
-    }
-
-    s_es8311_inited = 1u;
-    D_LOGI(TAG, "ES8311 驱动初始化成功");
-    return 0;
-}
-
-static void es8311_deinit(void)
-{
-    if (s_es8311_inited == 0u) {
-        return;
-    }
-
-    (void)es8311_write_u8(ES8311_RESET_REG00, 0x1F);
-    memset(&s_es8311, 0, sizeof(s_es8311));
-    s_es8311_inited = 0u;
-    D_LOGI(TAG, "ES8311 驱动已释放");
-}
-
+/**
+ * @brief 写入一段 ES8311 播放 PCM 数据并做日志节流。
+ */
 static int es8311_play(const uint8_t *data,
                        uint32_t len,
                        uint32_t timeout_ms)
@@ -149,10 +133,10 @@ static int es8311_play(const uint8_t *data,
         return -1;
     }
 
-    int ret = s_es8311.itf.write(data, len, timeout_ms);
+    int ret = s_d_ops.i2s_write(data, len, timeout_ms);
     if (ret >= 0) {
-        s_es8311.play_log_count++;
-        if ((s_es8311.play_log_count % 100u) != 0u) {
+        s_d_play_log_count++;
+        if ((s_d_play_log_count % 100u) != 0u) {
             return ret;
         }
         D_LOGI(TAG, "ES8311 播放写入完成, request=%u, written=%d",
@@ -164,6 +148,9 @@ static int es8311_play(const uint8_t *data,
     return ret;
 }
 
+/**
+ * @brief 将百分比音量转换为 ES8311 DAC 音量寄存器值。
+ */
 static int es8311_set_volume(uint8_t volume)
 {
     if (s_es8311_inited == 0u) {
@@ -186,6 +173,9 @@ static int es8311_set_volume(uint8_t volume)
     return ret;
 }
 
+/**
+ * @brief 通过 ES8311 DAC 控制寄存器设置或取消静音。
+ */
 static int es8311_set_mute(int mute)
 {
     if (s_es8311_inited == 0u) {
@@ -194,7 +184,11 @@ static int es8311_set_mute(int mute)
     }
 
     uint8_t reg_value = 0;
-    int ret = s_es8311.itf.read_reg(ES8311_DAC_REG31, &reg_value, 1u);
+    int ret = s_d_ops.i2c_read_reg(D_ES8311_I2C_ADDR,
+                                        D_ES8311_I2C_SPEED_HZ,
+                                        ES8311_DAC_REG31,
+                                        &reg_value,
+                                        1u);
     if (ret != 0) {
         D_LOGE(TAG, "ES8311 读取静音寄存器失败, ret=%d", ret);
         return ret;
@@ -216,24 +210,6 @@ static int es8311_set_mute(int mute)
     return ret;
 }
 
-static int d_es8311_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
-{
-    return s_d_ops.i2c_write_reg(D_ES8311_I2C_ADDR,
-                                      D_ES8311_I2C_SPEED_HZ,
-                                      reg,
-                                      data,
-                                      len);
-}
-
-static int d_es8311_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
-{
-    return s_d_ops.i2c_read_reg(D_ES8311_I2C_ADDR,
-                                     D_ES8311_I2C_SPEED_HZ,
-                                     reg,
-                                     data,
-                                     len);
-}
-
 int d_es8311_init(const d_es8311_wdriver_ops_t *ops)
 {
     if (s_es8311_inited != 0u) {
@@ -248,18 +224,26 @@ int d_es8311_init(const d_es8311_wdriver_ops_t *ops)
     }
 
     s_d_ops = *ops;
-    es8311_interface_t itf = {
-        .write_reg = d_es8311_write_reg,
-        .read_reg = d_es8311_read_reg,
-        .write = s_d_ops.i2s_write,
-    };
+    s_d_play_log_count = 0u;
+    int ret = es8311_config_default();
+    if (ret != 0) {
+        memset(&s_d_ops, 0, sizeof(s_d_ops));
+        return -2;
+    }
 
-    return es8311_init(&itf);
+    s_es8311_inited = 1u;
+    D_LOGI(TAG, "ES8311 驱动初始化成功");
+    return 0;
 }
 
 int d_es8311_deinit(void)
 {
-    es8311_deinit();
+    if (s_es8311_inited != 0u) {
+        (void)es8311_write_u8(ES8311_RESET_REG00, 0x1F);
+        D_LOGI(TAG, "ES8311 驱动已释放");
+    }
+    s_es8311_inited = 0u;
+    s_d_play_log_count = 0u;
     memset(&s_d_ops, 0, sizeof(s_d_ops));
     return 0;
 }

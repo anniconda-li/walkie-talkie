@@ -1,6 +1,6 @@
 /**
  * @file d_wifi.c
- * @brief WiFi STA network driver implementation.
+ * @brief WiFi STA 网络驱动实现。
  */
 #include "d_wifi.h"
 
@@ -22,23 +22,41 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define DEVICE_WIFI_CONNECT_TIMEOUT_MS 30000u
-#define DEVICE_WIFI_POLL_MS            200u
+#define DEVICE_WIFI_CONNECT_TIMEOUT_MS 30000u /**< WiFi 等待获取 IP 的最长时间。 */
+#define DEVICE_WIFI_POLL_MS            200u   /**< WiFi 连接状态轮询间隔。 */
 
+/** @brief WiFi 驱动日志标签。 */
 static const char *TAG = "network_wifi";
 
+/** @brief WiFi STA 是否已经启动。 */
 static volatile int s_wifi_started = 0;
+
+/** @brief WiFi STA 是否已经获取 IP。 */
 static volatile int s_wifi_got_ip = 0;
+
+/** @brief UDP socket 句柄。 */
 static int s_udp_sock = -1;
+
+/** @brief TCP socket 句柄。 */
 static int s_tcp_sock = -1;
+
+/** @brief UDP 对端地址缓存。 */
 static struct sockaddr_storage s_udp_peer;
+
+/** @brief UDP 对端地址长度。 */
 static socklen_t s_udp_peer_len = 0;
 
+/**
+ * @brief 将 ESP-IDF/socket 错误码统一转换为本层负值错误码。
+ */
 static int device_wifi_err_to_int(int ret)
 {
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
+/**
+ * @brief 处理 WiFi 和 IP 事件，维护启动和联网状态。
+ */
 static void device_wifi_event_handler(void *arg,
                                       esp_event_base_t event_base,
                                       int32_t event_id,
@@ -66,6 +84,9 @@ static void device_wifi_event_handler(void *arg,
     }
 }
 
+/**
+ * @brief 等待 WiFi STA 获取 IP 地址。
+ */
 static int device_wifi_wait_ip(void)
 {
     uint32_t start = osal_get_tick_ms();
@@ -79,6 +100,9 @@ static int device_wifi_wait_ip(void)
     return -1;
 }
 
+/**
+ * @brief 初始化 WiFi STA 并等待联网完成。
+ */
 int d_wifi_init(const d_wifi_config_t *cfg)
 {
     if (cfg == NULL || cfg->ssid == NULL || cfg->ssid[0] == '\0') {
@@ -152,6 +176,9 @@ int d_wifi_init(const d_wifi_config_t *cfg)
     return device_wifi_wait_ip();
 }
 
+/**
+ * @brief 关闭 WiFi 网络层持有的 socket。
+ */
 int d_wifi_deinit(void)
 {
     if (s_udp_sock >= 0) {
@@ -165,11 +192,17 @@ int d_wifi_deinit(void)
     return 0;
 }
 
+/**
+ * @brief 判断 WiFi STA 是否已经启动。
+ */
 int d_wifi_is_initialized(void)
 {
     return s_wifi_started ? 1 : 0;
 }
 
+/**
+ * @brief 将 WiFi RSSI dBm 映射为类似 CSQ 的 0-31 信号值。
+ */
 static int device_wifi_rssi_to_csq(int rssi_dbm)
 {
     if (rssi_dbm <= -100) {
@@ -181,6 +214,9 @@ static int device_wifi_rssi_to_csq(int rssi_dbm)
     return (rssi_dbm + 100) * 31 / 50;
 }
 
+/**
+ * @brief 获取 WiFi 当前链路状态。
+ */
 int d_wifi_get_status(d_wifi_status_t *status)
 {
     if (status == NULL) {
@@ -198,11 +234,17 @@ int d_wifi_get_status(d_wifi_status_t *status)
     return 0;
 }
 
+/**
+ * @brief 判断 WiFi 是否已经获取 IP，可用于上层发送前检查。
+ */
 int d_wifi_is_ready(void)
 {
     return s_wifi_got_ip ? 1 : 0;
 }
 
+/**
+ * @brief 解析主机名和端口为 IPv4 socket 地址。
+ */
 static int device_wifi_resolve(const char *host,
                                int port,
                                int socktype,
@@ -228,6 +270,9 @@ static int device_wifi_resolve(const char *host,
     return 0;
 }
 
+/**
+ * @brief 建立 UDP 发送目标并创建 UDP socket。
+ */
 int d_wifi_udp_connect(const char *host, int port)
 {
     if (!s_wifi_got_ip || host == NULL || port <= 0) {
@@ -245,6 +290,9 @@ int d_wifi_udp_connect(const char *host, int port)
     return s_udp_sock >= 0 ? 0 : -3;
 }
 
+/**
+ * @brief 通过已配置的 UDP 对端发送数据。
+ */
 int d_wifi_udp_send(const uint8_t *data, int len)
 {
     if (s_udp_sock < 0 || data == NULL || len <= 0 || s_udp_peer_len == 0) {
@@ -260,6 +308,9 @@ int d_wifi_udp_send(const uint8_t *data, int len)
     return -2;
 }
 
+/**
+ * @brief 从 UDP socket 读取下行数据。
+ */
 int d_wifi_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     if (s_udp_sock < 0 || buf == NULL || len == 0u) {
@@ -283,6 +334,9 @@ int d_wifi_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
     return recvfrom(s_udp_sock, buf, len, 0, NULL, NULL);
 }
 
+/**
+ * @brief 建立 TCP 连接。
+ */
 int d_wifi_tcp_connect(const char *host, int port)
 {
     struct sockaddr_storage addr;
@@ -304,6 +358,9 @@ int d_wifi_tcp_connect(const char *host, int port)
     return ret == 0 ? 0 : -3;
 }
 
+/**
+ * @brief 通过已连接的 TCP socket 发送数据。
+ */
 int d_wifi_tcp_send(const uint8_t *data, int len)
 {
     if (s_tcp_sock < 0 || data == NULL || len <= 0) {
@@ -314,6 +371,9 @@ int d_wifi_tcp_send(const uint8_t *data, int len)
     return ret == len ? 0 : -2;
 }
 
+/**
+ * @brief 关闭当前 TCP socket。
+ */
 int d_wifi_tcp_close(void)
 {
     if (s_tcp_sock >= 0) {
@@ -323,6 +383,9 @@ int d_wifi_tcp_close(void)
     return 0;
 }
 
+/**
+ * @brief 通过 ESP HTTP client 执行一次 HTTP POST。
+ */
 int d_wifi_http_post(const char *url,
                           const char *content_type,
                           const uint8_t *body,
@@ -382,28 +445,5 @@ int d_wifi_http_post(const char *url,
     }
 
     esp_http_client_cleanup(client);
-    return ret;
-}
-
-int d_wifi_http_post_wav(const char *url,
-                              const uint8_t *wav,
-                              uint16_t wav_len,
-                              uint8_t *resp,
-                              uint16_t resp_size,
-                              uint16_t *resp_len,
-                              uint32_t timeout_ms)
-{
-    uint32_t post_resp_len = 0u;
-    int ret = d_wifi_http_post(url,
-                                    "audio/wav",
-                                    wav,
-                                    wav_len,
-                                    resp,
-                                    resp_size,
-                                    &post_resp_len,
-                                    timeout_ms);
-    if (resp_len != NULL) {
-        *resp_len = (uint16_t)post_resp_len;
-    }
     return ret;
 }

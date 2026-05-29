@@ -7,7 +7,6 @@
 #include "wdriver_i2c.h"
 #include "wdriver_i2s.h"
 #include "wdriver_uart.h"
-#include "d_audio_board.h"
 #include "d_battery.h"
 #include "d_camera.h"
 #include "d_es7210.h"
@@ -68,18 +67,12 @@ int d_network_init(void)
 
 static int d_init_audio_es(void)
 {
-    int ret = d_audio_board_codec_power_on();
-    if (ret != 0) {
-        D_LOGE(TAG, "音频 codec 供电失败, ret=%d", ret);
-        return ret;
-    }
-
     d_es7210_wdriver_ops_t es7210_wdriver_ops = {
         .i2c_write_reg = wdriver_i2c_write_reg,
         .i2c_read_reg = wdriver_i2c_read_reg,
         .i2s_read = wdriver_i2s_read,
     };
-    ret = d_es7210_init(&es7210_wdriver_ops);
+    int ret = d_es7210_init(&es7210_wdriver_ops);
     if (ret != 0) {
         return ret;
     }

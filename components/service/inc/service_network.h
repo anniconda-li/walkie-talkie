@@ -48,13 +48,6 @@ typedef struct {
                      uint32_t resp_size,
                      uint32_t *resp_len,
                      uint32_t timeout_ms); /**< HTTP POST 二进制数据并读取响应。 */
-    int (*http_post_wav)(const char *url,
-                         const uint8_t *wav,
-                         uint16_t wav_len,
-                         uint8_t *resp,
-                         uint16_t resp_size,
-                         uint16_t *resp_len,
-                         uint32_t timeout_ms); /**< HTTP POST WAV 并读取响应。 */
 } service_network_ops_t;
 
 /**
@@ -177,29 +170,6 @@ int service_network_http_post(const char *url,
                               uint32_t resp_size,
                               uint32_t *resp_len,
                               uint32_t timeout_ms);
-
-/**
- * @brief HTTP POST 上传 WAV，并返回响应 body。
- *
- * 第一版只暴露 AI 语音问答所需的 WAV POST 能力，避免 app 直接依赖
- * 通用 HTTP 客户端细节。
- *
- * @param[in] url 请求 URL。
- * @param[in] wav WAV 数据缓冲区。
- * @param[in] wav_len WAV 数据长度。
- * @param[out] resp 响应 body 输出缓冲区。
- * @param[in] resp_size 响应缓冲区长度。
- * @param[out] resp_len 实际响应长度。
- * @param[in] timeout_ms 请求等待响应的超时时间，单位毫秒。
- * @return 成功返回 0；失败返回负值。
- */
-int service_network_http_post_wav(const char *url,
-                                  const uint8_t *wav,
-                                  uint16_t wav_len,
-                                  uint8_t *resp,
-                                  uint16_t resp_size,
-                                  uint16_t *resp_len,
-                                  uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

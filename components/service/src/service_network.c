@@ -43,8 +43,7 @@ static int service_network_ops_is_valid(const service_network_ops_t *ops)
         ops->udp_connect == NULL ||
         ops->udp_send == NULL ||
         ops->read_downlink == NULL ||
-        ops->http_post == NULL ||
-        ops->http_post_wav == NULL) {
+        ops->http_post == NULL) {
         return -1;
     }
 
@@ -184,20 +183,4 @@ int service_network_http_post(const char *url,
                                    resp_size,
                                    resp_len,
                                    timeout_ms);
-}
-
-int service_network_http_post_wav(const char *url,
-                                  const uint8_t *wav,
-                                  uint16_t wav_len,
-                                  uint8_t *resp,
-                                  uint16_t resp_size,
-                                  uint16_t *resp_len,
-                                  uint32_t timeout_ms)
-{
-    /* AI 问答第一版只暴露 WAV POST，避免把通用 HTTP 细节扩散到 app。 */
-    if (s_network_ops_ready == 0u) {
-        return -1;
-    }
-
-    return s_network_ops.http_post_wav(url, wav, wav_len, resp, resp_size, resp_len, timeout_ms);
 }

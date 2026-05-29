@@ -14,6 +14,15 @@
 extern "C" {
 #endif
 
+/** @brief ES7210 I2C 通信速率。 */
+#define D_ES7210_I2C_SPEED_HZ 100000u
+
+/** @brief ES7210 默认 7 位 I2C 地址。 */
+#define D_ES7210_I2C_ADDR 0x40u
+
+/** @brief ES7210 单次 PCM 读取最多处理的帧数。 */
+#define D_ES7210_MAX_FRAMES 256u
+
 /**
  * @brief ES7210 驱动初始化所需的 WDRIVER 能力。
  */

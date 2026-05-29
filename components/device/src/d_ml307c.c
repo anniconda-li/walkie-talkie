@@ -15,28 +15,31 @@
 
 static const char *TAG = "d_ml307c";
 
-#define ML307C_CRLF                 "\r\n"
-#define ML307C_OK                   "OK"
-#define ML307C_ERROR                "ERROR"
-#define ML307C_CME_ERROR            "+CME ERROR:"
-#define ML307C_DEFAULT_TIMEOUT_MS   3000u
-#define ML307C_RX_BUFFER_SIZE       2048u
-#define ML307C_LINE_MAX_LEN         256u
-#define ML307C_DEFAULT_SOCKET_ID    1u
-#define ML307C_SOCKET_MAX_ID        4u
-#define ML307C_RESET_WAIT_MS        8000u
-#define ML307C_REBOOT_READY_MS      30000u
-#define ML307C_NET_READY_MS         120000u
-#define ML307C_NET_POLL_MS          3000u
-#define ML307C_SOCKET_READY_MS      120000u
-#define ML307C_SOCKET_POLL_MS       3000u
-#define ML307C_HTTP_TIMEOUT_MS      30000u
-#define ML307C_HTTP_LATENCY_MS      100u
-#define ML307C_HTTP_TASK_ID         1u
-#define ML307C_HTTP_ROUTE           "6[1]"
-#define D_ML307C_LOCK_TIMEOUT_MS 5000u
-#define ML307C_TIMEOUT_SNIPPET_LEN  160u
+#define ML307C_CRLF                 "\r\n"        /**< AT 命令行结束符。 */
+#define ML307C_OK                   "OK"          /**< AT 成功响应关键字。 */
+#define ML307C_ERROR                "ERROR"       /**< AT 普通错误响应关键字。 */
+#define ML307C_CME_ERROR            "+CME ERROR:" /**< AT CME 错误响应前缀。 */
+#define ML307C_DEFAULT_TIMEOUT_MS   3000u         /**< AT 命令默认超时时间。 */
+#define ML307C_RX_BUFFER_SIZE       2048u         /**< AT 响应接收缓存大小。 */
+#define ML307C_LINE_MAX_LEN         256u          /**< 单条 AT 响应日志/解析缓存长度。 */
+#define ML307C_DEFAULT_SOCKET_ID    1u            /**< 默认 DTU socket 通道号。 */
+#define ML307C_SOCKET_MAX_ID        4u            /**< ML307C 支持的最大 socket 通道号。 */
+#define ML307C_RESET_WAIT_MS        8000u         /**< 发送复位命令后的固定等待时间。 */
+#define ML307C_REBOOT_READY_MS      30000u        /**< 模块复位后等待 AT 恢复的最长时间。 */
+#define ML307C_NET_READY_MS         120000u       /**< 等待蜂窝网络就绪的最长时间。 */
+#define ML307C_NET_POLL_MS          3000u         /**< 蜂窝网络状态轮询间隔。 */
+#define ML307C_SOCKET_READY_MS      120000u       /**< 等待 socket 通道就绪的最长时间。 */
+#define ML307C_SOCKET_POLL_MS       3000u         /**< socket 通道状态轮询间隔。 */
+#define ML307C_HTTP_TIMEOUT_MS      30000u        /**< HTTP 默认超时时间。 */
+#define ML307C_HTTP_LATENCY_MS      100u          /**< HTTP 命令中配置的发送延迟。 */
+#define ML307C_HTTP_TASK_ID         1u            /**< HTTP 任务默认 ID。 */
+#define ML307C_HTTP_ROUTE           "6[1]"        /**< HTTP 响应路由标识。 */
+#define D_ML307C_LOCK_TIMEOUT_MS    5000u         /**< ML307C 互斥锁默认等待时间。 */
+#define ML307C_TIMEOUT_SNIPPET_LEN  160u          /**< AT 超时日志中保留的响应摘要长度。 */
 
+/**
+ * @brief ML307C 内部依赖的底层能力函数表。
+ */
 typedef struct {
     int (*uart_write)(uint8_t *data, uint16_t len);
     int (*uart_read)(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
@@ -44,6 +47,9 @@ typedef struct {
     uint32_t (*get_tick)(void);
 } ml307c_interface_t;
 
+/**
+ * @brief 简单线性接收缓存状态。
+ */
 typedef struct {
     uint8_t *buf;
     uint16_t size;
@@ -51,6 +57,9 @@ typedef struct {
     uint16_t tail;
 } ring_buffer_t;
 
+/**
+ * @brief ML307C 驱动内部设备状态。
+ */
 struct ml307c_dev {
     ml307c_config_t config;
     ml307c_interface_t itf;
@@ -59,11 +68,22 @@ struct ml307c_dev {
     uint8_t is_network_ok;
 };
 
+/** @brief 单例 ML307C 设备对象。 */
 static struct ml307c_dev s_ml307c_dev;
+
+/** @brief 单例 ML307C AT 响应接收缓存。 */
 static uint8_t s_ml307c_rx_buf[ML307C_RX_BUFFER_SIZE];
+
+/** @brief 当前已初始化的 ML307C 设备指针。 */
 static struct ml307c_dev *s_ml307c = NULL;
+
+/** @brief 保护 ML307C AT 命令串行访问的互斥锁。 */
 static osal_mutex_t s_ml307c_mutex = NULL;
+
+/** @brief TCP 通道是否已由本层标记为连接。 */
 static uint8_t s_ml307c_tcp_connected = 0u;
+
+/** @brief UDP 通道是否已由本层标记为连接。 */
 static uint8_t s_ml307c_udp_connected = 0u;
 
 static void ml307c_log_response(const char *title, const char *resp);
@@ -98,6 +118,9 @@ static int ml307c_tcp_close(struct ml307c_dev * dev);
 static int d_ml307c_lock(uint32_t timeout_ms);
 static void d_ml307c_unlock(void);
 
+/**
+ * @brief 在字节缓存中查找指定文本片段。
+ */
 static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needle)
 {
     if (buf == NULL || needle == NULL) {
@@ -118,6 +141,9 @@ static int ml307c_find_bytes(const uint8_t *buf, uint16_t len, const char *needl
     return -1;
 }
 
+/**
+ * @brief 获取有效 socket 通道号，配置非法时回退默认通道。
+ */
 static uint8_t ml307c_get_socket_id(struct ml307c_dev * dev)
 {
     if (dev->config.socket_id >= 1u && dev->config.socket_id <= ML307C_SOCKET_MAX_ID) {
@@ -127,11 +153,17 @@ static uint8_t ml307c_get_socket_id(struct ml307c_dev * dev)
     return ML307C_DEFAULT_SOCKET_ID;
 }
 
+/**
+ * @brief 获取 AT 命令超时时间，配置为 0 时使用默认值。
+ */
 static uint32_t ml307c_get_timeout(struct ml307c_dev * dev)
 {
     return dev->config.timeout_ms > 0u ? dev->config.timeout_ms : ML307C_DEFAULT_TIMEOUT_MS;
 }
 
+/**
+ * @brief 清空 ML307C AT 响应缓存。
+ */
 static void ml307c_clear_buffer(struct ml307c_dev * dev)
 {
     if (dev == NULL || dev->rx_rb.buf == NULL) {
@@ -143,6 +175,9 @@ static void ml307c_clear_buffer(struct ml307c_dev * dev)
     dev->rx_rb.tail = 0;
 }
 
+/**
+ * @brief 读取并丢弃串口中残留的主动上报数据。
+ */
 static void ml307c_drain_uart(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
@@ -161,6 +196,9 @@ static void ml307c_drain_uart(struct ml307c_dev * dev)
     }
 }
 
+/**
+ * @brief 将串口读取到的数据追加到 AT 响应缓存。
+ */
 static int ml307c_append_response(struct ml307c_dev * dev, const uint8_t *data, int len)
 {
     if (dev == NULL || data == NULL || len <= 0 || dev->rx_rb.buf == NULL) {
@@ -183,6 +221,9 @@ static int ml307c_append_response(struct ml307c_dev * dev, const uint8_t *data, 
     return copy_len;
 }
 
+/**
+ * @brief 等待 AT 命令响应并捕获完整响应文本。
+ */
 static int ml307c_wait_response(struct ml307c_dev * dev,
                                 const char *cmd,
                                 const char *expect,
@@ -232,6 +273,9 @@ static int ml307c_wait_response(struct ml307c_dev * dev,
     return -3;
 }
 
+/**
+ * @brief 发送 AT 命令并可选捕获响应内容。
+ */
 static int ml307c_send_cmd_capture(struct ml307c_dev * dev,
                                    const char *cmd,
                                    const char *expect,
@@ -263,6 +307,9 @@ static int ml307c_send_cmd_capture(struct ml307c_dev * dev,
                                 out_size);
 }
 
+/**
+ * @brief 发送 AT 命令并只检查期望响应。
+ */
 static int ml307c_send_cmd(struct ml307c_dev * dev,
                            const char *cmd,
                            const char *expect,
@@ -271,6 +318,9 @@ static int ml307c_send_cmd(struct ml307c_dev * dev,
     return ml307c_send_cmd_capture(dev, cmd, expect, timeout_ms, NULL, 0);
 }
 
+/**
+ * @brief 将多行 AT 响应整理成单行日志输出。
+ */
 static void ml307c_log_response(const char *title, const char *resp)
 {
     if (title == NULL || resp == NULL) {
@@ -291,6 +341,9 @@ static void ml307c_log_response(const char *title, const char *resp)
     D_LOGI(TAG, "%s: %s", title, line);
 }
 
+/**
+ * @brief 输出 AT 等待超时时的命令、期望响应和接收摘要。
+ */
 static void ml307c_log_timeout_summary(const char *cmd,
                                        const char *expect,
                                        const uint8_t *data,
@@ -355,6 +408,9 @@ static void ml307c_log_timeout_summary(const char *cmd,
                 reason);
 }
 
+/**
+ * @brief 循环发送 AT 检测，等待模块通信恢复。
+ */
 static int ml307c_wait_alive(struct ml307c_dev * dev, uint32_t timeout_ms)
 {
     if (dev == NULL) {
@@ -373,6 +429,9 @@ static int ml307c_wait_alive(struct ml307c_dev * dev, uint32_t timeout_ms)
     return -2;
 }
 
+/**
+ * @brief 轮询蜂窝网络和链路状态直到联网成功。
+ */
 static int ml307c_wait_network_link(struct ml307c_dev * dev, uint32_t timeout_ms)
 {
     if (dev == NULL) {
@@ -416,6 +475,9 @@ static int ml307c_wait_network_link(struct ml307c_dev * dev, uint32_t timeout_ms
     return -2;
 }
 
+/**
+ * @brief 在 AT 响应中查找独立行前缀。
+ */
 static const char *ml307c_find_response_prefix(const char *resp, const char *prefix)
 {
     if (resp == NULL || prefix == NULL) {
@@ -433,6 +495,9 @@ static const char *ml307c_find_response_prefix(const char *resp, const char *pre
     return NULL;
 }
 
+/**
+ * @brief 从指定响应前缀后解析第一个整数。
+ */
 static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value)
 {
     if (resp == NULL || prefix == NULL || value == NULL) {
@@ -453,6 +518,9 @@ static int ml307c_parse_first_int_after(const char *resp, const char *prefix, in
     return 0;
 }
 
+/**
+ * @brief 从指定响应前缀后提取连续数字字符串。
+ */
 static int ml307c_parse_digits_after(const char *resp,
                                      const char *prefix,
                                      char *out,
@@ -481,6 +549,9 @@ static int ml307c_parse_digits_after(const char *resp,
     return i > 0u ? 0 : -3;
 }
 
+/**
+ * @brief 解析 CEREG 注册状态。
+ */
 static int ml307c_parse_cereg_state(const char *resp, int *state)
 {
     if (resp == NULL || state == NULL) {
@@ -508,6 +579,9 @@ static int ml307c_parse_cereg_state(const char *resp, int *state)
     return 0;
 }
 
+/**
+ * @brief 解析 DTUSTATE socket 通道状态。
+ */
 static int ml307c_parse_dtustate(const char *resp, uint8_t socket_id, int *state)
 {
     if (resp == NULL || state == NULL) {
@@ -535,6 +609,9 @@ static int ml307c_parse_dtustate(const char *resp, uint8_t socket_id, int *state
     return 0;
 }
 
+/**
+ * @brief 初始化 ML307C 内部设备对象并绑定底层能力。
+ */
 static struct ml307c_dev * ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf)
 {
     if (cfg == NULL || itf == NULL) {
@@ -561,6 +638,9 @@ static struct ml307c_dev * ml307c_init(ml307c_config_t *cfg, ml307c_interface_t 
     return dev;
 }
 
+/**
+ * @brief 清理 ML307C 内部设备状态和接收缓存。
+ */
 static void ml307c_deinit(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
@@ -572,6 +652,9 @@ static void ml307c_deinit(struct ml307c_dev * dev)
     D_LOGI(TAG, "ML307C 驱动已释放");
 }
 
+/**
+ * @brief 发送 AT 命令检查模块是否可通信。
+ */
 static int ml307c_check_alive(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
@@ -586,6 +669,9 @@ static int ml307c_check_alive(struct ml307c_dev * dev)
     return ret;
 }
 
+/**
+ * @brief 读取 ICCID 检查 SIM 卡是否可用。
+ */
 static int ml307c_check_sim(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
@@ -607,6 +693,9 @@ static int ml307c_check_sim(struct ml307c_dev * dev)
     return ml307c_parse_digits_after(resp, "+ICCID", iccid, sizeof(iccid)) == 0 ? 0 : 1;
 }
 
+/**
+ * @brief 查询并解析蜂窝网络注册状态。
+ */
 static int ml307c_get_network_state(struct ml307c_dev * dev, int *state)
 {
     if (dev == NULL || state == NULL) {
@@ -628,6 +717,9 @@ static int ml307c_get_network_state(struct ml307c_dev * dev, int *state)
     return ml307c_parse_cereg_state(resp, state);
 }
 
+/**
+ * @brief 查询模块信号强度 CSQ。
+ */
 static int ml307c_get_signal(struct ml307c_dev * dev, int *rssi)
 {
     if (dev == NULL || rssi == NULL) {
@@ -648,6 +740,9 @@ static int ml307c_get_signal(struct ml307c_dev * dev, int *rssi)
     return ml307c_parse_first_int_after(resp, "+CSQ", rssi);
 }
 
+/**
+ * @brief 查询 ML307C 数据链路状态。
+ */
 static int ml307c_get_link_state(struct ml307c_dev * dev, int *link)
 {
     if (dev == NULL || link == NULL) {
@@ -669,6 +764,9 @@ static int ml307c_get_link_state(struct ml307c_dev * dev, int *link)
     return ml307c_parse_first_int_after(resp, "+ISLINK", link);
 }
 
+/**
+ * @brief 配置并等待 ML307C DTU socket 通道连接。
+ */
 static int ml307c_socket_connect(struct ml307c_dev * dev, const char *ip, int port, int proto)
 {
     if (dev == NULL || ip == NULL || port <= 0 || port > 65535 || proto < 0 || proto > 1) {
@@ -758,16 +856,25 @@ static int ml307c_socket_connect(struct ml307c_dev * dev, const char *ip, int po
     return -2;
 }
 
+/**
+ * @brief 建立 ML307C TCP DTU 通道。
+ */
 static int ml307c_tcp_connect(struct ml307c_dev * dev, const char *ip, int port)
 {
     return ml307c_socket_connect(dev, ip, port, 0);
 }
 
+/**
+ * @brief 建立 ML307C UDP DTU 通道。
+ */
 static int ml307c_udp_connect(struct ml307c_dev * dev, const char *ip, int port)
 {
     return ml307c_socket_connect(dev, ip, port, 1);
 }
 
+/**
+ * @brief 通过指定 ML307C 路由发送原始数据。
+ */
 static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t *data, int len)
 {
     if (dev == NULL || (data == NULL && len > 0) || len < 0 || len > 65535) {
@@ -819,6 +926,9 @@ static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t
     return send_ret == 0 ? 0 : -7;
 }
 
+/**
+ * @brief 通过当前 TCP 路由发送数据。
+ */
 static int ml307c_tcp_send(struct ml307c_dev * dev, uint8_t *data, int len)
 {
     uint8_t socket_id = ml307c_get_socket_id(dev);
@@ -827,6 +937,9 @@ static int ml307c_tcp_send(struct ml307c_dev * dev, uint8_t *data, int len)
     return ml307c_send_route(dev, route, data, len);
 }
 
+/**
+ * @brief 通过当前 UDP 路由发送数据。
+ */
 static int ml307c_udp_send(struct ml307c_dev * dev, uint8_t *data, int len)
 {
     uint8_t socket_id = ml307c_get_socket_id(dev);
@@ -835,6 +948,9 @@ static int ml307c_udp_send(struct ml307c_dev * dev, uint8_t *data, int len)
     return ml307c_send_route(dev, route, data, len);
 }
 
+/**
+ * @brief 从 ML307C UART 直接读取下行原始数据。
+ */
 static int ml307c_read_raw(struct ml307c_dev * dev, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     if (dev == NULL || buf == NULL || len == 0u) {
@@ -844,6 +960,9 @@ static int ml307c_read_raw(struct ml307c_dev * dev, uint8_t *buf, uint16_t len, 
     return dev->itf.uart_read(buf, len, timeout_ms);
 }
 
+/**
+ * @brief 接收 HTTP 响应正文并剥离 ML307C HTTP 尾部状态。
+ */
 static int ml307c_http_capture_response(struct ml307c_dev * dev,
                                         uint8_t *resp,
                                         uint16_t resp_size,
@@ -920,6 +1039,9 @@ static int ml307c_http_capture_response(struct ml307c_dev * dev,
     return -1;
 }
 
+/**
+ * @brief 使用 ML307C HTTP AT 命令执行一次 POST。
+ */
 static int ml307c_http_post(struct ml307c_dev * dev,
                      uint8_t id,
                      const char *url,
@@ -1010,6 +1132,9 @@ static int ml307c_http_post(struct ml307c_dev * dev,
                                         timeout_ms + 10000u);
 }
 
+/**
+ * @brief 对外执行 ML307C HTTP POST，并负责互斥保护和长度适配。
+ */
 int d_ml307c_http_post(const char *url,
                             const char *content_type,
                             const uint8_t *body,
@@ -1061,6 +1186,9 @@ int d_ml307c_http_post(const char *url,
     return ret;
 }
 
+/**
+ * @brief 关闭当前 ML307C DTU socket 任务。
+ */
 static int ml307c_tcp_close(struct ml307c_dev * dev)
 {
     if (dev == NULL) {
@@ -1073,16 +1201,25 @@ static int ml307c_tcp_close(struct ml307c_dev * dev)
     return ml307c_send_cmd(dev, cmd, "+DTUTASK", ml307c_get_timeout(dev));
 }
 
+/**
+ * @brief 判断 CEREG 注册状态是否表示已注册。
+ */
 static int d_ml307c_reg_ready(int reg_state)
 {
     return reg_state == 1 || reg_state == 5;
 }
 
+/**
+ * @brief 获取 ML307C 全局互斥锁。
+ */
 static int d_ml307c_lock(uint32_t timeout_ms)
 {
     return s_ml307c_mutex != NULL ? osal_mutex_lock(s_ml307c_mutex, timeout_ms) : -1;
 }
 
+/**
+ * @brief 释放 ML307C 全局互斥锁。
+ */
 static void d_ml307c_unlock(void)
 {
     if (s_ml307c_mutex != NULL) {
@@ -1090,6 +1227,9 @@ static void d_ml307c_unlock(void)
     }
 }
 
+/**
+ * @brief 初始化当前板级 ML307C 网络驱动。
+ */
 int d_ml307c_init(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg)
 {
     if (s_ml307c != NULL) {
@@ -1164,6 +1304,9 @@ int d_ml307c_init(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg)
     return 0;
 }
 
+/**
+ * @brief 释放当前板级 ML307C 网络驱动。
+ */
 int d_ml307c_deinit(void)
 {
     if (s_ml307c != NULL) {
@@ -1175,11 +1318,17 @@ int d_ml307c_deinit(void)
     return 0;
 }
 
+/**
+ * @brief 判断 ML307C 驱动是否已经初始化。
+ */
 int d_ml307c_is_initialized(void)
 {
     return s_ml307c != NULL ? 1 : 0;
 }
 
+/**
+ * @brief 获取 ML307C AT、SIM、信号、注册和链路状态。
+ */
 int d_ml307c_get_status(d_ml307c_status_t *status)
 {
     if (s_ml307c == NULL || status == NULL) {
@@ -1211,6 +1360,9 @@ int d_ml307c_get_status(d_ml307c_status_t *status)
     return 0;
 }
 
+/**
+ * @brief 判断 ML307C 是否满足业务发送前的就绪条件。
+ */
 int d_ml307c_is_ready(void)
 {
     d_ml307c_status_t status;
@@ -1225,6 +1377,9 @@ int d_ml307c_is_ready(void)
            status.link_state == 1;
 }
 
+/**
+ * @brief 建立 ML307C TCP 通道。
+ */
 int d_ml307c_tcp_connect(const char *host, int port)
 {
     if (s_ml307c == NULL || host == NULL || port <= 0) {
@@ -1241,6 +1396,9 @@ int d_ml307c_tcp_connect(const char *host, int port)
     return ret;
 }
 
+/**
+ * @brief 通过 ML307C TCP 通道发送数据。
+ */
 int d_ml307c_tcp_send(const uint8_t *data, int len)
 {
     if (s_ml307c == NULL || data == NULL || len <= 0) {
@@ -1259,6 +1417,9 @@ int d_ml307c_tcp_send(const uint8_t *data, int len)
     return ret;
 }
 
+/**
+ * @brief 关闭 ML307C TCP 通道。
+ */
 int d_ml307c_tcp_close(void)
 {
     if (s_ml307c == NULL) {
@@ -1277,6 +1438,9 @@ int d_ml307c_tcp_close(void)
     return ret;
 }
 
+/**
+ * @brief 建立 ML307C UDP 通道。
+ */
 int d_ml307c_udp_connect(const char *host, int port)
 {
     if (s_ml307c == NULL || host == NULL || port <= 0) {
@@ -1293,6 +1457,9 @@ int d_ml307c_udp_connect(const char *host, int port)
     return ret;
 }
 
+/**
+ * @brief 通过 ML307C UDP 通道发送数据。
+ */
 int d_ml307c_udp_send(const uint8_t *data, int len)
 {
     if (s_ml307c == NULL || data == NULL || len <= 0) {
@@ -1311,6 +1478,9 @@ int d_ml307c_udp_send(const uint8_t *data, int len)
     return ret;
 }
 
+/**
+ * @brief 读取 ML307C 下行原始数据。
+ */
 int d_ml307c_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
     if (s_ml307c == NULL || buf == NULL || len == 0u) {
@@ -1321,39 +1491,6 @@ int d_ml307c_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
         return 0;
     }
     int ret = ml307c_read_raw(s_ml307c, buf, len, timeout_ms);
-    d_ml307c_unlock();
-    return ret;
-}
-
-int d_ml307c_http_post_wav(const char *url,
-                                const uint8_t *wav,
-                                uint16_t wav_len,
-                                uint8_t *resp,
-                                uint16_t resp_size,
-                                uint16_t *resp_len,
-                                uint32_t timeout_ms)
-{
-    if (s_ml307c == NULL || url == NULL || wav == NULL || resp == NULL || resp_len == NULL) {
-        return -1;
-    }
-    if (timeout_ms == 0u) {
-        timeout_ms = ML307C_HTTP_TIMEOUT_MS;
-    }
-
-    int ret = d_ml307c_lock(timeout_ms + 15000u);
-    if (ret != 0) {
-        return ret;
-    }
-    ret = ml307c_http_post(s_ml307c,
-                           ML307C_HTTP_TASK_ID,
-                           url,
-                           "Content-Type: audio/wav",
-                           wav,
-                           wav_len,
-                           resp,
-                           resp_size,
-                           resp_len,
-                           timeout_ms);
     d_ml307c_unlock();
     return ret;
 }

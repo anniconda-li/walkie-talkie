@@ -15,17 +15,6 @@
  */
 static const char *TAG = "d_camera";
 
-/**
- * @brief 摄像头 XCLK 频率。
- */
-#define d_camera_XCLK_FREQ_HZ 20000000
-
-/** @brief 本地预览使用的帧尺寸。 */
-#define D_CAMERA_PREVIEW_FRAME_SIZE FRAMESIZE_240X240
-
-/** @brief 拍照上传使用的 JPEG 帧尺寸，第一版使用 QVGA 兼顾兼容性和数据量。 */
-#define D_CAMERA_CAPTURE_FRAME_SIZE FRAMESIZE_QVGA
-
 /** @brief 摄像头 driver 是否已成功初始化。 */
 static uint8_t s_camera_inited = 0u;
 
@@ -46,6 +35,9 @@ static int d_camera_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
+/**
+ * @brief 设置摄像头 PWDN 引脚电平，用于硬件上电和关断。
+ */
 static int d_camera_set_pwdn_level(int level)
 {
     if (d_camera_PWDN_IO == GPIO_NUM_NC) {
@@ -194,7 +186,7 @@ static void d_camera_log_sensor_info(void)
 }
 
 /**
- * @brief 按指定输出格式初始化 esp-camera。
+ * @brief 保证 esp-camera 处于指定输出模式。
  *
  * esp-camera 的 JPEG/RGB565 采样模式、DMA 接收长度和帧缓存处理是在
  * esp_camera_init() 内根据 camera_config_t.pixel_format 配好的。运行时只
@@ -202,8 +194,23 @@ static void d_camera_log_sensor_info(void)
  * RGB/YUV 接收路径取帧，表现为 fb->format 是 JPEG、数据却不是 JPEG。
  * 因此本项目在 RGB565 预览和 JPEG 拍照之间切换时，采用 deinit/init 重建。
  */
-static int d_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
+static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize)
 {
+    if (s_camera_inited != 0u &&
+        s_camera_pixformat == pixformat &&
+        s_camera_framesize == framesize) {
+        return 0;
+    }
+
+    if (s_camera_inited != 0u) {
+        int deinit_ret = d_camera_err_to_int(esp_camera_deinit());
+        if (deinit_ret != 0) {
+            D_LOGE(TAG, "摄像头模式切换前释放失败, ret=%d", deinit_ret);
+            return deinit_ret;
+        }
+        s_camera_inited = 0u;
+    }
+
     if (wdriver_i2c_get_bus_handle() == NULL) {
         D_LOGE(TAG, "摄像头初始化失败: I2C 未初始化");
         return -1;
@@ -268,40 +275,9 @@ static int d_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
     return 0;
 }
 
-/**
- * @brief 重建 esp-camera 到指定模式。
- *
- * 如果当前模式已经匹配则直接返回。否则先释放旧实例，再用目标格式重新
- * 初始化，这样 HAL 的 jpeg_mode、DMA 长度和 sensor 输出格式保持一致。
- */
-static int d_camera_reinit_mode(pixformat_t pixformat, framesize_t framesize)
-{
-    if (s_camera_inited != 0u &&
-        s_camera_pixformat == pixformat &&
-        s_camera_framesize == framesize) {
-        return 0;
-    }
-
-    if (s_camera_inited != 0u) {
-        int ret = d_camera_err_to_int(esp_camera_deinit());
-        if (ret != 0) {
-            D_LOGE(TAG, "摄像头模式切换前释放失败, ret=%d", ret);
-            return ret;
-        }
-        s_camera_inited = 0u;
-    }
-
-    return d_camera_init_mode(pixformat, framesize);
-}
-
 int d_camera_init(void)
 {
-    if (s_camera_inited != 0u) {
-        D_LOGI(TAG, "摄像头已初始化");
-        return 0;
-    }
-
-    return d_camera_init_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE);
+    return d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE);
 }
 
 int d_camera_deinit(void)
@@ -326,7 +302,7 @@ int d_camera_set_rgb565_mode(void)
         D_LOGE(TAG, "切换 RGB565 模式失败: 摄像头未初始化");
         return -1;
     }
-    int ret = d_camera_reinit_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE);
+    int ret = d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE);
     if (ret != 0) {
         D_LOGE(TAG, "切换 RGB565 模式失败, ret=%d", ret);
         return ret;
@@ -342,7 +318,7 @@ int d_camera_set_jpeg_mode(void)
         D_LOGE(TAG, "切换 JPEG 模式失败: 摄像头未初始化");
         return -1;
     }
-    int ret = d_camera_reinit_mode(PIXFORMAT_JPEG, D_CAMERA_CAPTURE_FRAME_SIZE);
+    int ret = d_camera_apply_mode(PIXFORMAT_JPEG, D_CAMERA_CAPTURE_FRAME_SIZE);
     if (ret != 0) {
         D_LOGE(TAG, "切换 JPEG 模式失败, ret=%d", ret);
         return ret;

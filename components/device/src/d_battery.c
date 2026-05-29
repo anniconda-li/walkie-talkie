@@ -25,11 +25,17 @@ static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_adc_cali_handle = NULL;
 static uint8_t s_adc_cali_enabled = 0u;
 
+/**
+ * @brief 将 ESP-IDF 错误码统一转换为本层负值错误码。
+ */
 static int d_battery_err_to_int(int ret)
 {
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
+/**
+ * @brief 初始化电池采样使能 GPIO 和 ADC 输入 GPIO。
+ */
 static int d_battery_gpio_init(void)
 {
     gpio_config_t en_cfg = {
@@ -72,6 +78,9 @@ static int d_battery_gpio_init(void)
     return 0;
 }
 
+/**
+ * @brief 尝试创建 ADC 校准句柄，失败时退回原始值估算。
+ */
 static void d_battery_cali_init(void)
 {
     adc_cali_curve_fitting_config_t cali_cfg = {

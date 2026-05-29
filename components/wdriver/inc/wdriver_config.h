@@ -58,7 +58,6 @@
 /**
  * @brief ES7210/ES8311 共用音频 I2S 引脚定义。
  */
-#define WDRIVER_AUDIO_CODEC_ENABLE_IO GPIO_NUM_16 /**< 音频 codec 板使能脚，高电平使能。 */
 #define WDRIVER_AUDIO_MCLK_IO GPIO_NUM_38 /**< MCLK。 */
 #define WDRIVER_AUDIO_BCLK_IO GPIO_NUM_14 /**< SCLK/BCLK。 */
 #define WDRIVER_AUDIO_LRCK_IO GPIO_NUM_47 /**< LRCK/WS。 */

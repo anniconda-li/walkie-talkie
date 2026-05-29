@@ -215,7 +215,6 @@ int service_init_network(void)
             .udp_send = d_wifi_udp_send,
             .read_downlink = d_wifi_read_downlink,
             .http_post = d_wifi_http_post,
-            .http_post_wav = d_wifi_http_post_wav,
 #else
             .is_initialized = d_ml307c_is_initialized,
             .get_status = service_init_network_ml307c_get_status,
@@ -227,7 +226,6 @@ int service_init_network(void)
             .udp_send = d_ml307c_udp_send,
             .read_downlink = d_ml307c_read_downlink,
             .http_post = d_ml307c_http_post,
-            .http_post_wav = d_ml307c_http_post_wav,
 #endif
         },
     };
