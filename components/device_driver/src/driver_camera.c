@@ -47,46 +47,99 @@ static int driver_camera_err_to_int(int ret)
 }
 
 /**
- * @brief 设置普通 GPIO 摄像头 PWDN/开关脚。
+ * @brief 调整 sensor 默认画面参数。
  *
- * 当前硬件已把摄像头开关从 PCA9557 迁移到 ESP32 普通 GPIO。PWDN 低电平
- * 表示退出关断/上电，高电平表示关断。
+ * 只在 RGB565 预览模式做轻量调校，改善默认画面偏白、偏灰的问题。不同
+ * sensor 对取值范围和支持项的实现可能不同，因此这里按 best-effort 调用。
  */
-static int driver_camera_set_pwdn_level(int level)
+static void driver_camera_apply_preview_tuning(pixformat_t pixformat)
 {
-    if ((int)driver_camera_PWDN_IO < 0) {
-        return 0;
+    if (pixformat != PIXFORMAT_RGB565) {
+        return;
     }
 
-    gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << (uint32_t)driver_camera_PWDN_IO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-
-    int ret = driver_camera_err_to_int(gpio_config(&io_conf));
-    if (ret != 0) {
-        DRIVER_LOGE(TAG, "摄像头 PWDN GPIO 配置失败, io=%d, ret=%d",
-                    (int)driver_camera_PWDN_IO,
-                    ret);
-        return ret;
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor == NULL) {
+        DRIVER_LOGW(TAG, "摄像头预览参数调校跳过: sensor 不可用");
+        return;
     }
 
-    ret = driver_camera_err_to_int(gpio_set_level(driver_camera_PWDN_IO, level));
-    if (ret != 0) {
-        DRIVER_LOGE(TAG, "摄像头 PWDN GPIO 设置失败, io=%d, level=%d, ret=%d",
-                    (int)driver_camera_PWDN_IO,
-                    level,
-                    ret);
-        return ret;
+    int ret = 0;
+    if (sensor->set_special_effect != NULL) {
+        ret = sensor->set_special_effect(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头特效关闭失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_whitebal != NULL) {
+        ret = sensor->set_whitebal(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动白平衡设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_awb_gain != NULL) {
+        ret = sensor->set_awb_gain(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头 AWB gain 设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_wb_mode != NULL) {
+        ret = sensor->set_wb_mode(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头白平衡模式设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_gain_ctrl != NULL) {
+        ret = sensor->set_gain_ctrl(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动增益设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_agc_gain != NULL) {
+        ret = sensor->set_agc_gain(sensor, 0);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头增益档位设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_exposure_ctrl != NULL) {
+        ret = sensor->set_exposure_ctrl(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动曝光设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_aec2 != NULL) {
+        ret = sensor->set_aec2(sensor, 1);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头 AEC2 设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_saturation != NULL) {
+        ret = sensor->set_saturation(sensor, 2);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头饱和度设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_contrast != NULL) {
+        ret = sensor->set_contrast(sensor, 2);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头对比度设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_brightness != NULL) {
+        ret = sensor->set_brightness(sensor, -2);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头亮度设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_ae_level != NULL) {
+        ret = sensor->set_ae_level(sensor, -2);
+        if (ret != 0) {
+            DRIVER_LOGW(TAG, "摄像头自动曝光等级设置失败, ret=%d", ret);
+        }
     }
 
-    DRIVER_LOGI(TAG, "摄像头 PWDN GPIO 已设置, io=%d, level=%d",
-                (int)driver_camera_PWDN_IO,
-                level);
-    return 0;
+    DRIVER_LOGI(TAG,
+                "摄像头预览参数已调校: awb=on, agc=on, agc_gain=0, aec=on, ae_level=-2, brightness=-2, saturation=2, contrast=2");
 }
 
 /**
@@ -178,6 +231,7 @@ static int driver_camera_init_mode(pixformat_t pixformat, framesize_t framesize)
     s_camera_pixformat = pixformat;
     s_camera_framesize = framesize;
     s_camera_inited = 1u;
+    driver_camera_apply_preview_tuning(pixformat);
     driver_camera_log_sensor_info();
     DRIVER_LOGI(TAG, "摄像头初始化成功, frame_size=%d, pixel_format=%d",
                 (int)framesize,
