@@ -39,6 +39,7 @@
  */
 static ui_event_callbacks_t g_callbacks;
 static ui_ai_view_t *g_ai_view = NULL;
+static ui_settings_view_t *g_settings_view = NULL;
 static lv_timer_t *g_ai_wait_timer = NULL;
 static uint8_t g_ai_waiting = 0u;
 static uint8_t g_ai_wait_dot_count = 0u;
@@ -470,6 +471,332 @@ static void settings_slider_event_cb(lv_event_t *e)
     }
 }
 
+static void settings_set_network_selected(ui_settings_view_t *view, ui_settings_network_mode_t mode)
+{
+    if(view == NULL) {
+        return;
+    }
+
+    view->selected_network = mode;
+    lv_color_t active = UI_COLOR_SETTINGS;
+    lv_color_t idle = lv_color_make(0x55, 0x55, 0x55);
+    if(view->wlan_button != NULL) {
+        lv_obj_set_style_border_color(view->wlan_button,
+                                      mode == UI_SETTINGS_NETWORK_WLAN ? active : idle,
+                                      0);
+        lv_obj_set_style_border_width(view->wlan_button,
+                                      mode == UI_SETTINGS_NETWORK_WLAN ? 3 : 1,
+                                      0);
+    }
+    if(view->cellular_button != NULL) {
+        lv_obj_set_style_border_color(view->cellular_button,
+                                      mode == UI_SETTINGS_NETWORK_4G ? active : idle,
+                                      0);
+        lv_obj_set_style_border_width(view->cellular_button,
+                                      mode == UI_SETTINGS_NETWORK_4G ? 3 : 1,
+                                      0);
+    }
+}
+
+static void settings_refresh_wlan_ssid(ui_settings_view_t *view)
+{
+    char ssid[33];
+    lv_point_t text_size;
+
+    if(view == NULL || view->wlan_ssid_label == NULL) {
+        return;
+    }
+
+    ssid[0] = '\0';
+    if(g_callbacks.settings_wifi_ssid_get != NULL &&
+       g_callbacks.settings_wifi_ssid_get(ssid, sizeof(ssid)) == 0 &&
+       ssid[0] != '\0') {
+        lv_label_set_text(view->wlan_ssid_label, ssid);
+        const lv_font_t *font = lv_obj_get_style_text_font(view->wlan_ssid_label, LV_PART_MAIN);
+        int32_t letter_space = lv_obj_get_style_text_letter_space(view->wlan_ssid_label, LV_PART_MAIN);
+        int32_t line_space = lv_obj_get_style_text_line_space(view->wlan_ssid_label, LV_PART_MAIN);
+        lv_text_get_size(&text_size, ssid, font, letter_space, line_space, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+        lv_label_set_long_mode(view->wlan_ssid_label,
+                               text_size.x > lv_obj_get_width(view->wlan_ssid_label)
+                                   ? LV_LABEL_LONG_SCROLL_CIRCULAR
+                                   : LV_LABEL_LONG_CLIP);
+    } else {
+        lv_label_set_text(view->wlan_ssid_label, "");
+        lv_label_set_long_mode(view->wlan_ssid_label, LV_LABEL_LONG_CLIP);
+    }
+}
+
+static const char *settings_4g_status_text(ui_settings_4g_status_t status)
+{
+    switch(status) {
+        case UI_SETTINGS_4G_NO_SIM:
+            return "未插卡";
+        case UI_SETTINGS_4G_NO_AT:
+            return "4G模块无响应";
+        case UI_SETTINGS_4G_NOT_REGISTERED:
+            return "4G未注册网络";
+        case UI_SETTINGS_4G_UNAVAILABLE:
+            return "4G不可用";
+        default:
+            return "4G已启用";
+    }
+}
+
+static void settings_refresh_network_selected(ui_settings_view_t *view)
+{
+    if(view == NULL) {
+        return;
+    }
+
+    settings_set_network_selected(view, view->selected_network == UI_SETTINGS_NETWORK_NONE
+                                             ? UI_SETTINGS_NETWORK_WLAN
+                                             : view->selected_network);
+}
+
+static void settings_wlan_back_event_cb(lv_event_t *e)
+{
+    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || view == NULL || view->wlan_page == NULL) {
+        return;
+    }
+
+    lv_obj_add_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
+    settings_refresh_network_selected(view);
+    settings_refresh_wlan_ssid(view);
+}
+
+static void settings_wifi_ap_event_cb(lv_event_t *e)
+{
+    ui_settings_view_t *view = g_settings_view;
+    const char *ssid = (const char *)lv_event_get_user_data(e);
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || view == NULL || ssid == NULL) {
+        return;
+    }
+
+    strncpy(view->selected_ssid, ssid, sizeof(view->selected_ssid) - 1u);
+    view->selected_ssid[sizeof(view->selected_ssid) - 1u] = '\0';
+    if(view->password_dialog != NULL) {
+        lv_obj_align(view->password_dialog, LV_ALIGN_TOP_MID, 0, 26);
+        lv_obj_move_foreground(view->password_dialog);
+        lv_obj_remove_flag(view->password_dialog, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->password_title_label != NULL) {
+        lv_label_set_text_fmt(view->password_title_label, "%s", view->selected_ssid);
+        lv_obj_set_pos(view->password_title_label, 0, 0);
+        lv_obj_set_width(view->password_title_label, 188);
+    }
+    if(view->password_textarea != NULL) {
+        lv_textarea_set_text(view->password_textarea, "");
+        lv_obj_remove_flag(view->password_textarea, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_state(view->password_textarea, LV_STATE_FOCUSED);
+    }
+    if(view->password_keyboard != NULL) {
+        lv_keyboard_set_textarea(view->password_keyboard, view->password_textarea);
+        lv_obj_move_foreground(view->password_keyboard);
+        lv_obj_remove_flag(view->password_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->connect_button != NULL) {
+        lv_obj_remove_flag(view->connect_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->cancel_button != NULL) {
+        lv_obj_remove_flag(view->cancel_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->connecting_spinner != NULL) {
+        lv_obj_add_flag(view->connecting_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void settings_hide_wifi_dialog(ui_settings_view_t *view)
+{
+    if(view == NULL) {
+        return;
+    }
+    view->selected_ssid[0] = '\0';
+    if(view->password_dialog != NULL) {
+        lv_obj_add_flag(view->password_dialog, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->password_textarea != NULL) {
+        lv_obj_add_flag(view->password_textarea, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->password_keyboard != NULL) {
+        lv_obj_add_flag(view->password_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->connect_button != NULL) {
+        lv_obj_add_flag(view->connect_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->cancel_button != NULL) {
+        lv_obj_add_flag(view->cancel_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->connecting_spinner != NULL) {
+        lv_obj_add_flag(view->connecting_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void settings_wifi_clear_list(ui_settings_view_t *view)
+{
+    if(view == NULL || view->wlan_list == NULL) {
+        return;
+    }
+
+    lv_obj_clean(view->wlan_list);
+}
+
+static const char *settings_wifi_signal_text(int rssi)
+{
+    if(rssi >= -55) {
+        return "优";
+    }
+    if(rssi >= -67) {
+        return "良";
+    }
+    if(rssi >= -78) {
+        return "中";
+    }
+    return "差";
+}
+
+static void settings_wifi_add_ap(ui_settings_view_t *view, const ui_settings_wifi_ap_t *ap)
+{
+    if(view == NULL || view->wlan_list == NULL || ap == NULL || ap->ssid[0] == '\0') {
+        return;
+    }
+
+    lv_obj_t *btn = lv_button_create(view->wlan_list);
+    lv_obj_set_size(btn, 196, 34);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0x55, 0x55, 0x55), 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+
+    lv_obj_t *ssid = lv_label_create(btn);
+    lv_label_set_text(ssid, ap->ssid);
+    lv_obj_set_pos(ssid, 10, 9);
+    lv_obj_set_width(ssid, 142);
+    lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(ssid, lv_color_white(), 0);
+
+    lv_obj_t *signal = lv_label_create(btn);
+    lv_label_set_text(signal, settings_wifi_signal_text(ap->rssi));
+    lv_obj_set_pos(signal, 158, 9);
+    lv_obj_set_width(signal, 26);
+    lv_obj_set_style_text_align(signal, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_color(signal, lv_color_make(0xF0, 0xF0, 0xF0), 0);
+
+    lv_obj_add_event_cb(btn, settings_wifi_ap_event_cb, LV_EVENT_CLICKED, (void *)lv_label_get_text(ssid));
+}
+
+static void settings_wifi_scan(ui_settings_view_t *view)
+{
+    if(view == NULL || g_callbacks.settings_wifi_scan_requested == NULL) {
+        return;
+    }
+
+    settings_wifi_clear_list(view);
+    settings_hide_wifi_dialog(view);
+    if(view->wlan_status_label != NULL) {
+        lv_label_set_text(view->wlan_status_label, "正在扫描...");
+    }
+    g_callbacks.settings_wifi_scan_requested();
+}
+
+static void settings_wlan_scan_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        settings_wifi_scan((ui_settings_view_t *)lv_event_get_user_data(e));
+    }
+}
+
+static void settings_wifi_cancel_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        settings_hide_wifi_dialog((ui_settings_view_t *)lv_event_get_user_data(e));
+    }
+}
+
+static void settings_wifi_connect_event_cb(lv_event_t *e)
+{
+    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || view == NULL ||
+       g_callbacks.settings_wifi_connect_requested == NULL ||
+       view->selected_ssid[0] == '\0') {
+        return;
+    }
+
+    const char *password = view->password_textarea != NULL ? lv_textarea_get_text(view->password_textarea) : "";
+    if(password == NULL || strlen(password) < 8u) {
+        if(view->password_title_label != NULL) {
+            lv_label_set_text(view->password_title_label, "密码至少8位");
+            lv_obj_set_pos(view->password_title_label, 0, 0);
+            lv_obj_set_width(view->password_title_label, 188);
+        }
+        if(view->password_textarea != NULL) {
+            lv_obj_remove_flag(view->password_textarea, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_state(view->password_textarea, LV_STATE_FOCUSED);
+        }
+        if(view->password_keyboard != NULL) {
+            lv_obj_remove_flag(view->password_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    if(view->password_dialog != NULL) {
+        lv_obj_align(view->password_dialog, LV_ALIGN_CENTER, 0, -6);
+    }
+    if(view->password_title_label != NULL) {
+        lv_label_set_text(view->password_title_label, "正在连接...");
+        lv_obj_align(view->password_title_label, LV_ALIGN_TOP_MID, 0, 6);
+    }
+    if(view->password_textarea != NULL) {
+        lv_obj_add_flag(view->password_textarea, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->password_keyboard != NULL) {
+        lv_obj_add_flag(view->password_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->connect_button != NULL) {
+        lv_obj_add_flag(view->connect_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->cancel_button != NULL) {
+        lv_obj_add_flag(view->cancel_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(view->connecting_spinner != NULL) {
+        lv_obj_remove_flag(view->connecting_spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    g_callbacks.settings_wifi_connect_requested(view->selected_ssid, password);
+}
+
+static void settings_4g_event_cb(lv_event_t *e)
+{
+    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || view == NULL ||
+       g_callbacks.settings_4g_select_requested == NULL) {
+        return;
+    }
+
+    g_callbacks.settings_4g_select_requested();
+}
+
+static void settings_wlan_select_event_cb(lv_event_t *e)
+{
+    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
+    lv_event_code_t code = lv_event_get_code(e);
+
+    if(view == NULL || view->wlan_page == NULL) {
+        return;
+    }
+
+    if(code == LV_EVENT_CLICKED) {
+        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
+        settings_refresh_wlan_ssid(view);
+    } else if(code == LV_EVENT_LONG_PRESSED) {
+        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
+        lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
+        settings_wifi_scan(view);
+    }
+}
+
 /* ==========================================================================
  * 公开接口
  * ========================================================================== */
@@ -607,5 +934,124 @@ void ui_event_register_settings(ui_settings_view_t *view)
 
     if(view->volume_slider != NULL) {
         lv_obj_add_event_cb(view->volume_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    g_settings_view = view;
+    if(view->wlan_button != NULL) {
+        lv_obj_add_event_cb(view->wlan_button, settings_wlan_select_event_cb, LV_EVENT_ALL, view);
+    }
+    if(view->cellular_button != NULL) {
+        lv_obj_add_event_cb(view->cellular_button, settings_4g_event_cb, LV_EVENT_CLICKED, view);
+    }
+    if(view->wlan_back_button != NULL) {
+        lv_obj_add_event_cb(view->wlan_back_button, settings_wlan_back_event_cb, LV_EVENT_CLICKED, view);
+    }
+    if(view->wlan_scan_button != NULL) {
+        lv_obj_add_event_cb(view->wlan_scan_button, settings_wlan_scan_event_cb, LV_EVENT_CLICKED, view);
+    }
+    if(view->connect_button != NULL) {
+        lv_obj_add_event_cb(view->connect_button, settings_wifi_connect_event_cb, LV_EVENT_CLICKED, view);
+    }
+    if(view->cancel_button != NULL) {
+        lv_obj_add_event_cb(view->cancel_button, settings_wifi_cancel_event_cb, LV_EVENT_CLICKED, view);
+    }
+    view->selected_network = UI_SETTINGS_NETWORK_WLAN;
+    settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
+    settings_refresh_wlan_ssid(view);
+}
+
+void ui_event_unregister_settings(ui_settings_view_t *view)
+{
+    if(g_settings_view == view) {
+        g_settings_view = NULL;
+    }
+}
+
+void ui_event_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
+                                             uint16_t count,
+                                             int ret)
+{
+    ui_settings_view_t *view = g_settings_view;
+    if(view == NULL) {
+        return;
+    }
+
+    settings_wifi_clear_list(view);
+    if(ret != 0) {
+        if(view->wlan_status_label != NULL) {
+            lv_label_set_text(view->wlan_status_label, "扫描失败");
+        }
+        return;
+    }
+
+    for(uint16_t i = 0; i < count; i++) {
+        settings_wifi_add_ap(view, &items[i]);
+    }
+    if(view->wlan_status_label != NULL) {
+        lv_label_set_text(view->wlan_status_label, count > 0 ? "选择热点" : "未发现热点");
+    }
+}
+
+void ui_event_settings_show_wifi_connect_result(int ret)
+{
+    ui_settings_view_t *view = g_settings_view;
+    if(view == NULL) {
+        return;
+    }
+
+    if(ret == -2) {
+        if(view->password_title_label != NULL) {
+            lv_label_set_text(view->password_title_label, "密码至少8位");
+            lv_obj_set_pos(view->password_title_label, 0, 0);
+            lv_obj_set_width(view->password_title_label, 188);
+        }
+        if(view->password_dialog != NULL) {
+            lv_obj_remove_flag(view->password_dialog, LV_OBJ_FLAG_HIDDEN);
+        }
+        if(view->password_textarea != NULL) {
+            lv_obj_remove_flag(view->password_textarea, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_state(view->password_textarea, LV_STATE_FOCUSED);
+        }
+        if(view->password_keyboard != NULL) {
+            lv_obj_remove_flag(view->password_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    if(ret == 0) {
+        if(view->wlan_status_label != NULL) {
+            lv_label_set_text(view->wlan_status_label, "WLAN已启用");
+        }
+        if(view->network_status_label != NULL) {
+            lv_label_set_text(view->network_status_label, "WLAN已启用");
+        }
+        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
+        settings_refresh_wlan_ssid(view);
+        settings_hide_wifi_dialog(view);
+        if(view->wlan_page != NULL) {
+            lv_obj_add_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    settings_hide_wifi_dialog(view);
+    if(view->wlan_status_label != NULL) {
+        lv_label_set_text(view->wlan_status_label, "连接失败");
+    }
+}
+
+void ui_event_settings_show_4g_select_result(ui_settings_4g_status_t status, int ret)
+{
+    ui_settings_view_t *view = g_settings_view;
+    if(view == NULL) {
+        return;
+    }
+
+    if(view->network_status_label != NULL) {
+        lv_label_set_text(view->network_status_label, settings_4g_status_text(status));
+    }
+    if(ret == 0) {
+        settings_set_network_selected(view, UI_SETTINGS_NETWORK_4G);
+    } else {
+        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
     }
 }

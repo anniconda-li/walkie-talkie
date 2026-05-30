@@ -144,19 +144,7 @@ void app_main(void)
         }
     }
 
-    boot_mark(APP_BOOT_STAGE_NETWORK, APP_BOOT_STATE_RUNNING, 0);
-    ret = d_network_init();
-    if (ret != 0) {
-        OSAL_LOGW(TAG, "网络 driver 初始化失败，业务将以未联网状态继续, ret=%d", ret);
-    }
-    int network_service_ret = service_init_network();
-    if (ret != 0 || network_service_ret != 0) {
-        boot_mark(APP_BOOT_STAGE_NETWORK,
-                  APP_BOOT_STATE_WARN,
-                  ret != 0 ? ret : network_service_ret);
-    } else {
-        boot_mark(APP_BOOT_STAGE_NETWORK, APP_BOOT_STATE_OK, 0);
-    }
+    boot_mark(APP_BOOT_STAGE_NETWORK, APP_BOOT_STATE_OK, 0);
 
     boot_mark(APP_BOOT_STAGE_CAMERA, APP_BOOT_STATE_RUNNING, 0);
     ret = d_optional_camera_init();

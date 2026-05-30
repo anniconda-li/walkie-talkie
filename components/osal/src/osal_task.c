@@ -84,6 +84,11 @@ int osal_task_create(const char *name,
     return 0;
 }
 
+void osal_task_delete_current(void)
+{
+    vTaskDelete(NULL);
+}
+
 int osal_task_notify_give(osal_task_t task)
 {
     if (task == NULL) {

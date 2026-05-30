@@ -8,6 +8,7 @@
 #define APP_UI_H
 
 #include "ui_i18n.h"
+#include "ui_event.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +68,12 @@ int app_ui_set_ai_waiting(int waiting);
  * @return 成功返回 0；失败返回负值。
  */
 int app_ui_set_ai_message(ui_text_id_t text_id);
+
+int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
+                                          uint16_t count,
+                                          int ret);
+int app_ui_settings_show_wifi_connect_result(int ret);
+int app_ui_settings_show_4g_select_result(ui_settings_4g_status_t status, int ret);
 
 #ifdef __cplusplus
 }

@@ -58,6 +58,13 @@ int osal_task_create(const char *name,
                      osal_task_t *task);
 
 /**
+ * @brief 删除当前任务。
+ *
+ * 一次性后台任务完成工作后调用本接口退出。
+ */
+void osal_task_delete_current(void);
+
+/**
  * @brief 向任务发送通知。
  *
  * @param[in] task 任务句柄。

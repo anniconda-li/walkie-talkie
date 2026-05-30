@@ -149,3 +149,53 @@ int app_ui_set_ai_message(ui_text_id_t text_id)
     service_screen_unlock();
     return 0;
 }
+
+int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
+                                          uint16_t count,
+                                          int ret)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(1000) != 0) {
+        APP_LOGE(TAG, "WLAN 扫描结果更新失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_settings_show_wlan_scan_result(items, count, ret);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_settings_show_wifi_connect_result(int ret)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(1000) != 0) {
+        APP_LOGE(TAG, "WLAN 连接结果更新失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_settings_show_wifi_connect_result(ret);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_settings_show_4g_select_result(ui_settings_4g_status_t status, int ret)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(1000) != 0) {
+        APP_LOGE(TAG, "4G 选择结果更新失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_settings_show_4g_select_result(status, ret);
+    service_screen_unlock();
+    return 0;
+}

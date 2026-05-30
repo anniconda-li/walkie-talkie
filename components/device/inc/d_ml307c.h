@@ -52,6 +52,25 @@ typedef struct {
 int d_ml307c_init(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg);
 
 /**
+ * @brief 准备 ML307C 驱动资源并做轻量 AT/SIM 检查。
+ *
+ * 当前实现复用 d_ml307c_init()，但语义上供 app 层非阻塞启动编排使用。
+ *
+ * @param[in] ops WDRIVER 能力函数表。
+ * @param[in] cfg ML307C 配置。
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_ml307c_prepare(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg);
+
+/**
+ * @brief 探测 ML307C 当前可用状态。
+ *
+ * @param[out] status 状态输出地址。
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_ml307c_probe(d_ml307c_status_t *status);
+
+/**
  * @brief 释放当前板级 ML307C 网络驱动。
  *
  * @return 成功返回 0；失败返回负值。

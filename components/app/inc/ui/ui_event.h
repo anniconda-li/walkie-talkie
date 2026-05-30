@@ -8,7 +8,29 @@
 #include "lvgl.h"
 #include "ui_i18n.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#define UI_SETTINGS_WIFI_AP_MAX 8u
+
+typedef enum {
+    UI_SETTINGS_NETWORK_NONE = 0,
+    UI_SETTINGS_NETWORK_WLAN,
+    UI_SETTINGS_NETWORK_4G,
+} ui_settings_network_mode_t;
+
+typedef enum {
+    UI_SETTINGS_4G_OK = 0,
+    UI_SETTINGS_4G_NO_SIM,
+    UI_SETTINGS_4G_NO_AT,
+    UI_SETTINGS_4G_NOT_REGISTERED,
+    UI_SETTINGS_4G_UNAVAILABLE,
+} ui_settings_4g_status_t;
+
+typedef struct {
+    char ssid[33];
+    int rssi;
+} ui_settings_wifi_ap_t;
 
 /**
  * @brief UI 事件回调集合。
@@ -28,6 +50,12 @@ typedef struct {
     void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
+    ui_settings_network_mode_t (*settings_network_mode_get)(void); /**< 查询当前网络选择。 */
+    void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */
+    void (*settings_wifi_connect_requested)(const char *ssid,
+                                            const char *password); /**< WLAN 连接请求。 */
+    void (*settings_4g_select_requested)(void);                    /**< 4G 切换请求。 */
+    int (*settings_wifi_ssid_get)(char *ssid, size_t size);        /**< 查询当前 WLAN SSID。 */
 } ui_event_callbacks_t;
 
 /**
@@ -77,6 +105,24 @@ typedef struct {
     lv_obj_t *firmware_label;         /**< 固件版本标题标签。 */
     lv_obj_t *version_label;          /**< 固件版本号标签。 */
     lv_obj_t *volume_slider;          /**< 音量滑块。 */
+    lv_obj_t *wlan_button;            /**< WLAN 模式选择框。 */
+    lv_obj_t *cellular_button;        /**< 4G 模式选择框。 */
+    lv_obj_t *wlan_ssid_label;        /**< WLAN 当前热点标签。 */
+    lv_obj_t *network_status_label;   /**< 网络操作提示。 */
+    lv_obj_t *wlan_page;              /**< WLAN 子页面。 */
+    lv_obj_t *wlan_back_button;       /**< WLAN 子页面返回按钮。 */
+    lv_obj_t *wlan_scan_button;       /**< WLAN 扫描按钮。 */
+    lv_obj_t *wlan_list;              /**< WLAN 热点列表容器。 */
+    lv_obj_t *password_dialog;        /**< WLAN 密码弹窗。 */
+    lv_obj_t *password_title_label;    /**< WLAN 密码弹窗标题。 */
+    lv_obj_t *password_textarea;      /**< WLAN 密码输入框。 */
+    lv_obj_t *password_keyboard;      /**< WLAN 密码键盘。 */
+    lv_obj_t *connect_button;         /**< WLAN 连接按钮。 */
+    lv_obj_t *cancel_button;          /**< WLAN 取消连接按钮。 */
+    lv_obj_t *connecting_spinner;     /**< WLAN 连接中动画。 */
+    lv_obj_t *wlan_status_label;      /**< WLAN 页面状态提示。 */
+    ui_settings_network_mode_t selected_network; /**< 当前 UI 选中的网络模式。 */
+    char selected_ssid[33];           /**< 当前选中的 SSID。 */
 } ui_settings_view_t;
 
 /**
@@ -144,5 +190,18 @@ void ui_event_set_ai_message(ui_text_id_t text_id);
  * @param[in] view 设置页面视图对象集合。
  */
 void ui_event_register_settings(ui_settings_view_t *view);
+
+/**
+ * @brief 注销设置页面视图对象。
+ *
+ * @param[in] view 设置页面视图对象集合。
+ */
+void ui_event_unregister_settings(ui_settings_view_t *view);
+
+void ui_event_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
+                                             uint16_t count,
+                                             int ret);
+void ui_event_settings_show_wifi_connect_result(int ret);
+void ui_event_settings_show_4g_select_result(ui_settings_4g_status_t status, int ret);
 
 #endif /* UI_EVENT_H */

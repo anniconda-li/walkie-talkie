@@ -24,8 +24,11 @@ idf_component_register(
     REQUIRES 
         heap
         service
+        device
+        wdriver
         lvgl__lvgl
         osal
         esp_app_format
+        nvs_flash
 
     )

@@ -25,7 +25,44 @@ typedef struct {
 typedef struct {
     int rssi;       /**< RSSI 映射后的 0-31 信号值；99 表示未知。 */
     int link_ready; /**< STA 获取 IP 后为 1，否则为 0。 */
+    char ssid[33];  /**< 当前连接的 SSID，未连接时为空。 */
 } d_wifi_status_t;
+
+/**
+ * @brief WiFi 扫描结果。
+ */
+typedef struct {
+    char ssid[33];   /**< SSID，保证以 \0 结尾。 */
+    int rssi;        /**< RSSI dBm。 */
+    int authmode;    /**< esp_wifi authmode 原始值。 */
+} d_wifi_ap_record_t;
+
+/**
+ * @brief 准备 WiFi STA 内部资源，不等待联网。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_wifi_prepare(void);
+
+/**
+ * @brief 扫描附近 WiFi 热点。
+ *
+ * @param[out] records 结果数组。
+ * @param[in] max_records 数组容量。
+ * @param[out] count 实际结果数量。
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_wifi_scan(d_wifi_ap_record_t *records, uint16_t max_records, uint16_t *count);
+
+/**
+ * @brief 连接指定 WiFi 并等待获取 IP。
+ *
+ * @param[in] ssid SSID。
+ * @param[in] password 密码，可为空字符串。
+ * @param[in] timeout_ms 等待获取 IP 的最长时间。
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_wifi_connect(const char *ssid, const char *password, uint32_t timeout_ms);
 
 /**
  * @brief 初始化 WiFi STA 并等待联网完成。

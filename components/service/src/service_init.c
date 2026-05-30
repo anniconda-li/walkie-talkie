@@ -132,7 +132,6 @@ static void service_init_camera_return_frame(void *opaque)
     }
 }
 
-#if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_ML307C
 /**
  * @brief 将 ML307C driver 状态转换为通用 service_network_status_t。
  *
@@ -162,9 +161,6 @@ static int service_init_network_ml307c_get_status(service_network_status_t *stat
     return 0;
 }
 
-#endif
-
-#if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
 /**
  * @brief 将 WiFi driver 状态转换为通用 service_network_status_t。
  *
@@ -195,55 +191,69 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
     return 0;
 }
 
+static service_network_backend_t s_network_backend =
+#if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
+    SERVICE_NETWORK_BACKEND_WIFI;
+#else
+    SERVICE_NETWORK_BACKEND_4G;
 #endif
 
 int service_init_network(void)
+{
+    return service_init_network_for(s_network_backend);
+}
+
+int service_init_network_for(service_network_backend_t backend)
 {
     /*
      * 局部 ops 是安全的：service_network_init() 会复制 ops 到自身静态变量。
      * 初始化返回后 ops 生命周期结束，不影响后续 service 调用。
      */
-    service_network_ops_t network_ops = {
-#if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
-        .is_initialized = d_wifi_is_initialized,
-        .get_status = service_init_network_wifi_get_status,
-        .is_ready = d_wifi_is_ready,
-        .tcp_connect = d_wifi_tcp_connect,
-        .tcp_send = d_wifi_tcp_send,
-        .tcp_close = d_wifi_tcp_close,
-        .udp_connect = d_wifi_udp_connect,
-        .udp_send = d_wifi_udp_send,
-        .read_downlink = d_wifi_read_downlink,
-        .http_post = d_wifi_http_post,
-#else
-        .is_initialized = d_ml307c_is_initialized,
-        .get_status = service_init_network_ml307c_get_status,
-        .is_ready = d_ml307c_is_ready,
-        .tcp_connect = d_ml307c_tcp_connect,
-        .tcp_send = d_ml307c_tcp_send,
-        .tcp_close = d_ml307c_tcp_close,
-        .udp_connect = d_ml307c_udp_connect,
-        .udp_send = d_ml307c_udp_send,
-        .read_downlink = d_ml307c_read_downlink,
-        .http_post = d_ml307c_http_post,
-#endif
-    };
+    service_network_ops_t network_ops = {0};
+
+    if (backend == SERVICE_NETWORK_BACKEND_WIFI) {
+        network_ops.is_initialized = d_wifi_is_initialized;
+        network_ops.get_status = service_init_network_wifi_get_status;
+        network_ops.is_ready = d_wifi_is_ready;
+        network_ops.tcp_connect = d_wifi_tcp_connect;
+        network_ops.tcp_send = d_wifi_tcp_send;
+        network_ops.tcp_close = d_wifi_tcp_close;
+        network_ops.udp_connect = d_wifi_udp_connect;
+        network_ops.udp_send = d_wifi_udp_send;
+        network_ops.read_downlink = d_wifi_read_downlink;
+        network_ops.http_post = d_wifi_http_post;
+    } else {
+        network_ops.is_initialized = d_ml307c_is_initialized;
+        network_ops.get_status = service_init_network_ml307c_get_status;
+        network_ops.is_ready = d_ml307c_is_ready;
+        network_ops.tcp_connect = d_ml307c_tcp_connect;
+        network_ops.tcp_send = d_ml307c_tcp_send;
+        network_ops.tcp_close = d_ml307c_tcp_close;
+        network_ops.udp_connect = d_ml307c_udp_connect;
+        network_ops.udp_send = d_ml307c_udp_send;
+        network_ops.read_downlink = d_ml307c_read_downlink;
+        network_ops.http_post = d_ml307c_http_post;
+    }
+
+    (void)service_network_deinit();
     int ret = service_network_init(&network_ops);
     if (ret != 0) {
         SERVICE_LOGE(TAG, "网络服务初始化失败, ret=%d", ret);
+        return ret;
     }
 
-    return ret;
+    s_network_backend = backend;
+    SERVICE_LOGI(TAG, "网络服务已切换, backend=%d", (int)backend);
+    return 0;
+}
+
+service_network_backend_t service_network_get_backend(void)
+{
+    return s_network_backend;
 }
 
 int service_init_network_recover(void)
 {
-    int ret = d_network_init();
-    if (ret != 0) {
-        SERVICE_LOGW(TAG, "网络 driver 恢复失败, ret=%d", ret);
-        return ret;
-    }
-
     return service_init_network();
 }
 
@@ -362,11 +372,6 @@ int service_init(void)
     }
 
     ret = service_init_audio();
-    if (ret != 0) {
-        return ret;
-    }
-
-    ret = service_init_network();
     if (ret != 0) {
         return ret;
     }

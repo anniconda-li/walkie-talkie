@@ -640,3 +640,8 @@ void app_intercom_ptt_stop(void)
 {
     s_ptt_active = 0;
 }
+
+void app_intercom_network_changed(void)
+{
+    s_udp_ready = 0;
+}

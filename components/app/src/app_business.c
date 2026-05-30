@@ -32,13 +32,18 @@
 #include "app_camera.h"
 #include "app_config.h"
 #include "app_intercom.h"
+#include "app_network.h"
 #include "app_status_monitor.h"
+#include "app_ui.h"
 #include "osal_mutex.h"
+#include "osal_task.h"
 #include "service_audio.h"
 #include "ui_event.h"
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "app_business";
 
@@ -66,6 +71,14 @@ static osal_mutex_t s_audio_session_mutex = NULL;
  * 必须在持锁状态下读写，保证多任务环境下的原子性。
  */
 static int s_audio_session_busy = 0;
+static volatile int s_wifi_scan_busy = 0;
+static volatile int s_wifi_connect_busy = 0;
+static volatile int s_4g_select_busy = 0;
+
+typedef struct {
+    char ssid[33];
+    char password[65];
+} app_business_wifi_connect_req_t;
 
 /* ==========================================================================
  * 音频会话管理
@@ -252,6 +265,156 @@ static void app_business_on_volume_changed(int32_t value)
     (void)service_audio_set_volume((uint8_t)value);
 }
 
+static ui_settings_network_mode_t app_business_get_network_mode(void)
+{
+    switch (app_network_get_mode()) {
+        case APP_NETWORK_MODE_WIFI:
+            return UI_SETTINGS_NETWORK_WLAN;
+        case APP_NETWORK_MODE_4G:
+            return UI_SETTINGS_NETWORK_4G;
+        default:
+            return UI_SETTINGS_NETWORK_NONE;
+    }
+}
+
+static int app_business_get_wifi_ssid(char *ssid, size_t size)
+{
+    return app_network_get_wifi_ssid(ssid, size);
+}
+
+static void app_business_wifi_scan_task(void *arg)
+{
+    (void)arg;
+
+    app_network_wifi_ap_t aps[UI_SETTINGS_WIFI_AP_MAX];
+    size_t app_count = 0u;
+    ui_settings_wifi_ap_t ui_aps[UI_SETTINGS_WIFI_AP_MAX];
+    int ret = app_network_scan_wifi(aps, UI_SETTINGS_WIFI_AP_MAX, &app_count);
+
+    if (ret == 0) {
+        for (size_t i = 0; i < app_count && i < UI_SETTINGS_WIFI_AP_MAX; i++) {
+            strncpy(ui_aps[i].ssid, aps[i].ssid, sizeof(ui_aps[i].ssid) - 1u);
+            ui_aps[i].ssid[sizeof(ui_aps[i].ssid) - 1u] = '\0';
+            ui_aps[i].rssi = aps[i].rssi;
+        }
+    } else {
+        app_count = 0u;
+    }
+
+    (void)app_ui_settings_show_wlan_scan_result(ui_aps, (uint16_t)app_count, ret);
+    s_wifi_scan_busy = 0;
+    osal_task_delete_current();
+}
+
+static void app_business_on_wifi_scan(void)
+{
+    if (s_wifi_scan_busy) {
+        return;
+    }
+    s_wifi_scan_busy = 1;
+    if (osal_task_create("wifi_scan",
+                         app_business_wifi_scan_task,
+                         NULL,
+                         6144u,
+                         4u,
+                         NULL) != 0) {
+        s_wifi_scan_busy = 0;
+        (void)app_ui_settings_show_wlan_scan_result(NULL, 0u, -1);
+    }
+}
+
+static ui_settings_4g_status_t app_business_map_4g_status(app_network_4g_status_t status)
+{
+    switch (status) {
+        case APP_NETWORK_4G_OK:
+            return UI_SETTINGS_4G_OK;
+        case APP_NETWORK_4G_NO_SIM:
+            return UI_SETTINGS_4G_NO_SIM;
+        case APP_NETWORK_4G_NO_AT:
+            return UI_SETTINGS_4G_NO_AT;
+        case APP_NETWORK_4G_NOT_REGISTERED:
+            return UI_SETTINGS_4G_NOT_REGISTERED;
+        default:
+            return UI_SETTINGS_4G_UNAVAILABLE;
+    }
+}
+
+static void app_business_wifi_connect_task(void *arg)
+{
+    app_business_wifi_connect_req_t *req = (app_business_wifi_connect_req_t *)arg;
+    int ret = -1;
+
+    if (req != NULL) {
+        ret = app_network_connect_wifi(req->ssid, req->password);
+        free(req);
+    }
+
+    (void)app_ui_settings_show_wifi_connect_result(ret);
+    s_wifi_connect_busy = 0;
+    osal_task_delete_current();
+}
+
+static void app_business_on_wifi_connect(const char *ssid, const char *password)
+{
+    if (ssid == NULL || ssid[0] == '\0' || s_wifi_connect_busy) {
+        return;
+    }
+    if (password == NULL || strlen(password) < 8u) {
+        (void)app_ui_settings_show_wifi_connect_result(-2);
+        return;
+    }
+
+    app_business_wifi_connect_req_t *req = malloc(sizeof(*req));
+    if (req == NULL) {
+        (void)app_ui_settings_show_wifi_connect_result(-1);
+        return;
+    }
+    memset(req, 0, sizeof(*req));
+    strncpy(req->ssid, ssid, sizeof(req->ssid) - 1u);
+    strncpy(req->password, password != NULL ? password : "", sizeof(req->password) - 1u);
+
+    s_wifi_connect_busy = 1;
+    if (osal_task_create("wifi_conn",
+                         app_business_wifi_connect_task,
+                         req,
+                         6144u,
+                         4u,
+                         NULL) != 0) {
+        s_wifi_connect_busy = 0;
+        free(req);
+        (void)app_ui_settings_show_wifi_connect_result(-1);
+    }
+}
+
+static void app_business_4g_select_task(void *arg)
+{
+    (void)arg;
+
+    app_network_4g_status_t app_status = APP_NETWORK_4G_UNAVAILABLE;
+    int ret = app_network_select_4g(&app_status);
+    (void)app_ui_settings_show_4g_select_result(app_business_map_4g_status(app_status), ret);
+    s_4g_select_busy = 0;
+    osal_task_delete_current();
+}
+
+static void app_business_on_4g_select(void)
+{
+    if (s_4g_select_busy) {
+        return;
+    }
+
+    s_4g_select_busy = 1;
+    if (osal_task_create("net_4g_sel",
+                         app_business_4g_select_task,
+                         NULL,
+                         6144u,
+                         4u,
+                         NULL) != 0) {
+        s_4g_select_busy = 0;
+        (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
+    }
+}
+
 /**
  * @brief 将 app_business 的回调函数注册到 UI 事件系统。
  *
@@ -273,6 +436,11 @@ static void app_business_register_ui_callbacks(void)
         .ai_question_started = app_business_on_ai_started,
         .ai_question_stopped = app_business_on_ai_stopped,
         .settings_volume_changed = app_business_on_volume_changed,
+        .settings_network_mode_get = app_business_get_network_mode,
+        .settings_wifi_scan_requested = app_business_on_wifi_scan,
+        .settings_wifi_connect_requested = app_business_on_wifi_connect,
+        .settings_4g_select_requested = app_business_on_4g_select,
+        .settings_wifi_ssid_get = app_business_get_wifi_ssid,
     };
 
     ui_event_set_callbacks(&callbacks);
@@ -312,6 +480,11 @@ int app_business_start(void)
 
     /* 先注册 UI 回调，再启动后台业务，确保开机后用户操作能被接收。 */
     app_business_register_ui_callbacks();
+
+    ret = app_network_start();
+    if (ret != 0) {
+        APP_LOGW(TAG, "网络后台准备任务启动失败, ret=%d", ret);
+    }
 
     ret = app_status_monitor_start();
     if (ret != 0) {

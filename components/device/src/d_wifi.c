@@ -31,8 +31,14 @@ static const char *TAG = "network_wifi";
 /** @brief WiFi STA 是否已经启动。 */
 static volatile int s_wifi_started = 0;
 
+/** @brief WiFi 内部资源是否已经初始化。 */
+static volatile int s_wifi_prepared = 0;
+
 /** @brief WiFi STA 是否已经获取 IP。 */
 static volatile int s_wifi_got_ip = 0;
+
+/** @brief 最近一次 STA 断开原因。 */
+static volatile int s_wifi_disconnect_reason = 0;
 
 /** @brief UDP socket 句柄。 */
 static int s_udp_sock = -1;
@@ -67,12 +73,11 @@ static void device_wifi_event_handler(void *arg,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         s_wifi_started = 1;
         D_LOGI(TAG, "WiFi STA start");
-        (void)esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
         s_wifi_got_ip = 0;
-        D_LOGW(TAG, "WiFi STA disconnected, reason=%d", event != NULL ? event->reason : -1);
-        (void)esp_wifi_connect();
+        s_wifi_disconnect_reason = event != NULL ? event->reason : -1;
+        D_LOGW(TAG, "WiFi STA disconnected, reason=%d", s_wifi_disconnect_reason);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_wifi_got_ip = 1;
@@ -87,12 +92,35 @@ static void device_wifi_event_handler(void *arg,
 /**
  * @brief 等待 WiFi STA 获取 IP 地址。
  */
-static int device_wifi_wait_ip(void)
+static int device_wifi_reason_to_connect_error(int reason)
+{
+    switch (reason) {
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return -4;
+        case WIFI_REASON_NO_AP_FOUND:
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+            return -5;
+        case WIFI_REASON_ASSOC_FAIL:
+            return -6;
+        default:
+            return 0;
+    }
+}
+
+static int device_wifi_wait_ip(uint32_t timeout_ms)
 {
     uint32_t start = osal_get_tick_ms();
-    while ((osal_get_tick_ms() - start) < DEVICE_WIFI_CONNECT_TIMEOUT_MS) {
+    while ((osal_get_tick_ms() - start) < timeout_ms) {
         if (s_wifi_got_ip) {
             return 0;
+        }
+        int err = device_wifi_reason_to_connect_error(s_wifi_disconnect_reason);
+        if (err != 0) {
+            return err;
         }
         osal_delay_ms(DEVICE_WIFI_POLL_MS);
     }
@@ -100,17 +128,10 @@ static int device_wifi_wait_ip(void)
     return -1;
 }
 
-/**
- * @brief 初始化 WiFi STA 并等待联网完成。
- */
-int d_wifi_init(const d_wifi_config_t *cfg)
+int d_wifi_prepare(void)
 {
-    if (cfg == NULL || cfg->ssid == NULL || cfg->ssid[0] == '\0') {
-        return -1;
-    }
-
-    if (s_wifi_started) {
-        return device_wifi_wait_ip();
+    if (s_wifi_prepared) {
+        return 0;
     }
 
     int ret = nvs_flash_init();
@@ -151,20 +172,7 @@ int d_wifi_init(const d_wifi_config_t *cfg)
                                               NULL,
                                               NULL);
 
-    wifi_config_t wifi_cfg = {0};
-    (void)strncpy((char *)wifi_cfg.sta.ssid,
-                  cfg->ssid,
-                  sizeof(wifi_cfg.sta.ssid) - 1u);
-    (void)strncpy((char *)wifi_cfg.sta.password,
-                  cfg->password != NULL ? cfg->password : "",
-                  sizeof(wifi_cfg.sta.password) - 1u);
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (ret == 0) {
-        ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
-    }
     if (ret == 0) {
         ret = esp_wifi_start();
     }
@@ -172,8 +180,90 @@ int d_wifi_init(const d_wifi_config_t *cfg)
         return device_wifi_err_to_int(ret);
     }
 
-    D_LOGI(TAG, "WiFi STA 启动完成, ssid=%s", cfg->ssid);
-    return device_wifi_wait_ip();
+    s_wifi_prepared = 1;
+    D_LOGI(TAG, "WiFi STA 资源准备完成");
+    return 0;
+}
+
+int d_wifi_scan(d_wifi_ap_record_t *records, uint16_t max_records, uint16_t *count)
+{
+    if (records == NULL || count == NULL || max_records == 0u) {
+        return -1;
+    }
+
+    int ret = d_wifi_prepare();
+    if (ret != 0) {
+        return ret;
+    }
+
+    wifi_scan_config_t scan_cfg = {0};
+    ret = esp_wifi_scan_start(&scan_cfg, true);
+    if (ret != 0) {
+        return device_wifi_err_to_int(ret);
+    }
+
+    uint16_t ap_count = max_records;
+    wifi_ap_record_t ap_records[max_records];
+    memset(ap_records, 0, sizeof(ap_records));
+    ret = esp_wifi_scan_get_ap_records(&ap_count, ap_records);
+    if (ret != 0) {
+        return device_wifi_err_to_int(ret);
+    }
+
+    for (uint16_t i = 0; i < ap_count; i++) {
+        strncpy(records[i].ssid, (const char *)ap_records[i].ssid, sizeof(records[i].ssid) - 1u);
+        records[i].ssid[sizeof(records[i].ssid) - 1u] = '\0';
+        records[i].rssi = ap_records[i].rssi;
+        records[i].authmode = ap_records[i].authmode;
+    }
+    *count = ap_count;
+    return 0;
+}
+
+int d_wifi_connect(const char *ssid, const char *password, uint32_t timeout_ms)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return -1;
+    }
+
+    int ret = d_wifi_prepare();
+    if (ret != 0) {
+        return ret;
+    }
+
+    wifi_config_t wifi_cfg = {0};
+    strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1u);
+    strncpy((char *)wifi_cfg.sta.password,
+            password != NULL ? password : "",
+            sizeof(wifi_cfg.sta.password) - 1u);
+    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    wifi_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+
+    s_wifi_got_ip = 0;
+    s_wifi_disconnect_reason = 0;
+    (void)esp_wifi_disconnect();
+    ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+    if (ret == 0) {
+        ret = esp_wifi_connect();
+    }
+    if (ret != 0) {
+        return device_wifi_err_to_int(ret);
+    }
+
+    D_LOGI(TAG, "WiFi STA 开始连接, ssid=%s", ssid);
+    return device_wifi_wait_ip(timeout_ms == 0u ? DEVICE_WIFI_CONNECT_TIMEOUT_MS : timeout_ms);
+}
+
+/**
+ * @brief 初始化 WiFi STA 并等待联网完成。
+ */
+int d_wifi_init(const d_wifi_config_t *cfg)
+{
+    if (cfg == NULL || cfg->ssid == NULL || cfg->ssid[0] == '\0') {
+        return -1;
+    }
+
+    return d_wifi_connect(cfg->ssid, cfg->password, DEVICE_WIFI_CONNECT_TIMEOUT_MS);
 }
 
 /**
@@ -225,10 +315,13 @@ int d_wifi_get_status(d_wifi_status_t *status)
 
     status->link_ready = s_wifi_got_ip ? 1 : 0;
     status->rssi = 99;
+    status->ssid[0] = '\0';
 
     wifi_ap_record_t ap = {0};
     if (s_wifi_got_ip && esp_wifi_sta_get_ap_info(&ap) == 0) {
         status->rssi = device_wifi_rssi_to_csq(ap.rssi);
+        strncpy(status->ssid, (const char *)ap.ssid, sizeof(status->ssid) - 1u);
+        status->ssid[sizeof(status->ssid) - 1u] = '\0';
     }
 
     return 0;

@@ -51,6 +51,11 @@ void app_intercom_ptt_start(int32_t channel);
  */
 void app_intercom_ptt_stop(void);
 
+/**
+ * @brief 通知对讲模块网络后端已切换，需要重建 UDP 通道。
+ */
+void app_intercom_network_changed(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,6 +26,7 @@
  */
 #include "ui_app_settings.h"
 #include "ui.h"
+#include "ui_assets.h"
 #include "ui_event.h"
 #include "ui_i18n.h"
 #include "ui_theme.h"
@@ -129,6 +130,137 @@ static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
     return slider;
 }
 
+static lv_obj_t *create_network_button(lv_obj_t *parent, const char *text, int32_t x, int32_t y)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, 90, 58);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0x55, 0x55, 0x55), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    return btn;
+}
+
+static lv_obj_t *create_small_button(lv_obj_t *parent, const char *text, int32_t x, int32_t y, int32_t w)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, w, 30);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_SETTINGS, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    return btn;
+}
+
+static lv_obj_t *create_wlan_page(lv_obj_t *root)
+{
+    lv_obj_t *page = lv_obj_create(root);
+    lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(page, UI_SCREEN_WIDTH, UI_SCREEN_HEIGHT);
+    lv_obj_set_pos(page, 0, 0);
+    lv_obj_set_style_bg_color(page, lv_color_make(0x18, 0x18, 0x18), 0);
+    lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(page, 0, 0);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
+
+    g_settings_view.wlan_back_button = lv_button_create(page);
+    lv_obj_set_pos(g_settings_view.wlan_back_button, 8, 34);
+    lv_obj_set_size(g_settings_view.wlan_back_button, 68, 34);
+    lv_obj_set_style_radius(g_settings_view.wlan_back_button, 8, 0);
+    lv_obj_set_style_bg_color(g_settings_view.wlan_back_button, lv_color_make(0x36, 0x36, 0x36), 0);
+    lv_obj_set_style_bg_opa(g_settings_view.wlan_back_button, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(g_settings_view.wlan_back_button, lv_color_make(0x75, 0x75, 0x75), 0);
+    lv_obj_set_style_border_width(g_settings_view.wlan_back_button, 1, 0);
+    lv_obj_set_style_shadow_width(g_settings_view.wlan_back_button, 0, 0);
+
+    lv_obj_t *back_icon = lv_image_create(g_settings_view.wlan_back_button);
+    lv_image_set_src(back_icon, &icon_camera_back);
+    lv_image_set_scale(back_icon, 160);
+    lv_obj_center(back_icon);
+    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title = lv_label_create(page);
+    lv_label_set_text(title, "WLAN");
+    lv_obj_set_pos(title, 88, 42);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+
+    g_settings_view.wlan_scan_button = create_small_button(page, "扫描", 168, 36, 58);
+
+    g_settings_view.wlan_status_label = lv_label_create(page);
+    lv_label_set_text(g_settings_view.wlan_status_label, "长按 WLAN 进入扫描");
+    lv_obj_set_pos(g_settings_view.wlan_status_label, 16, 74);
+    lv_obj_set_width(g_settings_view.wlan_status_label, 208);
+    lv_obj_set_style_text_color(g_settings_view.wlan_status_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+
+    g_settings_view.wlan_list = lv_obj_create(page);
+    lv_obj_set_pos(g_settings_view.wlan_list, 16, 96);
+    lv_obj_set_size(g_settings_view.wlan_list, 208, 160);
+    lv_obj_set_style_bg_opa(g_settings_view.wlan_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_settings_view.wlan_list, 0, 0);
+    lv_obj_set_style_pad_all(g_settings_view.wlan_list, 0, 0);
+    lv_obj_set_style_pad_row(g_settings_view.wlan_list, 6, 0);
+    lv_obj_set_flex_flow(g_settings_view.wlan_list, LV_FLEX_FLOW_COLUMN);
+
+    g_settings_view.password_dialog = lv_obj_create(page);
+    lv_obj_remove_flag(g_settings_view.password_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(g_settings_view.password_dialog, 16, 36);
+    lv_obj_set_size(g_settings_view.password_dialog, 208, 126);
+    lv_obj_set_style_radius(g_settings_view.password_dialog, 8, 0);
+    lv_obj_set_style_bg_color(g_settings_view.password_dialog, lv_color_make(0x24, 0x24, 0x24), 0);
+    lv_obj_set_style_bg_opa(g_settings_view.password_dialog, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(g_settings_view.password_dialog, UI_COLOR_SETTINGS, 0);
+    lv_obj_set_style_border_width(g_settings_view.password_dialog, 2, 0);
+    lv_obj_set_style_pad_all(g_settings_view.password_dialog, 10, 0);
+    lv_obj_add_flag(g_settings_view.password_dialog, LV_OBJ_FLAG_HIDDEN);
+
+    g_settings_view.password_title_label = lv_label_create(g_settings_view.password_dialog);
+    lv_label_set_text(g_settings_view.password_title_label, "输入密码");
+    lv_obj_set_pos(g_settings_view.password_title_label, 0, 0);
+    lv_obj_set_width(g_settings_view.password_title_label, 188);
+    lv_label_set_long_mode(g_settings_view.password_title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(g_settings_view.password_title_label, lv_color_white(), 0);
+
+    g_settings_view.password_textarea = lv_textarea_create(g_settings_view.password_dialog);
+    lv_obj_set_pos(g_settings_view.password_textarea, 0, 30);
+    lv_obj_set_size(g_settings_view.password_textarea, 188, 34);
+    lv_textarea_set_password_mode(g_settings_view.password_textarea, true);
+    lv_textarea_set_one_line(g_settings_view.password_textarea, true);
+    lv_textarea_set_placeholder_text(g_settings_view.password_textarea, "密码");
+
+    g_settings_view.cancel_button = create_small_button(g_settings_view.password_dialog, "取消", 0, 76, 86);
+    g_settings_view.connect_button = create_small_button(g_settings_view.password_dialog, "连接", 102, 76, 86);
+
+    g_settings_view.connecting_spinner = lv_spinner_create(g_settings_view.password_dialog);
+    lv_obj_set_size(g_settings_view.connecting_spinner, 34, 34);
+    lv_obj_align(g_settings_view.connecting_spinner, LV_ALIGN_CENTER, 0, 16);
+    lv_obj_set_style_arc_color(g_settings_view.connecting_spinner, lv_color_make(0x42, 0x42, 0x42), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(g_settings_view.connecting_spinner, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(g_settings_view.connecting_spinner, 3, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(g_settings_view.connecting_spinner, 3, LV_PART_INDICATOR);
+    lv_obj_add_flag(g_settings_view.connecting_spinner, LV_OBJ_FLAG_HIDDEN);
+
+    g_settings_view.password_keyboard = lv_keyboard_create(page);
+    lv_obj_set_size(g_settings_view.password_keyboard, 240, 112);
+    lv_obj_align(g_settings_view.password_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_textarea(g_settings_view.password_keyboard, g_settings_view.password_textarea);
+    lv_obj_add_flag(g_settings_view.password_keyboard, LV_OBJ_FLAG_HIDDEN);
+
+    return page;
+}
+
 /**
  * @brief 设置固件版本标签。
  *
@@ -169,18 +301,37 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 
     g_settings_panel = create_panel(root);
 
+    g_settings_view.wlan_button = create_network_button(g_settings_panel, "WLAN", 2, 2);
+    g_settings_view.wlan_ssid_label = lv_label_create(g_settings_view.wlan_button);
+    lv_label_set_text(g_settings_view.wlan_ssid_label, "");
+    lv_obj_set_pos(g_settings_view.wlan_ssid_label, 8, 30);
+    lv_obj_set_size(g_settings_view.wlan_ssid_label, 74, 24);
+    lv_label_set_long_mode(g_settings_view.wlan_ssid_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(g_settings_view.wlan_ssid_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(g_settings_view.wlan_ssid_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+
+    g_settings_view.cellular_button = create_network_button(g_settings_panel, "4G", 100, 2);
+
     /* 音量行 */
-    g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 0);
-    g_settings_view.volume_slider = create_slider(g_settings_panel, 30, 56);
+    g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 78);
+    g_settings_view.volume_slider = create_slider(g_settings_panel, 108, 56);
 
     /* 固件版本信息行（只读标签） */
-    g_settings_view.firmware_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 68);
+    g_settings_view.firmware_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 150);
 
     g_settings_view.version_label = lv_label_create(g_settings_panel);
     set_firmware_version_label(g_settings_view.version_label);
-    lv_obj_set_pos(g_settings_view.version_label, 2, 92);
+    lv_obj_set_pos(g_settings_view.version_label, 2, 174);
     lv_obj_set_style_text_color(g_settings_view.version_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
 
+    g_settings_view.network_status_label = lv_label_create(g_settings_panel);
+    lv_label_set_text(g_settings_view.network_status_label, "");
+    lv_obj_set_pos(g_settings_view.network_status_label, 2, 182);
+    lv_obj_set_width(g_settings_view.network_status_label, 188);
+    lv_obj_set_style_text_color(g_settings_view.network_status_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+    lv_obj_add_flag(g_settings_view.network_status_label, LV_OBJ_FLAG_HIDDEN);
+
+    g_settings_view.wlan_page = create_wlan_page(root);
     ui_event_register_settings(&g_settings_view);
     return root;
 }
@@ -209,6 +360,7 @@ void ui_app_settings_enter(lv_obj_t * root)
 void ui_app_settings_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
     lv_anim_del(g_settings_panel, anim_set_y);
+    ui_event_unregister_settings(&g_settings_view);
     lv_obj_delete(root);
     if(done_cb != NULL) {
         done_cb(NULL);

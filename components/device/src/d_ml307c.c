@@ -1304,6 +1304,78 @@ int d_ml307c_init(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg)
     return 0;
 }
 
+int d_ml307c_prepare(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg)
+{
+    if (s_ml307c != NULL) {
+        return 0;
+    }
+    if (ops == NULL ||
+        ops->uart_write == NULL ||
+        ops->uart_read == NULL ||
+        ops->delay_ms == NULL ||
+        ops->get_tick_ms == NULL) {
+        return -1;
+    }
+
+    ml307c_config_t local_cfg = {
+        .timeout_ms = D_ML307C_LOCK_TIMEOUT_MS,
+        .socket_id = ML307C_DEFAULT_SOCKET_ID,
+    };
+    if (cfg != NULL) {
+        local_cfg = *cfg;
+    }
+
+    ml307c_interface_t itf = {
+        .uart_write = ops->uart_write,
+        .uart_read = ops->uart_read,
+        .delay_ms = ops->delay_ms,
+        .get_tick = ops->get_tick_ms,
+    };
+
+    if (s_ml307c_mutex == NULL) {
+        s_ml307c_mutex = osal_mutex_create();
+        if (s_ml307c_mutex == NULL) {
+            return -2;
+        }
+    }
+
+    s_ml307c = ml307c_init(&local_cfg, &itf);
+    if (s_ml307c == NULL) {
+        return -3;
+    }
+
+    int ret = d_ml307c_lock(D_ML307C_LOCK_TIMEOUT_MS);
+    if (ret != 0) {
+        ml307c_deinit(s_ml307c);
+        s_ml307c = NULL;
+        return ret;
+    }
+
+    ret = ml307c_check_alive(s_ml307c);
+    if (ret != 0) {
+        D_LOGE(TAG, "ML307C 准备失败: AT 通信无有效响应, ret=%d", ret);
+        d_ml307c_unlock();
+        ml307c_deinit(s_ml307c);
+        s_ml307c = NULL;
+        return ret;
+    }
+
+    int sim_ret = ml307c_check_sim(s_ml307c);
+    if (sim_ret != 0) {
+        D_LOGW(TAG, "ML307C 准备完成但 SIM 不可用, ret=%d", sim_ret);
+    }
+    d_ml307c_unlock();
+
+    s_ml307c_tcp_connected = 0u;
+    s_ml307c_udp_connected = 0u;
+    return 0;
+}
+
+int d_ml307c_probe(d_ml307c_status_t *status)
+{
+    return d_ml307c_get_status(status);
+}
+
 /**
  * @brief 释放当前板级 ML307C 网络驱动。
  */
