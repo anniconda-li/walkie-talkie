@@ -15,22 +15,12 @@ extern "C" {
 /**
  * @brief 启动 app 层业务控制器。
  *
- * service 初始化已经在 main/service_init 阶段完成，本接口只创建 UI、
- * 注册 UI 回调，并启动状态监听、UDP 对讲和 AI 语音问答任务。
+ * service 和 UI 初始化已经在 main 阶段完成，本接口只注册 UI 回调，
+ * 并启动状态监听、UDP 对讲、AI 语音问答和相机业务任务。
  *
  * @return 成功返回 0；失败返回负值。
  */
 int app_business_start(void);
-
-/**
- * @brief 启动 app 层运行期业务任务。
- *
- * UI 已经由启动流程提前创建时使用该接口。它只创建音频会话状态、
- * 注册 UI 回调，并启动状态监听、对讲、AI 和相机后台任务。
- *
- * @return 成功返回 0；失败返回负值。
- */
-int app_business_start_runtime(void);
 
 /**
  * @brief 尝试占用业务音频会话。

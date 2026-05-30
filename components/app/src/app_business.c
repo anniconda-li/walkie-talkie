@@ -33,10 +33,8 @@
 #include "app_config.h"
 #include "app_intercom.h"
 #include "app_status_monitor.h"
-#include "app_ui.h"
 #include "osal_mutex.h"
 #include "service_audio.h"
-#include "service_screen.h"
 #include "ui_event.h"
 
 #include <stdint.h>
@@ -289,18 +287,18 @@ static void app_business_register_ui_callbacks(void)
  *
  * ## 启动顺序（严格有序，后面的依赖前面的）
  * 1. 创建音频会话互斥锁
- * 2. 创建 UI（lvgl 对象树 + 各页面控件）
- * 3. 注册 UI→业务回调（必须在 app 模块启动前完成，否则开机后用户操作可能丢失）
- * 4. 启动状态监控（电池 1s + 信号 3s 轮询任务）
- * 5. 启动对讲模块（UDP 连接 + PTT/RX/心跳三个任务）
- * 6. 启动 AI 语音模块（biz_ai 任务 + WAV 缓冲区分配）
+ * 2. 注册 UI→业务回调（必须在 app 模块启动前完成，否则开机后用户操作可能丢失）
+ * 3. 启动状态监控（电池 1s + 信号 3s 轮询任务）
+ * 4. 启动对讲模块（UDP 连接 + PTT/RX/心跳三个任务）
+ * 5. 启动 AI 语音模块（biz_ai 任务 + WAV 缓冲区分配）
+ * 6. 启动相机业务模块
  *
  * ## 防重复
  * s_started 标志防止重复初始化，每个子模块内部也有各自的防重复检查。
  *
  * @return 成功返回 0；失败返回负值。
  */
-int app_business_start_runtime(void)
+int app_business_start(void)
 {
     if (s_started) {
         return 0;
@@ -342,15 +340,4 @@ int app_business_start_runtime(void)
              APP_BUSINESS_UDP_PORT,
              APP_BUSINESS_DEFAULT_CHANNEL);
     return 0;
-}
-
-int app_business_start(void)
-{
-    int ret = app_ui_create();
-    if (ret != 0) {
-        APP_LOGE(TAG, "应用 UI 创建失败, ret=%d", ret);
-        return ret;
-    }
-
-    return app_business_start_runtime();
 }

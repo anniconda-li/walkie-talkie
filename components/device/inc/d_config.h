@@ -37,9 +37,9 @@
 #define D_INIT_ENABLE_CAMERA 1
 #endif
 
-/** @brief 当前 driver 网络初始化方案，临时切到 ML307C 便于 4G 测试。 */
+/** @brief 当前 driver 网络初始化方案。 */
 #ifndef D_INIT_NETWORK
-#define D_INIT_NETWORK D_INIT_NETWORK_ML307C
+#define D_INIT_NETWORK D_INIT_NETWORK_WIFI
 #endif
 /** @brief 当前 driver 音频初始化方案，默认 ES7210 + ES8311。 */
 #ifndef D_INIT_AUDIO

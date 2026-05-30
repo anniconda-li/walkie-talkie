@@ -17,29 +17,31 @@ static const char *TAG = "wdriver";
 
 int wdriver_init(void)
 {
-    // int ret = wdriver_i2c_init();
-    // if (ret != 0) {
-    //     WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: I2C 初始化失败, ret=%d", ret);
-    //     return ret;
-    // }
+    int ret = wdriver_i2c_init();
+    if (ret != 0) {
+        WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: I2C 初始化失败, ret=%d", ret);
+        return ret;
+    }
 
-    // //ret = wdriver_spi_init();
-    // if (ret != 0) {
-    //     WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: SPI 初始化失败, ret=%d", ret);
-    //     return ret;
-    // }
+    ret = wdriver_spi_init();
+    if (ret != 0) {
+        WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: SPI 初始化失败, ret=%d", ret);
+        return ret;
+    }
 
-    int ret = wdriver_uart_init();
+#if WDRIVER_INIT_ENABLE_UART
+    ret = wdriver_uart_init();
     if (ret != 0) {
         WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: UART 初始化失败, ret=%d", ret);
         return ret;
     }
+#endif
 
-    //ret = wdriver_i2s_init();
-    // if (ret != 0) {
-    //     WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: I2S 初始化失败, ret=%d", ret);
-    //     return ret;
-    // }
+    ret = wdriver_i2s_init();
+    if (ret != 0) {
+        WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: I2S 初始化失败, ret=%d", ret);
+        return ret;
+    }
 
     WDRIVER_LOGI(TAG, "WDRIVER 基础资源初始化完成");
     return 0;

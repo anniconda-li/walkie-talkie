@@ -172,7 +172,7 @@ void app_main(void)
     }
 
     boot_mark(APP_BOOT_STAGE_RUNTIME, APP_BOOT_STATE_RUNNING, 0);
-    ret = app_business_start_runtime();
+    ret = app_business_start();
     if (ret != 0) {
         OSAL_LOGE(TAG, "业务运行期启动失败, ret=%d", ret);
         boot_fatal(APP_BOOT_STAGE_RUNTIME, ret);

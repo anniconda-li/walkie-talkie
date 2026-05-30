@@ -32,9 +32,9 @@
 /** @brief 使用 INMP441 + MAX98357A 音频方案。 */
 #define SERVICE_INIT_AUDIO_I2S 2
 
-/** @brief 当前网络方案，临时切到 ML307C 便于 4G 测试。 */
+/** @brief 当前网络方案。 */
 #ifndef SERVICE_INIT_NETWORK
-#define SERVICE_INIT_NETWORK SERVICE_INIT_NETWORK_ML307C
+#define SERVICE_INIT_NETWORK SERVICE_INIT_NETWORK_WIFI
 #endif
 /** @brief 当前音频方案，默认 ES7210 + ES8311。 */
 #ifndef SERVICE_INIT_AUDIO
