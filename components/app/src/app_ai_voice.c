@@ -22,6 +22,7 @@
 #include "app_config.h"
 #include "app_ui.h"
 #include "osal_heap.h"
+#include "osal_queue.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
@@ -133,8 +134,34 @@ static void app_ai_voice_wav_write_header(uint8_t *buf, uint32_t pcm_bytes)
 #define APP_AI_WAV_FMT_MIN_BYTES      16u
 /** @brief AI 回复播放时单次提交给 service_audio 的最大 PCM 样本数。 */
 #define APP_AI_PLAY_CHUNK_SAMPLES     256u
+/** @brief AI 回复下载和播放之间的 PCM 预缓冲块样本数。 */
+#define APP_AI_REPLY_PCM_BLOCK_SAMPLES 512u
+/** @brief AI 回复 PCM 预缓冲块数量，约 512ms 音频。 */
+#define APP_AI_REPLY_PCM_BLOCK_COUNT   16u
+/** @brief AI 回复下载任务栈大小。 */
+#define APP_AI_REPLY_FETCH_TASK_STACK  4096u
 /** @brief AI 录音任务单次读取超时时间，单位 ms。 */
 #define APP_AI_RECORD_READ_TIMEOUT_MS 30u
+
+typedef enum {
+    APP_AI_REPLY_MSG_PCM = 1,
+    APP_AI_REPLY_MSG_DONE,
+} app_ai_voice_reply_msg_type_t;
+
+typedef struct {
+    app_ai_voice_reply_msg_type_t type;
+    int ret;
+    uint16_t block_index;
+    uint16_t samples;
+} app_ai_voice_reply_msg_t;
+
+typedef struct {
+    const char *session;
+    uint32_t total;
+    osal_queue_t free_queue;
+    osal_queue_t filled_queue;
+    int16_t *pcm_blocks;
+} app_ai_voice_reply_playback_ctx_t;
 
 /**
  * @brief AI 回复 WAV 流式解析状态。
@@ -174,6 +201,9 @@ typedef struct {
     uint8_t playback_started;                        /**< 本次回复播放会话是否已启动。 */
     uint8_t pending_pcm_byte;                        /**< 跨分片残留的单个 PCM 低字节。 */
     uint8_t pending_pcm_len;                         /**< pending_pcm_byte 是否有效，0 或 1。 */
+    app_ai_voice_reply_playback_ctx_t *playback_ctx; /**< PCM 输出队列上下文。 */
+    int16_t emit_buf[APP_AI_REPLY_PCM_BLOCK_SAMPLES]; /**< 待发送到播放队列的 PCM 块。 */
+    uint32_t emit_samples;                           /**< emit_buf 中已缓存的样本数。 */
 } app_ai_voice_wav_stream_t;
 
 /**
@@ -181,11 +211,13 @@ typedef struct {
  *
  * @param[out] stream 待初始化的解析上下文。
  */
-static void app_ai_voice_wav_stream_init(app_ai_voice_wav_stream_t *stream)
+static void app_ai_voice_wav_stream_init(app_ai_voice_wav_stream_t *stream,
+                                         app_ai_voice_reply_playback_ctx_t *playback_ctx)
 {
     memset(stream, 0, sizeof(*stream));
     stream->state = APP_AI_WAV_STREAM_FIND_RIFF;
     stream->state_after_pad = APP_AI_WAV_STREAM_CHUNK_HEADER;
+    stream->playback_ctx = playback_ctx;
 }
 
 /**
@@ -245,50 +277,98 @@ static void app_ai_voice_wav_stream_finish_chunk(app_ai_voice_wav_stream_t *stre
     }
 }
 
+static int app_ai_voice_reply_send_pcm_block(app_ai_voice_wav_stream_t *stream)
+{
+    if (stream == NULL || stream->playback_ctx == NULL || stream->emit_samples == 0u) {
+        return -1;
+    }
+
+    app_ai_voice_reply_playback_ctx_t *ctx = stream->playback_ctx;
+    uint16_t block_index = 0u;
+    if (osal_queue_recv(ctx->free_queue, &block_index, OSAL_WAIT_FOREVER) != 0) {
+        return -2;
+    }
+    if (block_index >= APP_AI_REPLY_PCM_BLOCK_COUNT) {
+        return -3;
+    }
+
+    int16_t *block = &ctx->pcm_blocks[(uint32_t)block_index * APP_AI_REPLY_PCM_BLOCK_SAMPLES];
+    memcpy(block, stream->emit_buf, stream->emit_samples * sizeof(int16_t));
+
+    app_ai_voice_reply_msg_t msg = {
+        .type = APP_AI_REPLY_MSG_PCM,
+        .ret = 0,
+        .block_index = block_index,
+        .samples = (uint16_t)stream->emit_samples,
+    };
+    if (osal_queue_send(ctx->filled_queue, &msg, OSAL_WAIT_FOREVER) != 0) {
+        (void)osal_queue_send(ctx->free_queue, &block_index, OSAL_WAIT_NONE);
+        return -4;
+    }
+
+    stream->emit_samples = 0u;
+    return 0;
+}
+
+static int app_ai_voice_reply_emit_sample(app_ai_voice_wav_stream_t *stream, int16_t sample)
+{
+    if (stream == NULL) {
+        return -1;
+    }
+
+    stream->emit_buf[stream->emit_samples++] = sample;
+    return stream->emit_samples >= APP_AI_REPLY_PCM_BLOCK_SAMPLES ?
+           app_ai_voice_reply_send_pcm_block(stream) :
+           0;
+}
+
+static int app_ai_voice_reply_flush_pcm(app_ai_voice_wav_stream_t *stream)
+{
+    if (stream == NULL || stream->emit_samples == 0u) {
+        return 0;
+    }
+
+    return app_ai_voice_reply_send_pcm_block(stream);
+}
+
 /**
- * @brief 将 data chunk 中的 PCM 字节流转换为 int16_t 并播放。
+ * @brief 将 data chunk 中的 PCM 字节流转换为 int16_t 并送入播放队列。
  *
  * HTTP 分片可能切在 PCM 样本的两个字节之间，函数会通过 pending_pcm_byte
- * 保存半个样本，等下一片到来后再补齐播放。
+ * 保存半个样本，等下一片到来后再补齐。
  *
  * @param[in,out] stream WAV 流解析上下文。
  * @param[in] data PCM 字节流。
  * @param[in] len PCM 字节流长度。
- * @return 成功返回 0；播放失败返回负值。
+ * @return 成功返回 0；入队失败返回负值。
  */
-static int app_ai_voice_play_pcm_bytes(app_ai_voice_wav_stream_t *stream,
-                                       const uint8_t *data,
-                                       uint32_t len)
+static int app_ai_voice_queue_pcm_bytes(app_ai_voice_wav_stream_t *stream,
+                                        const uint8_t *data,
+                                        uint32_t len)
 {
     if (stream == NULL || (data == NULL && len > 0u)) {
         return -1;
     }
 
     uint32_t pos = 0u;
-    int16_t pcm[APP_AI_PLAY_CHUNK_SAMPLES];
 
     if (stream->pending_pcm_len != 0u && len > 0u) {
-        pcm[0] = (int16_t)((uint16_t)stream->pending_pcm_byte | ((uint16_t)data[0] << 8));
-        int ret = service_audio_play(pcm, 1u, 100u);
-        if (ret <= 0) {
-            return ret != 0 ? ret : -2;
+        int16_t sample = (int16_t)((uint16_t)stream->pending_pcm_byte | ((uint16_t)data[0] << 8));
+        int ret = app_ai_voice_reply_emit_sample(stream, sample);
+        if (ret != 0) {
+            return ret;
         }
         stream->pending_pcm_len = 0u;
         pos = 1u;
     }
 
     while ((pos + 1u) < len) {
-        uint32_t samples = 0u;
-        while ((pos + 1u) < len && samples < APP_AI_PLAY_CHUNK_SAMPLES) {
-            pcm[samples] = (int16_t)((uint16_t)data[pos] | ((uint16_t)data[pos + 1u] << 8));
-            samples++;
-            pos += 2u;
+        int16_t sample = (int16_t)((uint16_t)data[pos] | ((uint16_t)data[pos + 1u] << 8));
+        int ret = app_ai_voice_reply_emit_sample(stream, sample);
+        if (ret != 0) {
+            return ret;
         }
-
-        int ret = service_audio_play(pcm, samples, 100u);
-        if (ret <= 0) {
-            return ret != 0 ? ret : -3;
-        }
+        pos += 2u;
     }
 
     if (pos < len) {
@@ -299,26 +379,11 @@ static int app_ai_voice_play_pcm_bytes(app_ai_voice_wav_stream_t *stream,
     return 0;
 }
 
-static int app_ai_voice_wav_stream_start_playback(app_ai_voice_wav_stream_t *stream)
-{
-    if (stream->playback_started != 0u) {
-        return 0;
-    }
-
-    (void)app_ui_set_ai_waiting(0);
-    int ret = service_audio_start_playback();
-    if (ret != 0) {
-        return ret;
-    }
-    stream->playback_started = 1u;
-    return 0;
-}
-
 /**
  * @brief 向 AI 回复 WAV 流解析器喂入一个 HTTP 分片。
  *
  * 本函数可处理 RIFF/chunk/data 被任意拆分的情况；遇到 data chunk 后会
- * 边解析 PCM 边调用 service_audio_play() 播放。
+ * 边解析 PCM 边送入播放队列。
  *
  * @param[in,out] stream WAV 流解析上下文。
  * @param[in] data 当前 HTTP 分片数据。
@@ -437,11 +502,7 @@ static int app_ai_voice_wav_stream_feed(app_ai_voice_wav_stream_t *stream,
         case APP_AI_WAV_STREAM_DATA_PAYLOAD: {
             uint32_t remain = stream->chunk_size - stream->chunk_read;
             uint32_t take = app_ai_voice_min_u32(remain, len - pos);
-            int ret = app_ai_voice_wav_stream_start_playback(stream);
-            if (ret != 0) {
-                return ret;
-            }
-            ret = app_ai_voice_play_pcm_bytes(stream, &data[pos], take);
+            int ret = app_ai_voice_queue_pcm_bytes(stream, &data[pos], take);
             if (ret != 0) {
                 return ret;
             }
@@ -472,7 +533,7 @@ static int app_ai_voice_wav_stream_feed(app_ai_voice_wav_stream_t *stream,
  * @param[in] stream WAV 流解析上下文。
  * @return 完整结束返回 0；fmt/data 缺失或 chunk 未完整返回负值。
  */
-static int app_ai_voice_wav_stream_finish(const app_ai_voice_wav_stream_t *stream)
+static int app_ai_voice_wav_stream_finish(app_ai_voice_wav_stream_t *stream)
 {
     if (stream == NULL) {
         return -1;
@@ -492,7 +553,10 @@ static int app_ai_voice_wav_stream_finish(const app_ai_voice_wav_stream_t *strea
         stream->chunk_read != stream->chunk_size) {
         return -4;
     }
-    return stream->pending_pcm_len == 0u ? 0 : -5;
+    if (stream->pending_pcm_len != 0u) {
+        return -5;
+    }
+    return app_ai_voice_reply_flush_pcm(stream);
 }
 
 /**
@@ -778,21 +842,36 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
     return -3;
 }
 
-/** @brief 按 offset/len 拉取回复 WAV 分片，边解析边播放，播放后丢弃分片。 */
-static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
+static void app_ai_voice_reply_send_done(app_ai_voice_reply_playback_ctx_t *ctx, int ret)
 {
-    if (session == NULL || total < APP_BUSINESS_WAV_HEADER_LEN ||
-        total > APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES ||
+    if (ctx == NULL || ctx->filled_queue == NULL) {
+        return;
+    }
+
+    app_ai_voice_reply_msg_t msg = {
+        .type = APP_AI_REPLY_MSG_DONE,
+        .ret = ret,
+        .block_index = 0u,
+        .samples = 0u,
+    };
+    (void)osal_queue_send(ctx->filled_queue, &msg, OSAL_WAIT_FOREVER);
+}
+
+/** @brief 下载回复 WAV 分片，解析出 PCM 后写入播放队列。 */
+static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->session == NULL || ctx->total < APP_BUSINESS_WAV_HEADER_LEN ||
+        ctx->total > APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES ||
         s_ai_reply_chunk_buf == NULL) {
         return -1;
     }
 
     app_ai_voice_wav_stream_t stream;
-    app_ai_voice_wav_stream_init(&stream);
+    app_ai_voice_wav_stream_init(&stream, ctx);
 
     uint32_t offset = 0u;
-    while (offset < total) {
-        uint32_t chunk_len = total - offset;
+    while (offset < ctx->total) {
+        uint32_t chunk_len = ctx->total - offset;
         if (chunk_len > APP_AI_HTTP_CHUNK_BYTES) {
             chunk_len = APP_AI_HTTP_CHUNK_BYTES;
         }
@@ -804,7 +883,7 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
         snprintf(query,
                  sizeof(query),
                  "session=%s&offset=%u&len=%u",
-                 session,
+                 ctx->session,
                  (unsigned int)offset,
                  (unsigned int)chunk_len);
         if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK, query) != 0) {
@@ -843,6 +922,141 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
     }
 
     return app_ai_voice_wav_stream_finish(&stream);
+}
+
+static void app_ai_voice_reply_fetch_task(void *arg)
+{
+    app_ai_voice_reply_playback_ctx_t *ctx = (app_ai_voice_reply_playback_ctx_t *)arg;
+    int ret = app_ai_voice_fetch_result_chunks(ctx);
+    app_ai_voice_reply_send_done(ctx, ret);
+    osal_task_delete_current();
+}
+
+static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->filled_queue == NULL || ctx->free_queue == NULL || ctx->pcm_blocks == NULL) {
+        return -1;
+    }
+
+    int playback_started = 0;
+    int final_ret = 0;
+
+    while (1) {
+        app_ai_voice_reply_msg_t msg;
+        if (osal_queue_recv(ctx->filled_queue, &msg, OSAL_WAIT_FOREVER) != 0) {
+            return -2;
+        }
+
+        if (msg.type == APP_AI_REPLY_MSG_DONE) {
+            if (final_ret == 0) {
+                final_ret = msg.ret;
+            }
+            break;
+        }
+
+        if (msg.type != APP_AI_REPLY_MSG_PCM ||
+            msg.block_index >= APP_AI_REPLY_PCM_BLOCK_COUNT ||
+            msg.samples == 0u ||
+            msg.samples > APP_AI_REPLY_PCM_BLOCK_SAMPLES) {
+            if (final_ret == 0) {
+                final_ret = -3;
+            }
+            continue;
+        }
+
+        if (!playback_started) {
+            (void)app_ui_set_ai_waiting(0);
+            int ret = service_audio_start_playback();
+            if (ret != 0) {
+                if (final_ret == 0) {
+                    final_ret = ret;
+                }
+                (void)osal_queue_send(ctx->free_queue, &msg.block_index, OSAL_WAIT_FOREVER);
+                continue;
+            }
+            playback_started = 1;
+        }
+
+        if (final_ret != 0) {
+            (void)osal_queue_send(ctx->free_queue, &msg.block_index, OSAL_WAIT_FOREVER);
+            continue;
+        }
+
+        int16_t *pcm = &ctx->pcm_blocks[(uint32_t)msg.block_index * APP_AI_REPLY_PCM_BLOCK_SAMPLES];
+        uint32_t played = 0u;
+        while (played < msg.samples) {
+            uint32_t remain = (uint32_t)msg.samples - played;
+            uint32_t chunk = remain > APP_AI_PLAY_CHUNK_SAMPLES ? APP_AI_PLAY_CHUNK_SAMPLES : remain;
+            int ret = service_audio_play(&pcm[played], chunk, 100u);
+            if (ret <= 0) {
+                if (final_ret == 0) {
+                    final_ret = ret != 0 ? ret : -4;
+                }
+                break;
+            }
+            played += (uint32_t)ret;
+        }
+
+        (void)osal_queue_send(ctx->free_queue, &msg.block_index, OSAL_WAIT_FOREVER);
+    }
+
+    return final_ret;
+}
+
+/** @brief 按 offset/len 拉取回复 WAV 分片，后台预取、前台连续播放。 */
+static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
+{
+    if (session == NULL || total < APP_BUSINESS_WAV_HEADER_LEN ||
+        total > APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES ||
+        s_ai_reply_chunk_buf == NULL) {
+        return -1;
+    }
+
+    osal_queue_t free_queue = osal_queue_create(APP_AI_REPLY_PCM_BLOCK_COUNT, sizeof(uint16_t));
+    osal_queue_t filled_queue = osal_queue_create(APP_AI_REPLY_PCM_BLOCK_COUNT + 1u, sizeof(app_ai_voice_reply_msg_t));
+    int16_t *pcm_blocks = (int16_t *)osal_heap_alloc_external(APP_AI_REPLY_PCM_BLOCK_COUNT *
+                                                             APP_AI_REPLY_PCM_BLOCK_SAMPLES *
+                                                             sizeof(int16_t));
+    if (free_queue == NULL || filled_queue == NULL || pcm_blocks == NULL) {
+        if (free_queue != NULL) {
+            osal_queue_delete(free_queue);
+        }
+        if (filled_queue != NULL) {
+            osal_queue_delete(filled_queue);
+        }
+        if (pcm_blocks != NULL) {
+            osal_heap_free(pcm_blocks);
+        }
+        return -2;
+    }
+
+    for (uint16_t i = 0u; i < APP_AI_REPLY_PCM_BLOCK_COUNT; i++) {
+        (void)osal_queue_send(free_queue, &i, OSAL_WAIT_NONE);
+    }
+
+    app_ai_voice_reply_playback_ctx_t ctx = {
+        .session = session,
+        .total = total,
+        .free_queue = free_queue,
+        .filled_queue = filled_queue,
+        .pcm_blocks = pcm_blocks,
+    };
+
+    osal_task_t fetch_task = NULL;
+    int ret = osal_task_create("ai_reply_fetch",
+                               app_ai_voice_reply_fetch_task,
+                               &ctx,
+                               APP_AI_REPLY_FETCH_TASK_STACK,
+                               5u,
+                               &fetch_task);
+    if (ret == 0) {
+        ret = app_ai_voice_play_reply_queue(&ctx);
+    }
+
+    osal_queue_delete(free_queue);
+    osal_queue_delete(filled_queue);
+    osal_heap_free(pcm_blocks);
+    return ret;
 }
 
 /**

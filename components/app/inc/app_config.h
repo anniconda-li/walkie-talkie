@@ -39,7 +39,7 @@ extern "C" {
 /** @brief 本机注册到服务器的设备名。 */
 #define APP_BUSINESS_DEVICE_NAME        "walkie-01"
 /** @brief UDP 对讲服务器地址。 */
-#define APP_BUSINESS_SERVER_HOST        "10.212.141.251"
+#define APP_BUSINESS_SERVER_HOST        "10.224.127.251"
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           9000
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
