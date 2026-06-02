@@ -69,6 +69,10 @@ int app_ui_set_ai_waiting(int waiting);
  */
 int app_ui_set_ai_message(ui_text_id_t text_id);
 
+int app_ui_set_ai_answer_text(const char *text);
+
+int app_ui_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
+
 int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
                                           uint16_t count,
                                           int ret);

@@ -223,6 +223,11 @@ static void app_business_on_ai_stopped(void)
     app_ai_voice_record_stop();
 }
 
+static void app_business_on_ai_reply_play_requested(void)
+{
+    app_ai_voice_request_reply_play();
+}
+
 /** @brief 相机页进入 → 启动预览。 */
 static void app_business_on_camera_entered(void)
 {
@@ -435,6 +440,7 @@ static void app_business_register_ui_callbacks(void)
         .camera_retake_requested = app_business_on_camera_retake,
         .ai_question_started = app_business_on_ai_started,
         .ai_question_stopped = app_business_on_ai_stopped,
+        .ai_reply_play_requested = app_business_on_ai_reply_play_requested,
         .settings_volume_changed = app_business_on_volume_changed,
         .settings_network_mode_get = app_business_get_network_mode,
         .settings_wifi_scan_requested = app_business_on_wifi_scan,

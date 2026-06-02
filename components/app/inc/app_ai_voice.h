@@ -39,6 +39,8 @@ void app_ai_voice_record_start(void);
  */
 void app_ai_voice_record_stop(void);
 
+void app_ai_voice_request_reply_play(void);
+
 #ifdef __cplusplus
 }
 #endif

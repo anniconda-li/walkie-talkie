@@ -89,6 +89,8 @@ extern "C" {
 #define APP_AI_PROCESS_TIMEOUT_MS       300000u
 /** @brief AI 结果轮询间隔，单位 ms。 */
 #define APP_AI_RESULT_POLL_MS           1000u
+/** @brief AI 回复语音是否默认自动播放；0 表示需要用户点击播放按钮。 */
+#define AUTO_PLAY_REPLY_AUDIO           0
 /** @brief AI HTTP 分片大小，需小于 ML307C AT+HTTP body_size 65535 限制。 */
 #define APP_AI_HTTP_CHUNK_BYTES         32768u
 /** @brief 开机默认频道号。 */

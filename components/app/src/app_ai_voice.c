@@ -38,7 +38,7 @@ static const char *TAG = "app_ai_voice";
  * 全局状态变量
  * ========================================================================== */
 
-/** @brief AI 处理任务句柄，入口为 app_ai_voice_task()，优先级 5，栈 4096 字节。 */
+/** @brief AI 处理任务句柄，入口为 app_ai_voice_task()，优先级 5，栈 8192 字节。 */
 static osal_task_t s_ai_task = NULL;
 
 /** @brief AI 模块是否已通过 app_ai_voice_start() 启动。
@@ -57,7 +57,25 @@ static uint8_t *s_ai_wav_buf = NULL;
 static uint8_t *s_ai_reply_chunk_buf = NULL;
 
 /** @brief AI 分片协议 JSON 响应临时缓冲，避免覆盖正在上传的 WAV 数据。 */
-static uint8_t s_ai_resp_buf[512];
+static uint8_t s_ai_resp_buf[4096];
+
+typedef struct {
+    char session[64];
+    uint32_t total;
+    char answer_text[1024];
+    char status[24];
+    char tts_status[24];
+    char tts_error[128];
+    uint8_t text_ready;
+    uint8_t audio_ready;
+    uint8_t audio_failed;
+} app_ai_voice_result_info_t;
+
+static app_ai_voice_result_info_t s_ai_result_info;
+static char s_reply_session[64];
+static uint32_t s_reply_wav_size = 0u;
+static volatile int s_reply_audio_ready = 0;
+static volatile int s_reply_play_busy = 0;
 
 /* ==========================================================================
  * WAV 格式辅助函数
@@ -688,6 +706,66 @@ static int app_ai_voice_json_is_true(const uint8_t *json, uint32_t len, const ch
     return strncmp(start, "true", 4u) == 0 ? 1 : 0;
 }
 
+static void app_ai_voice_clear_reply_state(void)
+{
+    s_reply_session[0] = '\0';
+    s_reply_wav_size = 0u;
+    s_reply_audio_ready = 0;
+    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
+}
+
+static void app_ai_voice_store_reply_state(const char *session, uint32_t total)
+{
+    if (session == NULL || total == 0u) {
+        app_ai_voice_clear_reply_state();
+        return;
+    }
+
+    strncpy(s_reply_session, session, sizeof(s_reply_session) - 1u);
+    s_reply_session[sizeof(s_reply_session) - 1u] = '\0';
+    s_reply_wav_size = total;
+    s_reply_audio_ready = 1;
+}
+
+static void app_ai_voice_parse_result_info(const char *session,
+                                           const uint8_t *json,
+                                           uint32_t len,
+                                           app_ai_voice_result_info_t *info)
+{
+    if (info == NULL) {
+        return;
+    }
+
+    memset(info, 0, sizeof(*info));
+    if (session != NULL) {
+        strncpy(info->session, session, sizeof(info->session) - 1u);
+    }
+    if (json == NULL || len == 0u) {
+        return;
+    }
+
+    (void)app_ai_voice_json_get_string(json, len, "status", info->status, sizeof(info->status));
+    (void)app_ai_voice_json_get_string(json, len, "tts_status", info->tts_status, sizeof(info->tts_status));
+    (void)app_ai_voice_json_get_string(json, len, "tts_error", info->tts_error, sizeof(info->tts_error));
+    (void)app_ai_voice_json_get_string(json, len, "answer_text", info->answer_text, sizeof(info->answer_text));
+
+    info->text_ready = (info->answer_text[0] != '\0' ||
+                        strcmp(info->status, "text_ready") == 0 ||
+                        strcmp(info->status, "audio_ready") == 0) ? 1u : 0u;
+    info->audio_ready = (strcmp(info->status, "audio_ready") == 0 ||
+                         app_ai_voice_json_is_true(json, len, "audio_ready") ||
+                         app_ai_voice_json_is_true(json, len, "reply_wav_ready") ||
+                         app_ai_voice_json_is_true(json, len, "ready")) ? 1u : 0u;
+    info->audio_failed = (strcmp(info->status, "audio_failed") == 0 ||
+                          strcmp(info->tts_status, "failed") == 0) ? 1u : 0u;
+
+    if (app_ai_voice_json_get_u32(json, len, "reply_wav_size", &info->total) != 0) {
+        if (app_ai_voice_json_get_u32(json, len, "total", &info->total) != 0) {
+            info->total = 0u;
+        }
+    }
+}
+
 /** @brief POST 一个 JSON 请求并把响应放入 s_ai_resp_buf。 */
 static int app_ai_voice_post_json_body(const char *url,
                                        const uint8_t *json,
@@ -803,16 +881,20 @@ static int app_ai_voice_finish_upload(const char *session)
         return -1;
     }
 
-    return app_ai_voice_post_json(url, &resp_len);
+    int ret = app_ai_voice_post_json(url, &resp_len);
+    APP_LOGI("AI-UI", "finish sent");
+    return ret;
 }
 
-/** @brief 轮询服务器，直到 AI 回复 WAV 准备好并返回总长度。 */
+/** @brief 轮询服务器，先显示文本，音频准备好后点亮播放按钮。 */
 static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
 {
     if (session == NULL || total == NULL) {
         return -1;
     }
 
+    int text_shown = 0;
+    uint8_t audio_wait_logged = 0u;
     uint32_t start = osal_get_tick_ms();
     while ((osal_get_tick_ms() - start) < APP_AI_PROCESS_TIMEOUT_MS) {
         char query[128];
@@ -824,21 +906,62 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
             return -2;
         }
 
+        APP_LOGI("AI-UI", "polling result_info");
         int ret = app_ai_voice_post_json(url, &resp_len);
         if (ret == 0) {
             s_ai_resp_buf[resp_len < sizeof(s_ai_resp_buf) ? resp_len : (sizeof(s_ai_resp_buf) - 1u)] = '\0';
-            if (app_ai_voice_json_is_true(s_ai_resp_buf, resp_len, "ready")) {
-                ret = app_ai_voice_json_get_u32(s_ai_resp_buf, resp_len, "total", total);
-                if (ret == 0) {
+            app_ai_voice_result_info_t *info = &s_ai_result_info;
+            app_ai_voice_parse_result_info(session, s_ai_resp_buf, resp_len, info);
+
+            if (info->text_ready && !text_shown) {
+                APP_LOGI("AI-UI", "text_ready answer_len=%u", (unsigned int)strlen(info->answer_text));
+                if (info->answer_text[0] != '\0') {
+                    (void)app_ui_set_ai_answer_text(info->answer_text);
+                }
+                (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_WAITING);
+                text_shown = 1;
+            }
+
+            if (info->audio_failed) {
+                APP_LOGW("AI-UI", "audio_failed error=%s", info->tts_error[0] != '\0' ? info->tts_error : info->tts_status);
+                if (info->answer_text[0] != '\0') {
+                    (void)app_ui_set_ai_answer_text(info->answer_text);
+                } else {
+                    (void)app_ui_set_ai_answer_text("语音生成失败");
+                }
+                (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
+                return -4;
+            }
+
+            if (info->audio_ready) {
+                if (info->total == 0u) {
+                    (void)app_ai_voice_json_get_u32(s_ai_resp_buf, resp_len, "total", &info->total);
+                }
+                if (info->total > 0u) {
+                    *total = info->total;
+                    APP_LOGI("AI-UI", "audio_ready wav_size=%u", (unsigned int)*total);
+                    if (!text_shown && info->answer_text[0] == '\0') {
+                        (void)app_ui_set_ai_answer_text("语音已生成，点击播放。");
+                    }
+                    app_ai_voice_store_reply_state(session, *total);
+                    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
                     return 0;
                 }
-                return ret;
+            }
+
+            if (info->text_ready && audio_wait_logged == 0u) {
+                APP_LOGI("AI-UI", "audio_waiting");
+                audio_wait_logged = 1u;
             }
         }
 
         osal_delay_ms(APP_AI_RESULT_POLL_MS);
     }
 
+    if (text_shown) {
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
+        return -5;
+    }
     return -3;
 }
 
@@ -965,7 +1088,6 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
         }
 
         if (!playback_started) {
-            (void)app_ui_set_ai_waiting(0);
             int ret = service_audio_start_playback();
             if (ret != 0) {
                 if (final_ret == 0) {
@@ -975,6 +1097,7 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
                 continue;
             }
             playback_started = 1;
+            APP_LOGI("AI-UI", "playing reply wav");
         }
 
         if (final_ret != 0) {
@@ -1000,6 +1123,9 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
         (void)osal_queue_send(ctx->free_queue, &msg.block_index, OSAL_WAIT_FOREVER);
     }
 
+    if (playback_started) {
+        (void)service_audio_stop_playback();
+    }
     return final_ret;
 }
 
@@ -1011,6 +1137,8 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
         s_ai_reply_chunk_buf == NULL) {
         return -1;
     }
+
+    APP_LOGI("AI-UI", "downloading reply wav");
 
     osal_queue_t free_queue = osal_queue_create(APP_AI_REPLY_PCM_BLOCK_COUNT, sizeof(uint16_t));
     osal_queue_t filled_queue = osal_queue_create(APP_AI_REPLY_PCM_BLOCK_COUNT + 1u, sizeof(app_ai_voice_reply_msg_t));
@@ -1057,6 +1185,47 @@ static int app_ai_voice_play_result_chunks(const char *session, uint32_t total)
     osal_queue_delete(filled_queue);
     osal_heap_free(pcm_blocks);
     return ret;
+}
+
+static void app_ai_voice_play_request_task(void *arg)
+{
+    (void)arg;
+
+    char session[64];
+    uint32_t total = 0u;
+
+    if (!s_reply_audio_ready || s_reply_session[0] == '\0' || s_reply_wav_size == 0u) {
+        APP_LOGW("AI-UI", "play button disabled, audio not ready");
+        s_reply_play_busy = 0;
+        osal_task_delete_current();
+        return;
+    }
+
+    if (app_business_audio_session_try_begin() != 0) {
+        APP_LOGW("AI-UI", "play request ignored, audio session busy");
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+        s_reply_play_busy = 0;
+        osal_task_delete_current();
+        return;
+    }
+
+    strncpy(session, s_reply_session, sizeof(session) - 1u);
+    session[sizeof(session) - 1u] = '\0';
+    total = s_reply_wav_size;
+
+    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_PLAYING);
+    int ret = app_ai_voice_play_result_chunks(session, total);
+    if (ret == 0) {
+        APP_LOGI("AI-UI", "play done");
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+    } else {
+        APP_LOGW(TAG, "AI 回复播放失败, ret=%d", ret);
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+    }
+
+    app_business_audio_session_end();
+    s_reply_play_busy = 0;
+    osal_task_delete_current();
 }
 
 /**
@@ -1138,12 +1307,14 @@ static void app_ai_voice_task(void *arg)
         uint32_t samples_total = app_ai_voice_record_to_wav_buffer();
         if (samples_total == 0u) {
             (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+            (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
             app_business_audio_session_end();
             continue;
         }
 
         if (service_network_is_ready() != 1) {
             (void)app_ui_set_ai_message(UI_TEXT_AI_NO_NETWORK);
+            (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
             app_business_audio_session_end();
             continue;
         }
@@ -1153,6 +1324,7 @@ static void app_ai_voice_task(void *arg)
         uint32_t wav_len = APP_BUSINESS_WAV_HEADER_LEN + pcm_bytes;
         if (pcm_bytes > 0u && wav_len <= APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES) {
             app_ai_voice_wav_write_header(s_ai_wav_buf, pcm_bytes);
+            app_ai_voice_clear_reply_state();
 
             char session[64];
             int ret = app_ai_voice_start_session(session, sizeof(session));
@@ -1164,12 +1336,14 @@ static void app_ai_voice_task(void *arg)
             }
             if (ret != 0) {
                 (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+                (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
             }
             uint32_t reply_len = 0u;
             if (ret == 0) {
                 ret = app_ai_voice_wait_result_info(session, &reply_len);
-                if (ret != 0) {
+                if (ret != 0 && ret != -4 && ret != -5) {
                     (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
                 }
             }
             if (ret == 0) {
@@ -1180,11 +1354,20 @@ static void app_ai_voice_task(void *arg)
                              (unsigned int)APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES);
                     ret = -10;
                     (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
                 } else {
+#if AUTO_PLAY_REPLY_AUDIO
                     ret = app_ai_voice_play_result_chunks(session, reply_len);
-                    if (ret != 0) {
+                    if (ret == 0) {
+                        APP_LOGI("AI-UI", "play done");
+                        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+                    } else {
                         (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
                     }
+#else
+                    ret = 0;
+#endif
                 }
             }
 
@@ -1194,6 +1377,7 @@ static void app_ai_voice_task(void *arg)
         } else {
             APP_LOGW(TAG, "AI 录音 WAV 长度无效或超限, wav_len=%u", (unsigned int)wav_len);
             (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+            (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
         }
 
         /* 步骤 8：无论成功失败都释放音频会话锁 */
@@ -1247,7 +1431,7 @@ int app_ai_voice_start(void)
              "AI 回复分片缓存已分配到 PSRAM, bytes=%u",
              (unsigned int)APP_AI_HTTP_CHUNK_BYTES);
 
-    int ret = osal_task_create("biz_ai", app_ai_voice_task, NULL, 4096u, 5u, &s_ai_task);
+    int ret = osal_task_create("biz_ai", app_ai_voice_task, NULL, 8192u, 5u, &s_ai_task);
     if (ret != 0) {
         APP_LOGE(TAG, "AI 语音任务启动失败, ret=%d", ret);
         osal_heap_free(s_ai_reply_chunk_buf);
@@ -1314,4 +1498,29 @@ void app_ai_voice_record_stop(void)
         return;
     }
     s_ai_recording = 0;
+}
+
+void app_ai_voice_request_reply_play(void)
+{
+    APP_LOGI("AI-UI", "play button clicked");
+
+    if (!s_started || !s_reply_audio_ready || s_reply_session[0] == '\0' || s_reply_wav_size == 0u) {
+        APP_LOGW("AI-UI", "play button disabled, audio not ready");
+        return;
+    }
+    if (s_reply_play_busy) {
+        return;
+    }
+
+    s_reply_play_busy = 1;
+    if (osal_task_create("ai_reply_play",
+                         app_ai_voice_play_request_task,
+                         NULL,
+                         6144u,
+                         5u,
+                         NULL) != 0) {
+        s_reply_play_busy = 0;
+        APP_LOGW("AI-UI", "play task create failed");
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+    }
 }

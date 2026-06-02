@@ -9,6 +9,7 @@
 #include "service_network.h"
 
 #include "service_config.h"
+#include "osal_mutex.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -21,6 +22,26 @@ static service_network_ops_t s_network_ops;
 
 /** @brief 网络 ops 是否已经完成绑定并通过初始化检查。 */
 static uint8_t s_network_ops_ready = 0u;
+
+/** @brief 串行化网络 I/O，避免 HTTP 与 UDP/TCP 同时进入底层 lwIP/AT 路径。 */
+static osal_mutex_t s_network_io_mutex = NULL;
+
+static int service_network_lock_io(void)
+{
+    if (s_network_io_mutex == NULL) {
+        s_network_io_mutex = osal_mutex_create();
+        if (s_network_io_mutex == NULL) {
+            return -1;
+        }
+    }
+
+    return osal_mutex_lock(s_network_io_mutex, OSAL_WAIT_FOREVER);
+}
+
+static void service_network_unlock_io(void)
+{
+    osal_mutex_unlock(s_network_io_mutex);
+}
 
 /**
  * @brief 检查网络服务所需的下层能力是否完整。
@@ -73,6 +94,15 @@ int service_network_init(const service_network_ops_t *ops)
         return -3;
     }
 
+    if (s_network_io_mutex == NULL) {
+        s_network_io_mutex = osal_mutex_create();
+        if (s_network_io_mutex == NULL) {
+            SERVICE_LOGE(TAG, "网络服务初始化失败: I/O 互斥锁创建失败");
+            s_network_ops_ready = 0u;
+            return -4;
+        }
+    }
+
     s_network_ops = *ops;
     s_network_ops_ready = 1u;
     return 0;
@@ -83,6 +113,10 @@ int service_network_deinit(void)
     /* 清空函数表后，所有公开 API 都会先被 s_network_ops_ready 拦住。 */
     s_network_ops = (service_network_ops_t){0};
     s_network_ops_ready = 0u;
+    if (s_network_io_mutex != NULL) {
+        osal_mutex_delete(s_network_io_mutex);
+        s_network_io_mutex = NULL;
+    }
     return 0;
 }
 
@@ -113,7 +147,12 @@ int service_network_tcp_connect(const char *host, int port)
         return -1;
     }
 
-    return s_network_ops.tcp_connect(host, port);
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.tcp_connect(host, port);
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_tcp_send(const uint8_t *data, int len)
@@ -122,7 +161,12 @@ int service_network_tcp_send(const uint8_t *data, int len)
         return -1;
     }
 
-    return s_network_ops.tcp_send(data, len);
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.tcp_send(data, len);
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_tcp_close(void)
@@ -131,7 +175,12 @@ int service_network_tcp_close(void)
         return -1;
     }
 
-    return s_network_ops.tcp_close();
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.tcp_close();
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_udp_connect(const char *host, int port)
@@ -141,7 +190,12 @@ int service_network_udp_connect(const char *host, int port)
         return -1;
     }
 
-    return s_network_ops.udp_connect(host, port);
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.udp_connect(host, port);
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_udp_send(const uint8_t *data, int len)
@@ -150,7 +204,12 @@ int service_network_udp_send(const uint8_t *data, int len)
         return -1;
     }
 
-    return s_network_ops.udp_send(data, len);
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.udp_send(data, len);
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
@@ -160,7 +219,12 @@ int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_m
         return -1;
     }
 
-    return s_network_ops.read_downlink(buf, len, timeout_ms);
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.read_downlink(buf, len, timeout_ms);
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_http_post(const char *url,
@@ -176,12 +240,17 @@ int service_network_http_post(const char *url,
         return -1;
     }
 
-    return s_network_ops.http_post(url,
-                                   content_type,
-                                   body,
-                                   body_len,
-                                   resp,
-                                   resp_size,
-                                   resp_len,
-                                   timeout_ms);
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    int ret = s_network_ops.http_post(url,
+                                      content_type,
+                                      body,
+                                      body_len,
+                                      resp,
+                                      resp_size,
+                                      resp_len,
+                                      timeout_ms);
+    service_network_unlock_io();
+    return ret;
 }

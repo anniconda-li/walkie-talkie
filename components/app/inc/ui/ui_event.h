@@ -27,6 +27,14 @@ typedef enum {
     UI_SETTINGS_4G_UNAVAILABLE,
 } ui_settings_4g_status_t;
 
+typedef enum {
+    UI_AI_AUDIO_BTN_HIDDEN = 0,
+    UI_AI_AUDIO_BTN_WAITING,
+    UI_AI_AUDIO_BTN_READY,
+    UI_AI_AUDIO_BTN_PLAYING,
+    UI_AI_AUDIO_BTN_FAILED,
+} ui_ai_audio_btn_state_t;
+
 typedef struct {
     char ssid[33];
     int rssi;
@@ -49,6 +57,7 @@ typedef struct {
     void (*camera_retake_requested)(void);             /**< 相机重拍请求回调。 */
     void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
+    void (*ai_reply_play_requested)(void);             /**< AI 回复语音播放请求回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
     ui_settings_network_mode_t (*settings_network_mode_get)(void); /**< 查询当前网络选择。 */
     void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */
@@ -89,6 +98,8 @@ typedef struct {
  */
 typedef struct {
     lv_obj_t *answer_label;  /**< AI 回答显示标签。 */
+    lv_obj_t *audio_button;  /**< AI 回复语音播放按钮。 */
+    lv_obj_t *audio_label;   /**< AI 回复语音播放图标/文字。 */
     lv_obj_t *camera_button; /**< 拍照按钮。 */
     lv_obj_t *camera_icon;   /**< 拍照按钮图标。 */
     lv_obj_t *ask_button;    /**< AI 问答按钮。 */
@@ -183,6 +194,10 @@ void ui_event_set_ai_waiting(bool waiting);
  * @param[in] text_id UI 文本 ID。
  */
 void ui_event_set_ai_message(ui_text_id_t text_id);
+
+void ui_event_set_ai_answer_text(const char *text);
+
+void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
 
 /**
  * @brief 注册设置页面视图对象。

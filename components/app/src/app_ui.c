@@ -150,6 +150,38 @@ int app_ui_set_ai_message(ui_text_id_t text_id)
     return 0;
 }
 
+int app_ui_set_ai_answer_text(const char *text)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "AI 回答文本设置失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_set_ai_answer_text(text);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_set_ai_audio_button_state(ui_ai_audio_btn_state_t state)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "AI 语音按钮状态设置失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_set_ai_audio_button_state(state);
+    service_screen_unlock();
+    return 0;
+}
+
 int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
                                           uint16_t count,
                                           int ret)

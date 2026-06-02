@@ -20,6 +20,8 @@
  */
 #include "ui_event.h"
 #include "ui_assets.h"
+#include "app_config.h"
+#include "ui_font.h"
 #include "ui_i18n.h"
 #include "ui_shell.h"
 #include "ui_theme.h"
@@ -44,6 +46,7 @@ static lv_timer_t *g_ai_wait_timer = NULL;
 static uint8_t g_ai_waiting = 0u;
 static uint8_t g_ai_wait_dot_count = 0u;
 static ui_text_id_t g_ai_message_id = UI_TEXT_AI_IDLE;
+static ui_ai_audio_btn_state_t g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
 
 /* ==========================================================================
  * 通用 UI 工具函数
@@ -402,13 +405,13 @@ static void ai_wait_timer_cb(lv_timer_t *timer)
     g_ai_wait_dot_count = (uint8_t)((g_ai_wait_dot_count % 3u) + 1u);
     switch(g_ai_wait_dot_count) {
         case 1:
-            lv_label_set_text(g_ai_view->answer_label, ".");
+            lv_label_set_text(g_ai_view->answer_label, "正在识别和思考.");
             break;
         case 2:
-            lv_label_set_text(g_ai_view->answer_label, "..");
+            lv_label_set_text(g_ai_view->answer_label, "正在识别和思考..");
             break;
         default:
-            lv_label_set_text(g_ai_view->answer_label, "...");
+            lv_label_set_text(g_ai_view->answer_label, "正在识别和思考...");
             break;
     }
 }
@@ -447,6 +450,59 @@ static void ai_camera_event_cb(lv_event_t *e)
     if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
         ui_shell_switch_to(UI_APP_ID_CAMERA);
     }
+}
+
+static void ai_audio_play_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    APP_LOGI("AI-UI", "play button clicked");
+    if(g_ai_audio_btn_state != UI_AI_AUDIO_BTN_READY) {
+        APP_LOGW("AI-UI", "play button disabled, audio not ready");
+        return;
+    }
+
+    if(g_callbacks.ai_reply_play_requested != NULL) {
+        g_callbacks.ai_reply_play_requested();
+    }
+}
+
+static void ai_apply_audio_button_state(ui_ai_view_t *view, ui_ai_audio_btn_state_t state)
+{
+    if(view == NULL || view->audio_button == NULL || view->audio_label == NULL) {
+        return;
+    }
+
+    g_ai_audio_btn_state = state;
+    lv_label_set_text(view->audio_label, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_font(view->audio_label, ui_font_normal(), 0);
+
+    if(state == UI_AI_AUDIO_BTN_HIDDEN) {
+        lv_obj_add_flag(view->audio_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_state(view->audio_button, LV_STATE_DISABLED);
+        return;
+    }
+
+    lv_obj_remove_flag(view->audio_button, LV_OBJ_FLAG_HIDDEN);
+
+    if(state == UI_AI_AUDIO_BTN_READY) {
+        lv_obj_remove_state(view->audio_button, LV_STATE_DISABLED);
+        lv_obj_set_style_bg_color(view->audio_button, UI_COLOR_AI, 0);
+        lv_obj_set_style_border_color(view->audio_button, lv_color_make(0x68, 0xD8, 0xE8), 0);
+        lv_obj_set_style_text_color(view->audio_label, lv_color_white(), 0);
+        return;
+    }
+
+    lv_obj_add_state(view->audio_button, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(view->audio_button, lv_color_make(0x3A, 0x3A, 0x3A), 0);
+    lv_obj_set_style_border_color(view->audio_button, lv_color_make(0x66, 0x66, 0x66), 0);
+    lv_obj_set_style_text_color(view->audio_label,
+                                state == UI_AI_AUDIO_BTN_PLAYING
+                                    ? lv_color_make(0xD8, 0xD8, 0xD8)
+                                    : lv_color_make(0x9A, 0x9A, 0x9A),
+                                0);
 }
 
 /* ==========================================================================
@@ -873,7 +929,11 @@ void ui_event_register_ai(ui_ai_view_t *view)
     if(view->camera_button != NULL) {
         lv_obj_add_event_cb(view->camera_button, ai_camera_event_cb, LV_EVENT_CLICKED, view);
     }
+    if(view->audio_button != NULL) {
+        lv_obj_add_event_cb(view->audio_button, ai_audio_play_event_cb, LV_EVENT_CLICKED, view);
+    }
     lv_obj_add_event_cb(view->ask_button, ai_ask_event_cb, LV_EVENT_ALL, view);
+    ai_apply_audio_button_state(view, g_ai_audio_btn_state);
     if(g_ai_waiting != 0u) {
         ui_event_set_ai_waiting(true);
     }
@@ -910,7 +970,8 @@ void ui_event_set_ai_waiting(bool waiting)
 
     g_ai_wait_dot_count = 0u;
     if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
-        lv_label_set_text(g_ai_view->answer_label, ".");
+        lv_label_set_text(g_ai_view->answer_label, "正在识别和思考...");
+        lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
     }
     if(g_ai_wait_timer == NULL) {
         g_ai_wait_timer = lv_timer_create(ai_wait_timer_cb, 320, NULL);
@@ -923,7 +984,23 @@ void ui_event_set_ai_message(ui_text_id_t text_id)
     ui_event_set_ai_waiting(false);
     if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
         lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(text_id));
+        lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
     }
+}
+
+void ui_event_set_ai_answer_text(const char *text)
+{
+    ui_event_set_ai_waiting(false);
+    if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
+        lv_label_set_text(g_ai_view->answer_label, text != NULL ? text : "");
+        lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
+    }
+}
+
+void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state)
+{
+    g_ai_audio_btn_state = state;
+    ai_apply_audio_button_state(g_ai_view, state);
 }
 
 void ui_event_register_settings(ui_settings_view_t *view)
