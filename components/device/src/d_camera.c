@@ -24,6 +24,19 @@ static pixformat_t s_camera_pixformat = PIXFORMAT_RGB565;
 /** @brief 当前摄像头输出尺寸，用于避免重复切换 sensor 模式。 */
 static framesize_t s_camera_framesize = D_CAMERA_PREVIEW_FRAME_SIZE;
 
+/** @brief OV2640 DSP register bank id, matching esp32-camera ov2640_regs.h. */
+#define D_CAMERA_OV2640_BANK_DSP 0
+/** @brief OV2640 DSP register: indirect register address. */
+#define D_CAMERA_OV2640_BPADDR   0x7C
+/** @brief OV2640 DSP register: indirect register data. */
+#define D_CAMERA_OV2640_BPDATA   0x7D
+/** @brief OV2640 DSP register: DSP feature controls. */
+#define D_CAMERA_OV2640_CTRL2    0x86
+/** @brief OV2640 CTRL2 bit mask: SDE + UV adjust + color matrix. */
+#define D_CAMERA_OV2640_COLOR_DSP_MASK 0x19
+/** @brief OV2640 chroma gain. Public saturation level +2 uses 0x68. */
+#define D_CAMERA_OV2640_PREVIEW_CHROMA_GAIN 0x78
+
 /**
  * @brief 将底层驱动错误码转换为 WDRIVER 通用 int 返回值。
  *
@@ -68,10 +81,91 @@ static int d_camera_set_pwdn_level(int level)
 }
 
 /**
+ * @brief 写 OV2640 指定 bank 的 8-bit 寄存器。
+ */
+static int d_camera_ov2640_write_reg(sensor_t *sensor, uint8_t bank, uint8_t reg, uint8_t value)
+{
+    if (sensor == NULL || sensor->set_reg == NULL) {
+        return -1;
+    }
+
+    return sensor->set_reg(sensor, ((int)bank << 8) | reg, 0xFF, value);
+}
+
+/**
+ * @brief 设置 OV2640 指定 bank 寄存器中的部分 bit。
+ */
+static int d_camera_ov2640_set_reg_bits(sensor_t *sensor, uint8_t bank, uint8_t reg, uint8_t mask)
+{
+    if (sensor == NULL || sensor->get_reg == NULL || sensor->set_reg == NULL) {
+        return -1;
+    }
+
+    int reg_addr = ((int)bank << 8) | reg;
+    int current = sensor->get_reg(sensor, reg_addr, 0xFF);
+    if (current < 0) {
+        return current;
+    }
+
+    return sensor->set_reg(sensor, reg_addr, mask, (uint8_t)current | mask);
+}
+
+/**
+ * @brief 对 OV2640 预览色彩做寄存器级增强。
+ *
+ * esp32-camera 的 OV2640 set_saturation(+2) 会把 U/V chroma gain 写到 0x68。
+ * 这里沿用同一组 DSP 间接寄存器，仅把 chroma gain 轻微上推，减少灰蒙感。
+ */
+static void d_camera_apply_ov2640_preview_boost(sensor_t *sensor)
+{
+    if (sensor == NULL || sensor->id.PID != OV2640_PID) {
+        return;
+    }
+
+    int ret = d_camera_ov2640_set_reg_bits(sensor,
+                                           D_CAMERA_OV2640_BANK_DSP,
+                                           D_CAMERA_OV2640_CTRL2,
+                                           D_CAMERA_OV2640_COLOR_DSP_MASK);
+    if (ret != 0) {
+        D_LOGW(TAG, "OV2640 色彩 DSP 开关设置失败, ret=%d", ret);
+        return;
+    }
+
+    ret = d_camera_ov2640_write_reg(sensor, D_CAMERA_OV2640_BANK_DSP, D_CAMERA_OV2640_BPADDR, 0x00);
+    if (ret == 0) {
+        ret = d_camera_ov2640_write_reg(sensor, D_CAMERA_OV2640_BANK_DSP, D_CAMERA_OV2640_BPDATA, 0x02);
+    }
+    if (ret == 0) {
+        ret = d_camera_ov2640_write_reg(sensor, D_CAMERA_OV2640_BANK_DSP, D_CAMERA_OV2640_BPADDR, 0x03);
+    }
+    if (ret == 0) {
+        ret = d_camera_ov2640_write_reg(sensor,
+                                        D_CAMERA_OV2640_BANK_DSP,
+                                        D_CAMERA_OV2640_BPDATA,
+                                        D_CAMERA_OV2640_PREVIEW_CHROMA_GAIN);
+    }
+    if (ret == 0) {
+        ret = d_camera_ov2640_write_reg(sensor,
+                                        D_CAMERA_OV2640_BANK_DSP,
+                                        D_CAMERA_OV2640_BPDATA,
+                                        D_CAMERA_OV2640_PREVIEW_CHROMA_GAIN);
+    }
+
+    if (ret != 0) {
+        D_LOGW(TAG, "OV2640 预览 chroma gain 设置失败, ret=%d", ret);
+        return;
+    }
+
+    D_LOGI(TAG,
+           "OV2640 预览色彩增强已应用: chroma_gain=0x%02X",
+           D_CAMERA_OV2640_PREVIEW_CHROMA_GAIN);
+}
+
+/**
  * @brief 调整 sensor 默认画面参数。
  *
- * 只在 RGB565 预览模式做轻量调校，改善默认画面偏白、偏灰的问题。不同
- * sensor 对取值范围和支持项的实现可能不同，因此这里按 best-effort 调用。
+ * 只在 RGB565 预览模式做轻量调校，改善默认画面偏白、色彩不够鲜艳的问题。
+ * 不同 sensor 对取值范围和支持项的实现可能不同，因此这里按 best-effort 调用。
  */
 static void d_camera_apply_preview_tuning(pixformat_t pixformat)
 {
@@ -86,6 +180,11 @@ static void d_camera_apply_preview_tuning(pixformat_t pixformat)
     }
 
     int ret = 0;
+    const int preview_saturation =
+        (sensor->id.PID == OV5640_PID || sensor->id.PID == OV3660_PID) ? 4 : 2;
+    const int preview_contrast =
+        (sensor->id.PID == OV5640_PID || sensor->id.PID == OV3660_PID) ? 3 : 2;
+
     if (sensor->set_special_effect != NULL) {
         ret = sensor->set_special_effect(sensor, 0);
         if (ret != 0) {
@@ -122,6 +221,12 @@ static void d_camera_apply_preview_tuning(pixformat_t pixformat)
             D_LOGW(TAG, "摄像头增益档位设置失败, ret=%d", ret);
         }
     }
+    if (sensor->set_gainceiling != NULL) {
+        ret = sensor->set_gainceiling(sensor, GAINCEILING_2X);
+        if (ret != 0) {
+            D_LOGW(TAG, "摄像头自动增益上限设置失败, ret=%d", ret);
+        }
+    }
     if (sensor->set_exposure_ctrl != NULL) {
         ret = sensor->set_exposure_ctrl(sensor, 1);
         if (ret != 0) {
@@ -135,13 +240,13 @@ static void d_camera_apply_preview_tuning(pixformat_t pixformat)
         }
     }
     if (sensor->set_saturation != NULL) {
-        ret = sensor->set_saturation(sensor, 2);
+        ret = sensor->set_saturation(sensor, preview_saturation);
         if (ret != 0) {
             D_LOGW(TAG, "摄像头饱和度设置失败, ret=%d", ret);
         }
     }
     if (sensor->set_contrast != NULL) {
-        ret = sensor->set_contrast(sensor, 2);
+        ret = sensor->set_contrast(sensor, preview_contrast);
         if (ret != 0) {
             D_LOGW(TAG, "摄像头对比度设置失败, ret=%d", ret);
         }
@@ -153,14 +258,48 @@ static void d_camera_apply_preview_tuning(pixformat_t pixformat)
         }
     }
     if (sensor->set_ae_level != NULL) {
-        ret = sensor->set_ae_level(sensor, -2);
+        ret = sensor->set_ae_level(sensor, -1);
         if (ret != 0) {
             D_LOGW(TAG, "摄像头自动曝光等级设置失败, ret=%d", ret);
         }
     }
+    if (sensor->set_raw_gma != NULL) {
+        ret = sensor->set_raw_gma(sensor, 1);
+        if (ret != 0) {
+            D_LOGW(TAG, "摄像头 gamma 设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_lenc != NULL) {
+        ret = sensor->set_lenc(sensor, 1);
+        if (ret != 0) {
+            D_LOGW(TAG, "摄像头镜头校正设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_bpc != NULL) {
+        ret = sensor->set_bpc(sensor, 1);
+        if (ret != 0) {
+            D_LOGW(TAG, "摄像头坏点修正设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_wpc != NULL) {
+        ret = sensor->set_wpc(sensor, 1);
+        if (ret != 0) {
+            D_LOGW(TAG, "摄像头白点修正设置失败, ret=%d", ret);
+        }
+    }
+    if (sensor->set_sharpness != NULL) {
+        ret = sensor->set_sharpness(sensor, 2);
+        if (ret != 0 && sensor->id.PID != OV2640_PID) {
+            D_LOGW(TAG, "摄像头锐度设置失败, ret=%d", ret);
+        }
+    }
+    d_camera_apply_ov2640_preview_boost(sensor);
 
     D_LOGI(TAG,
-                "摄像头预览参数已调校: awb=on, agc=on, agc_gain=0, aec=on, ae_level=-2, brightness=-2, saturation=2, contrast=2");
+                "摄像头预览参数已调校: pid=0x%04X, awb=on, agc=on, gainceiling=2x, aec=on, ae_level=-1, brightness=-2, saturation=%d, contrast=%d, raw_gma=on, lenc=on",
+                (unsigned int)sensor->id.PID,
+                preview_saturation,
+                preview_contrast);
 }
 
 /**

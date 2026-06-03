@@ -59,8 +59,8 @@ AI 问答采用半双工流程：
 
 UI 固定使用中文。项目内已经导入裁剪后的 LVGL C 字体：
 
-- `components/app/src/ui/fonts/ui_font_16.c`: 默认正文字体，通过 `ui_font_normal()` 使用。
-- `components/app/src/ui/fonts/ui_font_14.c`: 小号字体，通过 `ui_font_small()` 使用。
+- `components/app/src/ui/fonts/ui_font_16.c`: 默认正文字体，通过 `ui_font_normal()` 使用；由 `SourceHanSansSC-Regular-2.otf` 裁切生成，覆盖 ASCII、CJK 基本汉字区 `0x4E00-0x9FFF`、常用中文标点和当前 LVGL symbol 图标，供 AI 回答框和主要中文 UI 使用。该字库需要 `CONFIG_LV_FONT_FMT_TXT_LARGE=y`。
+- `components/app/src/ui/fonts/ui_font_14.c`: 小号字体，通过 `ui_font_small()` 使用；保持轻量裁剪，仅用于小号固定 UI 文案。
 
 应用入口会在 `ui_init()` 中把屏幕默认字体设置为 `ui_font_normal()`。AI 回答文本、等待状态文本和新增喇叭按钮 label 也会显式设置为 `ui_font_normal()`，避免中文或兜底文本回落到 LVGL 默认 Montserrat 字体。
 
