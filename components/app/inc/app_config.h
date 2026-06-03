@@ -54,6 +54,8 @@ extern "C" {
 #define APP_BUSINESS_HTTP_ROUTE_AI_RESULT_INFO  "/ai/result_info"
 /** @brief AI 回复 WAV 分片拉取路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK "/ai/result_chunk"
+/** @brief AI 问答取消路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_CANCEL       "/ai/cancel"
 /** @brief 相机 JPEG 上传路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD   "/camera/upload"
 /** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
@@ -84,7 +86,7 @@ extern "C" {
  */
 #define APP_CAMERA_PREVIEW_TEST_MODE    APP_CAMERA_PREVIEW_TEST_NORMAL
 /** @brief AI HTTP 单片请求等待响应的超时时间，单位 ms。 */
-#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    300000u
+#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    30000u
 /** @brief AI 服务器处理等待总超时时间，单位 ms。 */
 #define APP_AI_PROCESS_TIMEOUT_MS       300000u
 /** @brief AI 结果轮询间隔，单位 ms。 */

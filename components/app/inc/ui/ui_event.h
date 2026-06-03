@@ -58,6 +58,7 @@ typedef struct {
     void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
     void (*ai_reply_play_requested)(void);             /**< AI 回复语音播放请求回调。 */
+    void (*ai_cancel_requested)(void);                 /**< AI 问答中止请求回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
     ui_settings_network_mode_t (*settings_network_mode_get)(void); /**< 查询当前网络选择。 */
     void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */

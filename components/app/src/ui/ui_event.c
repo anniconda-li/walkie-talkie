@@ -47,6 +47,7 @@ static uint8_t g_ai_waiting = 0u;
 static uint8_t g_ai_wait_dot_count = 0u;
 static ui_text_id_t g_ai_message_id = UI_TEXT_AI_IDLE;
 static ui_ai_audio_btn_state_t g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
+static lv_obj_t *g_ai_cancel_label = NULL;
 
 /* ==========================================================================
  * 通用 UI 工具函数
@@ -322,6 +323,48 @@ static void camera_retake_event_cb(lv_event_t *e)
  * AI 页面事件处理
  * ========================================================================== */
 
+static bool ai_cancel_entry_active(void)
+{
+    return (g_ai_view != NULL && g_ai_view->speaking) ||
+           g_ai_waiting != 0u ||
+           g_ai_audio_btn_state == UI_AI_AUDIO_BTN_WAITING ||
+           g_ai_audio_btn_state == UI_AI_AUDIO_BTN_READY ||
+           g_ai_audio_btn_state == UI_AI_AUDIO_BTN_PLAYING;
+}
+
+static void ai_apply_cancel_entry(ui_ai_view_t *view)
+{
+    if(view == NULL || view->camera_button == NULL) {
+        return;
+    }
+
+    bool active = ai_cancel_entry_active();
+    if(active) {
+        if(view->camera_icon != NULL) {
+            lv_obj_add_flag(view->camera_icon, LV_OBJ_FLAG_HIDDEN);
+        }
+        if(g_ai_cancel_label == NULL) {
+            g_ai_cancel_label = lv_label_create(view->camera_button);
+            lv_obj_set_style_text_font(g_ai_cancel_label, ui_font_normal(), 0);
+            lv_obj_remove_flag(g_ai_cancel_label, LV_OBJ_FLAG_CLICKABLE);
+        }
+        lv_label_set_text(g_ai_cancel_label, "中止");
+        lv_obj_set_style_text_color(g_ai_cancel_label, lv_color_white(), 0);
+        lv_obj_center(g_ai_cancel_label);
+        lv_obj_remove_flag(g_ai_cancel_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_border_color(view->camera_button, UI_COLOR_AI, 0);
+    }
+    else {
+        if(g_ai_cancel_label != NULL) {
+            lv_obj_add_flag(g_ai_cancel_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        if(view->camera_icon != NULL) {
+            lv_obj_remove_flag(view->camera_icon, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_set_style_border_color(view->camera_button, lv_color_make(0x88, 0x88, 0x88), 0);
+    }
+}
+
 /**
  * @brief 切换 AI 页面的"说话中/空闲"视觉状态。
  *
@@ -392,6 +435,7 @@ static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
     else if(g_ai_waiting == 0u) {
         lv_label_set_text(view->answer_label, ui_i18n_text(g_ai_message_id));
     }
+    ai_apply_cancel_entry(view);
 }
 
 static void ai_wait_timer_cb(lv_timer_t *timer)
@@ -428,7 +472,12 @@ static void ai_ask_event_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     ui_ai_view_t *view = (ui_ai_view_t *)lv_event_get_user_data(e);
 
-    if(code == LV_EVENT_LONG_PRESSED) {
+    if(code == LV_EVENT_SHORT_CLICKED) {
+        if(g_callbacks.ai_cancel_requested != NULL) {
+            g_callbacks.ai_cancel_requested();
+        }
+    }
+    else if(code == LV_EVENT_LONG_PRESSED) {
         ai_set_speaking(view, true);
         if(g_callbacks.ai_question_started != NULL) {
             g_callbacks.ai_question_started();
@@ -448,6 +497,12 @@ static void ai_ask_event_cb(lv_event_t *e)
 static void ai_camera_event_cb(lv_event_t *e)
 {
     if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if(ai_cancel_entry_active()) {
+            if(g_callbacks.ai_cancel_requested != NULL) {
+                g_callbacks.ai_cancel_requested();
+            }
+            return;
+        }
         ui_shell_switch_to(UI_APP_ID_CAMERA);
     }
 }
@@ -476,6 +531,7 @@ static void ai_apply_audio_button_state(ui_ai_view_t *view, ui_ai_audio_btn_stat
     }
 
     g_ai_audio_btn_state = state;
+    ai_apply_cancel_entry(view);
     lv_label_set_text(view->audio_label, LV_SYMBOL_AUDIO);
     lv_obj_set_style_text_font(view->audio_label, ui_font_normal(), 0);
 
@@ -950,11 +1006,13 @@ void ui_event_unregister_ai(ui_ai_view_t *view)
         g_ai_wait_timer = NULL;
     }
     g_ai_view = NULL;
+    g_ai_cancel_label = NULL;
 }
 
 void ui_event_set_ai_waiting(bool waiting)
 {
     g_ai_waiting = waiting ? 1u : 0u;
+    ai_apply_cancel_entry(g_ai_view);
 
     if(!waiting) {
         if(g_ai_wait_timer != NULL) {

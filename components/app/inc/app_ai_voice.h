@@ -8,6 +8,8 @@
 #ifndef APP_AI_VOICE_H
 #define APP_AI_VOICE_H
 
+#include "esp_err.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -40,6 +42,16 @@ void app_ai_voice_record_start(void);
 void app_ai_voice_record_stop(void);
 
 void app_ai_voice_request_reply_play(void);
+
+/**
+ * @brief 中止当前 AI 问答任务。
+ *
+ * 可在录音、上传、结果轮询、回复下载或播放阶段调用。本地会立即设置取消标志，
+ * 已创建后端 session 时会尽快发送 /ai/cancel 通知。
+ *
+ * @return 成功返回 0；模块未启动或无可取消任务返回负值。
+ */
+esp_err_t app_ai_voice_cancel_current(void);
 
 #ifdef __cplusplus
 }

@@ -28,7 +28,7 @@ static const char *TAG = "d_lcd";
 /**
  * @brief LCD SPI 像素时钟。
  */
-#define d_lcd_SPI_PCLK_HZ (40u * 1000u * 1000u)
+#define d_lcd_SPI_PCLK_HZ (80u * 1000u * 1000u)
 
 /**
  * @brief LCD SPI 事务队列深度。
@@ -45,8 +45,8 @@ static const char *TAG = "d_lcd";
 /**
  * @brief 摄像头预览整帧 polling RAMWR 开关。
  *
- * 当前 esp_lcd_panel_io_tx_param() 不能发送完整预览帧，默认关闭，走小块
- * polling RAMWR，避免每帧触发 SPI 单次长度限制。
+ * 当前关闭整帧写入，走 32 行分块 polling RAMWR，避免整帧 tx_param 在部分
+ * LCD IO/驱动组合上不稳定。
  */
 #ifndef D_LCD_PREVIEW_DIRECT_RAMWR
 #define D_LCD_PREVIEW_DIRECT_RAMWR 0
@@ -57,7 +57,7 @@ static const char *TAG = "d_lcd";
  *
  * camera frame 在 PSRAM，分块拷贝到内部 DMA buffer 后用 polling RAMWR 发屏。
  */
-#define D_LCD_DMA_BOUNCE_LINES 8u
+#define D_LCD_DMA_BOUNCE_LINES 32u
 
 /**
  * @brief 直刷 RGB565 数据发送前交换字节。
