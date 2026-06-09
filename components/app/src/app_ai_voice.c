@@ -98,11 +98,15 @@ typedef enum {
 static volatile int s_ai_cancel_requested = 0;
 static volatile app_ai_voice_state_t s_ai_state = APP_AI_STATE_IDLE;
 static char s_ai_current_session[64];
-static volatile int s_ai_cancel_task_busy = 0;
-static char s_ai_cancel_task_session[64];
 
 #define APP_AI_CANCELED_RET                 (-900)
+#define APP_AI_BACKEND_CANCEL_ON_DEVICE     0
+
+#if APP_AI_BACKEND_CANCEL_ON_DEVICE
+static volatile int s_ai_cancel_task_busy = 0;
+static char s_ai_cancel_task_session[64];
 #define APP_AI_CANCEL_HTTP_TIMEOUT_MS       5000u
+#endif
 
 static int app_ai_voice_is_cancel_requested(void)
 {
@@ -209,12 +213,12 @@ static void app_ai_voice_wav_write_header(uint8_t *buf, uint32_t pcm_bytes)
 #define APP_AI_PLAY_CHUNK_SAMPLES     256u
 /** @brief AI 回复下载和播放之间的 PCM 预缓冲块样本数。 */
 #define APP_AI_REPLY_PCM_BLOCK_SAMPLES 512u
-/** @brief AI 回复 PCM 预缓冲块数量，约 512ms 音频。 */
-#define APP_AI_REPLY_PCM_BLOCK_COUNT   16u
-/** @brief AI 回复播放启动前的预缓冲块数，降低 HTTP 分片间隙导致的卡顿。 */
-#define APP_AI_REPLY_PLAY_START_BLOCKS 8u
+/** @brief AI 回复 PCM 预缓冲块数量，约 2048ms 音频。 */
+#define APP_AI_REPLY_PCM_BLOCK_COUNT   64u
+/** @brief AI 回复播放启动前的预缓冲块数，降低公网 HTTP 分片间隙导致的卡顿。 */
+#define APP_AI_REPLY_PLAY_START_BLOCKS 24u
 /** @brief AI 回复播放启动前最多等待预缓冲的时间。 */
-#define APP_AI_REPLY_PLAY_START_WAIT_MS 600u
+#define APP_AI_REPLY_PLAY_START_WAIT_MS 1500u
 /** @brief AI 回复下载任务栈大小。 */
 #define APP_AI_REPLY_FETCH_TASK_STACK  4096u
 /** @brief AI 录音任务单次读取超时时间，单位 ms。 */
@@ -853,6 +857,7 @@ static int app_ai_voice_post_json(const char *url, uint32_t *resp_len)
     return app_ai_voice_post_json_body(url, empty_json, sizeof(empty_json) - 1u, resp_len);
 }
 
+#if APP_AI_BACKEND_CANCEL_ON_DEVICE
 static int app_ai_voice_send_backend_cancel(const char *session)
 {
     char query[128];
@@ -922,6 +927,14 @@ static void app_ai_voice_request_backend_cancel_async(const char *session)
         APP_LOGW(CANCEL_TAG, "backend cancel task create failed");
     }
 }
+#else
+static void app_ai_voice_request_backend_cancel_async(const char *session)
+{
+    if (session != NULL && session[0] != '\0') {
+        APP_LOGI(CANCEL_TAG, "backend cancel skipped on device, session=%s", session);
+    }
+}
+#endif
 
 /** @brief 请求服务器创建一次 AI 会话。 */
 static int app_ai_voice_start_session(char *session, size_t session_size)
@@ -1266,6 +1279,7 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
     int playback_started = 0;
     int final_ret = 0;
     uint32_t prebuffer_start = osal_get_tick_ms();
+    uint32_t underrun_log_ms = 0u;
 
     while (1) {
         if (app_ai_voice_is_cancel_requested() && final_ret == 0) {
@@ -1285,6 +1299,14 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
 
         app_ai_voice_reply_msg_t msg;
         if (osal_queue_recv(ctx->filled_queue, &msg, 100u) != 0) {
+            if (playback_started) {
+                uint32_t now = osal_get_tick_ms();
+                if (now - underrun_log_ms >= 1000u) {
+                    APP_LOGW("AI-UI", "reply playback waiting for pcm, queued=%u",
+                             (unsigned int)osal_queue_get_count(ctx->filled_queue));
+                    underrun_log_ms = now;
+                }
+            }
             continue;
         }
 
@@ -1765,7 +1787,7 @@ void app_ai_voice_record_start(void)
     if (!s_started) {
         return;
     }
-    if (s_ai_state == APP_AI_STATE_CANCELING || s_ai_cancel_task_busy) {
+    if (s_ai_state == APP_AI_STATE_CANCELING) {
         return;
     }
     if (s_ai_recording || s_reply_play_busy) {

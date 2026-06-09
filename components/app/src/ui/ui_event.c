@@ -325,11 +325,7 @@ static void camera_retake_event_cb(lv_event_t *e)
 
 static bool ai_cancel_entry_active(void)
 {
-    return (g_ai_view != NULL && g_ai_view->speaking) ||
-           g_ai_waiting != 0u ||
-           g_ai_audio_btn_state == UI_AI_AUDIO_BTN_WAITING ||
-           g_ai_audio_btn_state == UI_AI_AUDIO_BTN_READY ||
-           g_ai_audio_btn_state == UI_AI_AUDIO_BTN_PLAYING;
+    return g_ai_waiting != 0u;
 }
 
 static void ai_apply_cancel_entry(ui_ai_view_t *view)
@@ -472,7 +468,7 @@ static void ai_ask_event_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     ui_ai_view_t *view = (ui_ai_view_t *)lv_event_get_user_data(e);
 
-    if(code == LV_EVENT_SHORT_CLICKED) {
+    if(code == LV_EVENT_SHORT_CLICKED && ai_cancel_entry_active()) {
         if(g_callbacks.ai_cancel_requested != NULL) {
             g_callbacks.ai_cancel_requested();
         }
