@@ -105,9 +105,9 @@ static void app_camera_notify_task(void)
 /**
  * @brief 构造 FastAPI 业务路由 URL。
  */
-static int app_camera_build_url(char *out, size_t out_size, const char *path)
+static int app_camera_build_url(char *out, size_t out_size, const char *path, const char *query)
 {
-    if (out == NULL || out_size == 0u || path == NULL) {
+    if (out == NULL || out_size == 0u || path == NULL || query == NULL) {
         return -1;
     }
 
@@ -118,8 +118,106 @@ static int app_camera_build_url(char *out, size_t out_size, const char *path)
         path_start++;
     }
 
-    int written = snprintf(out, out_size, "%s%s", base, path_start);
+    const char *sep = query[0] != '\0' ? "?" : "";
+    int written = snprintf(out, out_size, "%s%s%s%s", base, path_start, sep, query);
     return (written > 0 && (size_t)written < out_size) ? 0 : -2;
+}
+
+static int app_camera_json_get_string(const uint8_t *json,
+                                      uint32_t len,
+                                      const char *key,
+                                      char *out,
+                                      size_t out_size)
+{
+    if (json == NULL || key == NULL || out == NULL || out_size == 0u) {
+        return -1;
+    }
+
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *start = strstr((const char *)json, pattern);
+    if (start == NULL || start >= (const char *)json + len) {
+        return -2;
+    }
+    start = strchr(start, ':');
+    if (start == NULL) {
+        return -3;
+    }
+    start++;
+    while (*start == ' ' || *start == '\t') {
+        start++;
+    }
+    if (*start != '"') {
+        return -4;
+    }
+    start++;
+    const char *end = strchr(start, '"');
+    if (end == NULL) {
+        return -5;
+    }
+
+    size_t copy_len = (size_t)(end - start);
+    if (copy_len >= out_size) {
+        copy_len = out_size - 1u;
+    }
+    memcpy(out, start, copy_len);
+    out[copy_len] = '\0';
+    return copy_len > 0u ? 0 : -6;
+}
+
+static int app_camera_json_is_true(const uint8_t *json, uint32_t len, const char *key)
+{
+    if (json == NULL || key == NULL) {
+        return 0;
+    }
+
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *start = strstr((const char *)json, pattern);
+    if (start == NULL || start >= (const char *)json + len) {
+        return 0;
+    }
+    start = strchr(start, ':');
+    if (start == NULL) {
+        return 0;
+    }
+    start++;
+    while (*start == ' ' || *start == '\t') {
+        start++;
+    }
+    return strncmp(start, "true", 4u) == 0 ? 1 : 0;
+}
+
+static void app_camera_handle_upload_response(const uint8_t *json, uint32_t len)
+{
+    char answer_text[512];
+    answer_text[0] = '\0';
+
+    int ok = app_camera_json_is_true(json, len, "ok");
+    int analysis_ok = app_camera_json_is_true(json, len, "analysis_ok");
+    (void)app_camera_json_get_string(json, len, "answer_text", answer_text, sizeof(answer_text));
+
+    (void)app_ui_set_ai_waiting(0);
+    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
+
+    if (!ok) {
+        APP_LOGW(TAG, "相机图像分析失败: ok=false");
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        return;
+    }
+
+    if (!analysis_ok) {
+        APP_LOGW(TAG, "相机图像分析要求重拍");
+        if (answer_text[0] != '\0') {
+            (void)app_ui_set_ai_answer_text(answer_text);
+        } else {
+            (void)app_ui_set_ai_answer_text("这张照片信息不太够，请重拍。");
+        }
+        return;
+    }
+
+    APP_LOGI(TAG, "相机图像分析完成，可以提问");
+    (void)app_ui_set_ai_answer_text("已完成图像分析，可以提问了。");
 }
 
 /**
@@ -415,7 +513,9 @@ static void app_camera_do_upload(void)
 
     uint32_t resp_len = 0u;
     char url[256];
-    ret = app_camera_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD);
+    char query[96];
+    snprintf(query, sizeof(query), "device=%s", APP_BUSINESS_DEVICE_NAME);
+    ret = app_camera_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD, query);
     if (ret != 0) {
         APP_LOGW(TAG, "相机上传 URL 构造失败, ret=%d", ret);
         app_camera_clear_jpeg();
@@ -436,6 +536,7 @@ static void app_camera_do_upload(void)
         APP_LOGI(TAG, "相机 JPEG 上传成功, len=%u, resp_len=%u",
                  (unsigned int)s_jpeg_len,
                  (unsigned int)resp_len);
+        app_camera_handle_upload_response(s_upload_resp, resp_len);
     } else {
         APP_LOGW(TAG, "相机 JPEG 上传失败, ret=%d, len=%u",
                  ret,
@@ -444,9 +545,6 @@ static void app_camera_do_upload(void)
     }
 
     app_camera_clear_jpeg();
-    if (ret == 0) {
-        (void)app_ui_set_ai_waiting(0);
-    }
 }
 
 /**

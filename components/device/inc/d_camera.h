@@ -40,8 +40,8 @@ extern "C" {
 /** @brief 本地预览使用的帧尺寸。 */
 #define D_CAMERA_PREVIEW_FRAME_SIZE FRAMESIZE_240X240
 
-/** @brief 拍照上传使用的 JPEG 帧尺寸，第一版使用 QVGA 兼顾兼容性和数据量。 */
-#define D_CAMERA_CAPTURE_FRAME_SIZE FRAMESIZE_QVGA
+/** @brief 拍照上传使用的 JPEG 帧尺寸。 */
+#define D_CAMERA_CAPTURE_FRAME_SIZE FRAMESIZE_VGA
 
 /**
  * @brief 初始化摄像头。

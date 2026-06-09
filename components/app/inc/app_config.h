@@ -39,11 +39,11 @@ extern "C" {
 /** @brief 本机注册到服务器的设备名。 */
 #define APP_BUSINESS_DEVICE_NAME        "walkie-01"
 /** @brief UDP 对讲服务器地址。 */
-#define APP_BUSINESS_SERVER_HOST        "10.224.127.251"
+#define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
 /** @brief UDP 对讲服务器端口。 */
-#define APP_BUSINESS_UDP_PORT           9000
+#define APP_BUSINESS_UDP_PORT           19000
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
-#define APP_BUSINESS_HTTP_BASE_URL      "http://10.224.127.251:8000"
+#define APP_BUSINESS_HTTP_BASE_URL      "http://139.129.17.67:18080"
 /** @brief AI 创建会话路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_START        "/ai/start"
 /** @brief AI 上传请求 WAV 分片路由。 */
@@ -61,7 +61,7 @@ extern "C" {
 /** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
 #define APP_CAMERA_UPLOAD_TIMEOUT_MS    30000u
 /** @brief 相机 JPEG 上传响应临时缓冲大小。 */
-#define APP_CAMERA_UPLOAD_RESP_BYTES    512u
+#define APP_CAMERA_UPLOAD_RESP_BYTES    1024u
 /** @brief 相机预览区域 X 坐标。 */
 #define APP_CAMERA_PREVIEW_X            0
 /** @brief 相机预览区域 Y 坐标。 */
