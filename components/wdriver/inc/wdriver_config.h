@@ -86,8 +86,8 @@
 /**
  * @brief ML307C/UART1 串口引脚定义。
  */
-#define WDRIVER_UART_TX_IO      GPIO_NUM_17        /**< ESP TX -> ML307C RX。 */
-#define WDRIVER_UART_RX_IO      GPIO_NUM_18        /**< ESP RX <- ML307C TX。 */
+#define WDRIVER_UART_TX_IO      GPIO_NUM_20        /**< ESP TX -> ML307C RX。 */
+#define WDRIVER_UART_RX_IO      GPIO_NUM_21        /**< ESP RX <- ML307C TX。 */
 #define WDRIVER_UART_RTS_IO     UART_PIN_NO_CHANGE /**< 未使用硬件流控。 */
 #define WDRIVER_UART_CTS_IO     UART_PIN_NO_CHANGE /**< 未使用硬件流控。 */
 
