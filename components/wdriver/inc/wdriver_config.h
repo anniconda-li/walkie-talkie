@@ -111,8 +111,8 @@
 /**
  * @brief 电池电量检测引脚定义。
  */
-#define WDRIVER_BATTERY_ADC_IO GPIO_NUM_20       /**< 电池分压采样 ADC 输入。 */
-#define WDRIVER_BATTERY_ADC_EN_IO GPIO_NUM_0     /**< 电池采样使能脚，低电平使能。 */
+#define WDRIVER_BATTERY_ADC_IO GPIO_NUM_5       /**< 电池分压采样 ADC 输入。 */
+#define WDRIVER_BATTERY_ADC_EN_IO GPIO_NUM_17     /**< 电池采样使能脚，低电平使能。 */
 
 /**
  * @brief 项目 I2C 总线引脚定义。
@@ -128,19 +128,19 @@
  */
 #define WDRIVER_CAMERA_SIOD_IO  WDRIVER_I2C_SDA_IO /**< SCCB/I2C 数据线，复用项目 I2C SDA。 */
 #define WDRIVER_CAMERA_SIOC_IO  WDRIVER_I2C_SCL_IO /**< SCCB/I2C 时钟线，复用项目 I2C SCL。 */
-#define WDRIVER_CAMERA_VSYNC_IO GPIO_NUM_4  /**< 场同步。 */
-#define WDRIVER_CAMERA_HREF_IO  GPIO_NUM_5  /**< 行同步。 */
-#define WDRIVER_CAMERA_PCLK_IO  GPIO_NUM_16 /**< 像素时钟。 */
-#define WDRIVER_CAMERA_D0_IO    GPIO_NUM_39 /**< 数据 D0。 */
-#define WDRIVER_CAMERA_D1_IO    GPIO_NUM_40 /**< 数据 D1。 */
-#define WDRIVER_CAMERA_D2_IO    GPIO_NUM_42 /**< 数据 D2。 */
-#define WDRIVER_CAMERA_D3_IO    GPIO_NUM_41 /**< 数据 D3。 */
-#define WDRIVER_CAMERA_D4_IO    GPIO_NUM_17 /**< 数据 D4。 */
-#define WDRIVER_CAMERA_D5_IO    GPIO_NUM_15 /**< 数据 D5。 */
-#define WDRIVER_CAMERA_D6_IO    GPIO_NUM_7  /**< 数据 D6。 */
-#define WDRIVER_CAMERA_D7_IO    GPIO_NUM_6  /**< 数据 D7。 */
-#define WDRIVER_CAMERA_PWDN_IO  GPIO_NUM_NC /**< 电源关断未接。 */
-#define WDRIVER_CAMERA_RESET_IO GPIO_NUM_NC /**< 复位脚未接。 */
-#define WDRIVER_CAMERA_XCLK_IO  GPIO_NUM_NC /**< XCLK 未接。 */
+#define WDRIVER_CAMERA_VSYNC_IO GPIO_NUM_46  /**< 场同步。 */
+#define WDRIVER_CAMERA_HREF_IO  GPIO_NUM_41  /**< 行同步。 */
+#define WDRIVER_CAMERA_PCLK_IO  GPIO_NUM_45  /**< 像素时钟。 */
+#define WDRIVER_CAMERA_D0_IO    GPIO_NUM_3   /**< 数据 D0。 */
+#define WDRIVER_CAMERA_D1_IO    GPIO_NUM_47  /**< 数据 D1。 */
+#define WDRIVER_CAMERA_D2_IO    GPIO_NUM_48  /**< 数据 D2。 */
+#define WDRIVER_CAMERA_D3_IO    GPIO_NUM_4   /**< 数据 D3。 */
+#define WDRIVER_CAMERA_D4_IO    GPIO_NUM_42  /**< 数据 D4。 */
+#define WDRIVER_CAMERA_D5_IO    GPIO_NUM_38  /**< 数据 D5。 */
+#define WDRIVER_CAMERA_D6_IO    GPIO_NUM_39  /**< 数据 D6。 */
+#define WDRIVER_CAMERA_D7_IO    GPIO_NUM_40  /**< 数据 D7。 */
+#define WDRIVER_CAMERA_PWDN_IO  GPIO_NUM_NC  /**< 电源接拓展io3 */
+#define WDRIVER_CAMERA_RESET_IO GPIO_NUM_NC  /**< 复位脚未接。 */
+#define WDRIVER_CAMERA_XCLK_IO  GPIO_NUM_NC  /**< XCLK 未接。 */
 
 #endif
