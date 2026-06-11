@@ -16,8 +16,8 @@ static const char *TAG = "d_pca9557";
 
 #define D_PCA9557_I2C_ADDR        0x19u
 #define D_PCA9557_I2C_SPEED_HZ    100000u
-#define D_PCA9557_LCD_BL_PIN      PCA9557_PIN_5
-#define D_PCA9557_CAMERA_PWDN_PIN PCA9557_PIN_1
+#define D_PCA9557_LCD_BL_PIN      PCA9557_PIN_4
+#define D_PCA9557_CAMERA_PWDN_PIN PCA9557_PIN_3
 
 /**
  * @brief PCA9557 输入端口寄存器。

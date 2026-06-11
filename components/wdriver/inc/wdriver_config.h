@@ -94,31 +94,31 @@
 /**
  * @brief ST7789 LCD SPI 引脚定义。
  */
-#define WDRIVER_LCD_SCK_IO   GPIO_NUM_12 /**< SPI SCK。 */
+#define WDRIVER_LCD_SCK_IO   GPIO_NUM_14 /**< SPI SCK。 */
 #define WDRIVER_LCD_MOSI_IO  GPIO_NUM_11 /**< SPI MOSI。 */
-#define WDRIVER_LCD_MISO_IO  GPIO_NUM_NC /**< 未使用。 */
-#define WDRIVER_LCD_DC_IO    GPIO_NUM_18 /**< 数据/命令选择。 */
-#define WDRIVER_LCD_CS_IO    GPIO_NUM_8  /**< SPI 片选。 */
+#define WDRIVER_LCD_MISO_IO  GPIO_NUM_10 /**< 未使用。 */
+#define WDRIVER_LCD_DC_IO    GPIO_NUM_13 /**< 数据/命令选择。 */
+#define WDRIVER_LCD_CS_IO    GPIO_NUM_12 /**< SPI 片选。 */
 #define WDRIVER_LCD_RST_IO   GPIO_NUM_NC /**< 复位脚未接。 */
-#define WDRIVER_LCD_BL_IO    GPIO_NUM_NC /**< 背光由 PCA9557 IO5 控制。 */
+#define WDRIVER_LCD_BL_IO    GPIO_NUM_NC /**< 背光由 PCA9557 IO4 控制。 */
 
 /**
  * @brief FT6336/FT5x06 触摸引脚定义。
  */
 #define WDRIVER_LCD_TOUCH_RST_IO GPIO_NUM_NC /**< 复位脚未接。 */
-#define WDRIVER_LCD_TOUCH_INT_IO GPIO_NUM_19 /**< 触摸中断。 */
+#define WDRIVER_LCD_TOUCH_INT_IO GPIO_NUM_15 /**< 触摸中断。 */
 
 /**
  * @brief 电池电量检测引脚定义。
  */
-#define WDRIVER_BATTERY_ADC_IO GPIO_NUM_5       /**< 电池分压采样 ADC 输入。 */
+#define WDRIVER_BATTERY_ADC_IO GPIO_NUM_5         /**< 电池分压采样 ADC 输入。 */
 #define WDRIVER_BATTERY_ADC_EN_IO GPIO_NUM_17     /**< 电池采样使能脚，低电平使能。 */
 
 /**
  * @brief 项目 I2C 总线引脚定义。
  */
-#define WDRIVER_I2C_SDA_IO GPIO_NUM_1 /**< I2C SDA。 */
-#define WDRIVER_I2C_SCL_IO GPIO_NUM_2 /**< I2C SCL。 */
+#define WDRIVER_I2C_SDA_IO GPIO_NUM_1  /**< I2C SDA。 */
+#define WDRIVER_I2C_SCL_IO GPIO_NUM_2  /**< I2C SCL。 */
 
 /**
  * @brief 摄像头并口和控制引脚定义。
@@ -139,7 +139,7 @@
 #define WDRIVER_CAMERA_D5_IO    GPIO_NUM_38  /**< 数据 D5。 */
 #define WDRIVER_CAMERA_D6_IO    GPIO_NUM_39  /**< 数据 D6。 */
 #define WDRIVER_CAMERA_D7_IO    GPIO_NUM_40  /**< 数据 D7。 */
-#define WDRIVER_CAMERA_PWDN_IO  GPIO_NUM_NC  /**< 电源接拓展io3 */
+#define WDRIVER_CAMERA_PWDN_IO  GPIO_NUM_NC  /**< 电源接拓展PCA9557 IO3 */
 #define WDRIVER_CAMERA_RESET_IO GPIO_NUM_NC  /**< 复位脚未接。 */
 #define WDRIVER_CAMERA_XCLK_IO  GPIO_NUM_NC  /**< XCLK 未接。 */
 
