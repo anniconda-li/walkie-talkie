@@ -39,22 +39,6 @@
 #define WDRIVER_LOGE(tag, fmt, ...) do { (void)(tag); } while (0)
 #endif /* WDRIVER_CONFIG_H */
 
-/**
- * @brief WDRIVER 音频 I2S 方案选择。
- */
-#define WDRIVER_AUDIO_BACKEND_ES  1 /**< ES7210 + ES8311 共用 I2S 时钟方案。 */
-#define WDRIVER_AUDIO_BACKEND_I2S 2 /**< INMP441 + MAX98357A 分离 I2S 时钟方案。 */
-
-/**
- * @brief 当前 WDRIVER 音频 I2S 方案。
- *
- * 测试阶段按实际接线切换。使用 INMP441 + MAX98357A 时，RX 和 TX 使用不同
- * BCLK/WS 引脚，因此 WDRIVER 会分别配置 I2S RX/TX 通道。
- */
-#ifndef WDRIVER_AUDIO_BACKEND
-#define WDRIVER_AUDIO_BACKEND WDRIVER_AUDIO_BACKEND_I2S
-#endif
-
 /** @brief 是否初始化外部 UART。WiFi 网络方案不需要 ML307C UART。 */
 #ifndef WDRIVER_INIT_ENABLE_UART
 #define WDRIVER_INIT_ENABLE_UART 0
@@ -68,20 +52,6 @@
 #define WDRIVER_AUDIO_LRCK_IO GPIO_NUM_47 /**< LRCK/WS。 */
 #define WDRIVER_AUDIO_DOUT_IO GPIO_NUM_48 /**< ESP 输出到 ES8311 DSDIN。 */
 #define WDRIVER_AUDIO_DIN_IO  GPIO_NUM_21 /**< ES7210 SDOUT1 输入到 ESP。 */
-
-/**
- * @brief INMP441 数字麦克风 I2S RX 引脚定义。
- */
-#define WDRIVER_AUDIO_INMP441_DIN_IO  GPIO_NUM_21 /**< INMP441 SD -> ESP DIN。 */
-#define WDRIVER_AUDIO_INMP441_BCLK_IO GPIO_NUM_14 /**< INMP441 SCK/BCLK。 */
-#define WDRIVER_AUDIO_INMP441_WS_IO   GPIO_NUM_47 /**< INMP441 WS/LRCK。 */
-
-/**
- * @brief MAX98357A 功放 I2S TX 引脚定义。
- */
-#define WDRIVER_AUDIO_MAX98357A_DOUT_IO GPIO_NUM_48 /**< ESP DOUT -> MAX98357A DIN。 */
-#define WDRIVER_AUDIO_MAX98357A_BCLK_IO GPIO_NUM_45 /**< MAX98357A BCLK。 */
-#define WDRIVER_AUDIO_MAX98357A_WS_IO   GPIO_NUM_38 /**< MAX98357A LRC/WS。 */
 
 /**
  * @brief ML307C/UART1 串口引脚定义。

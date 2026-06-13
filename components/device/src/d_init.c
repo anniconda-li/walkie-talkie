@@ -12,8 +12,6 @@
 #include "d_es7210.h"
 #include "d_es8311.h"
 #include "d_lcd.h"
-#include "d_inmp441.h"
-#include "d_max98357a.h"
 #include "d_ml307c.h"
 #include "d_pca9557.h"
 #include "d_wifi.h"
@@ -65,7 +63,6 @@ int d_network_init(void)
     return ret;
 }
 
-#if D_INIT_AUDIO == D_INIT_AUDIO_ES
 static int d_init_audio_es(void)
 {
     d_es7210_wdriver_ops_t es7210_wdriver_ops = {
@@ -85,45 +82,14 @@ static int d_init_audio_es(void)
     };
     return d_es8311_init(&es8311_wdriver_ops);
 }
-#endif
-
-#if D_INIT_AUDIO == D_INIT_AUDIO_I2S
-static int d_init_audio_i2s(void)
-{
-    d_inmp441_wdriver_ops_t inmp441_wdriver_ops = {
-        .i2s_read = wdriver_i2s_read,
-    };
-    int ret = d_inmp441_init(&inmp441_wdriver_ops);
-    if (ret != 0) {
-        return ret;
-    }
-
-    d_max98357a_wdriver_ops_t max98357a_wdriver_ops = {
-        .i2s_write = wdriver_i2s_write,
-    };
-    return d_max98357a_init(&max98357a_wdriver_ops);
-}
-#endif
 
 int d_audio_init(void)
 {
-    int ret = 0;
-
-#if D_INIT_AUDIO == D_INIT_AUDIO_ES
-    ret = d_init_audio_es();
+    int ret = d_init_audio_es();
     if (ret != 0) {
         D_LOGE(TAG, "ES 音频驱动初始化失败, ret=%d", ret);
         return ret;
     }
-#elif D_INIT_AUDIO == D_INIT_AUDIO_I2S
-    ret = d_init_audio_i2s();
-    if (ret != 0) {
-        D_LOGE(TAG, "I2S 音频驱动初始化失败, ret=%d", ret);
-        return ret;
-    }
-#else
-#error "Unsupported D_INIT_AUDIO selection"
-#endif
 
     return 0;
 }

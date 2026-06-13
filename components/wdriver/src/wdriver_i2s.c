@@ -31,12 +31,6 @@ static i2s_chan_handle_t s_i2s_tx_handle = NULL;
 #define WDRIVER_I2S_ES_PORT I2S_NUM_0
 
 /**
- * @brief INMP441/MAX98357A 分离 I2S controller。
- */
-#define WDRIVER_I2S_INMP441_PORT   I2S_NUM_0
-#define WDRIVER_I2S_MAX98357A_PORT I2S_NUM_1
-
-/**
  * @brief I2S 音频采样率。
  */
 #define WDRIVER_I2S_SAMPLE_RATE_HZ 16000u
@@ -86,71 +80,6 @@ static i2s_std_config_t wdriver_i2s_get_es_std_config(void)
 }
 
 /**
- * @brief 获取 INMP441 RX I2S 标准模式配置。
- *
- * @return I2S standard 模式配置。
- */
-static i2s_std_config_t wdriver_i2s_get_inmp441_std_config(void)
-{
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = {
-            .sample_rate_hz = WDRIVER_I2S_SAMPLE_RATE_HZ,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
-            .ext_clk_freq_hz = 0,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
-        },
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = GPIO_NUM_NC,
-            .bclk = WDRIVER_AUDIO_INMP441_BCLK_IO,
-            .ws = WDRIVER_AUDIO_INMP441_WS_IO,
-            .dout = GPIO_NUM_NC,
-            .din = WDRIVER_AUDIO_INMP441_DIN_IO,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-    return std_cfg;
-}
-
-/**
- * @brief 获取 MAX98357A TX I2S 标准模式配置。
- *
- * @return I2S standard 模式配置。
- */
-static i2s_std_config_t wdriver_i2s_get_max98357a_std_config(void)
-{
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = {
-            .sample_rate_hz = WDRIVER_I2S_SAMPLE_RATE_HZ,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
-            .ext_clk_freq_hz = 0,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
-        },
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = GPIO_NUM_NC,
-            .bclk = WDRIVER_AUDIO_MAX98357A_BCLK_IO,
-            .ws = WDRIVER_AUDIO_MAX98357A_WS_IO,
-            .dout = WDRIVER_AUDIO_MAX98357A_DOUT_IO,
-            .din = GPIO_NUM_NC,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-    return std_cfg;
-}
-
-/**
  * @brief 创建并配置音频 I2S RX/TX 通道。
  *
  * @return 成功返回 0；失败返回负值。
@@ -167,7 +96,6 @@ static int wdriver_i2s_channels_init(void)
         (void)wdriver_i2s_deinit();
     }
 
-#if WDRIVER_AUDIO_BACKEND == WDRIVER_AUDIO_BACKEND_ES
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(WDRIVER_I2S_ES_PORT,
                                                             I2S_ROLE_MASTER);
     int ret = wdriver_i2s_err_to_int(i2s_new_channel(&chan_cfg,
@@ -231,88 +159,6 @@ static int wdriver_i2s_channels_init(void)
              WDRIVER_AUDIO_LRCK_IO,
              WDRIVER_AUDIO_DOUT_IO,
              WDRIVER_AUDIO_DIN_IO);
-#elif WDRIVER_AUDIO_BACKEND == WDRIVER_AUDIO_BACKEND_I2S
-    i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(WDRIVER_I2S_MAX98357A_PORT,
-                                                               I2S_ROLE_MASTER);
-    int ret = wdriver_i2s_err_to_int(i2s_new_channel(&tx_chan_cfg,
-                                                 &s_i2s_tx_handle,
-                                                 NULL));
-    if (ret != 0) {
-        s_i2s_tx_handle = NULL;
-        WDRIVER_LOGE(TAG, "MAX98357A I2S TX 通道创建失败, ret=%d", ret);
-        return ret;
-    }
-
-    i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(WDRIVER_I2S_INMP441_PORT,
-                                                               I2S_ROLE_MASTER);
-    ret = wdriver_i2s_err_to_int(i2s_new_channel(&rx_chan_cfg,
-                                             NULL,
-                                             &s_i2s_rx_handle));
-    if (ret != 0) {
-        (void)i2s_del_channel(s_i2s_tx_handle);
-        s_i2s_tx_handle = NULL;
-        s_i2s_rx_handle = NULL;
-        WDRIVER_LOGE(TAG, "INMP441 I2S RX 通道创建失败, ret=%d", ret);
-        return ret;
-    }
-
-    i2s_std_config_t tx_std_cfg = wdriver_i2s_get_max98357a_std_config();
-    ret = wdriver_i2s_err_to_int(i2s_channel_init_std_mode(s_i2s_tx_handle, &tx_std_cfg));
-    if (ret != 0) {
-        (void)i2s_del_channel(s_i2s_tx_handle);
-        (void)i2s_del_channel(s_i2s_rx_handle);
-        s_i2s_tx_handle = NULL;
-        s_i2s_rx_handle = NULL;
-        WDRIVER_LOGE(TAG, "MAX98357A I2S TX 标准模式配置失败, ret=%d", ret);
-        return ret;
-    }
-
-    i2s_std_config_t rx_std_cfg = wdriver_i2s_get_inmp441_std_config();
-    ret = wdriver_i2s_err_to_int(i2s_channel_init_std_mode(s_i2s_rx_handle, &rx_std_cfg));
-    if (ret != 0) {
-        (void)i2s_del_channel(s_i2s_tx_handle);
-        (void)i2s_del_channel(s_i2s_rx_handle);
-        s_i2s_tx_handle = NULL;
-        s_i2s_rx_handle = NULL;
-        WDRIVER_LOGE(TAG, "INMP441 I2S RX 标准模式配置失败, ret=%d", ret);
-        return ret;
-    }
-
-    ret = wdriver_i2s_err_to_int(i2s_channel_enable(s_i2s_tx_handle));
-    if (ret != 0) {
-        (void)i2s_del_channel(s_i2s_tx_handle);
-        (void)i2s_del_channel(s_i2s_rx_handle);
-        s_i2s_tx_handle = NULL;
-        s_i2s_rx_handle = NULL;
-        WDRIVER_LOGE(TAG, "MAX98357A I2S TX 通道使能失败, ret=%d", ret);
-        return ret;
-    }
-
-    ret = wdriver_i2s_err_to_int(i2s_channel_enable(s_i2s_rx_handle));
-    if (ret != 0) {
-        (void)i2s_channel_disable(s_i2s_tx_handle);
-        (void)i2s_del_channel(s_i2s_tx_handle);
-        (void)i2s_del_channel(s_i2s_rx_handle);
-        s_i2s_tx_handle = NULL;
-        s_i2s_rx_handle = NULL;
-        WDRIVER_LOGE(TAG, "INMP441 I2S RX 通道使能失败, ret=%d", ret);
-        return ret;
-    }
-
-    WDRIVER_LOGI(TAG,
-             "音频 I2S 初始化成功, rx_port=%d, tx_port=%d, rate=%u, inmp_din=%d, inmp_bclk=%d, inmp_ws=%d, max_dout=%d, max_bclk=%d, max_ws=%d",
-             WDRIVER_I2S_INMP441_PORT,
-             WDRIVER_I2S_MAX98357A_PORT,
-             (unsigned int)WDRIVER_I2S_SAMPLE_RATE_HZ,
-             WDRIVER_AUDIO_INMP441_DIN_IO,
-             WDRIVER_AUDIO_INMP441_BCLK_IO,
-             WDRIVER_AUDIO_INMP441_WS_IO,
-             WDRIVER_AUDIO_MAX98357A_DOUT_IO,
-             WDRIVER_AUDIO_MAX98357A_BCLK_IO,
-             WDRIVER_AUDIO_MAX98357A_WS_IO);
-#else
-#error "Unsupported WDRIVER_AUDIO_BACKEND selection"
-#endif
     return 0;
 }
 

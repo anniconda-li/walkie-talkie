@@ -1,4 +1,8 @@
 file(GLOB_RECURSE SOURCES ./src/*.c)
+list(REMOVE_ITEM SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/d_inmp441.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/d_max98357a.c"
+)
 idf_component_register(
     SRCS
         ${SOURCES}

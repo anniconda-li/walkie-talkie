@@ -27,11 +27,6 @@
 #define D_INIT_NETWORK_ML307C 1
 /** @brief 初始化 WiFi STA 网络驱动。 */
 #define D_INIT_NETWORK_WIFI 2
-/** @brief 初始化 ES7210 + ES8311 音频驱动。 */
-#define D_INIT_AUDIO_ES 1
-/** @brief 初始化 INMP441 + MAX98357A 音频驱动。 */
-#define D_INIT_AUDIO_I2S 2
-
 /** @brief 是否初始化摄像头驱动，0=关闭，1=开启。 */
 #ifndef D_INIT_ENABLE_CAMERA
 #define D_INIT_ENABLE_CAMERA 1
@@ -41,11 +36,6 @@
 #ifndef D_INIT_NETWORK
 #define D_INIT_NETWORK D_INIT_NETWORK_WIFI
 #endif
-/** @brief 当前 driver 音频初始化方案，默认 ES7210 + ES8311。 */
-#ifndef D_INIT_AUDIO
-#define D_INIT_AUDIO D_INIT_AUDIO_I2S
-#endif
-
 #if D_INIT_NETWORK == D_INIT_NETWORK_WIFI
 /** @brief WiFi STA SSID，仅启用 WiFi 驱动时有效。 */
 #ifndef D_INIT_WIFI_SSID

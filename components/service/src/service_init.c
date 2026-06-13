@@ -13,9 +13,7 @@
 #include "d_es8311.h"
 #include "d_es7210.h"
 #include "d_init.h"
-#include "d_inmp441.h"
 #include "d_lcd.h"
-#include "d_max98357a.h"
 #include "d_ml307c.h"
 #include "d_wifi.h"
 #include "service_audio.h"
@@ -261,30 +259,18 @@ int service_init_audio(void)
 {
     /*
      * 音频 service 只需要“读 PCM”和“播 PCM/音量/静音”能力。
-     * 具体装配 ES7210+ES8311 还是 INMP441+MAX98357A 由 SERVICE_INIT_AUDIO 决定。
+     * 当前硬件固定装配 ES7210 + ES8311。
      */
     service_audio_config_t audio_cfg = {
         .capture_ops = {
-#if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
-            .is_initialized = d_inmp441_is_initialized,
-            .read_pcm = d_inmp441_read_pcm,
-#else
             .is_initialized = d_es7210_is_initialized,
             .read_pcm = d_es7210_read_pcm,
-#endif
         },
         .playback_ops = {
-#if SERVICE_INIT_AUDIO == SERVICE_INIT_AUDIO_I2S
-            .is_initialized = d_max98357a_is_initialized,
-            .play_pcm = d_max98357a_play_pcm,
-            .set_volume = d_max98357a_set_volume,
-            .set_mute = d_max98357a_set_mute,
-#else
             .is_initialized = d_es8311_is_initialized,
             .play_pcm = d_es8311_play_pcm,
             .set_volume = d_es8311_set_volume,
             .set_mute = d_es8311_set_mute,
-#endif
         },
         .volume = 80u,
     };

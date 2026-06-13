@@ -1,23 +1,26 @@
 /**
  * @file main.c
- * @brief 新板 LCD + Camera RGB565 直刷测试入口。
+ * @brief ES7210 + ES8311 audio loopback test entry.
  */
 
-#include "d_camera.h"
-#include "d_lcd.h"
-#include "d_pca9557.h"
+#include "d_init.h"
 #include "osal_log.h"
 #include "osal_task.h"
+#include "service_audio.h"
+#include "service_init.h"
 #include "wdriver_i2c.h"
-#include "wdriver_spi.h"
+#include "wdriver_i2s.h"
 
-#include <stddef.h>
 #include <stdint.h>
 
-static const char *TAG = "main_cam_lcd_test";
+static const char *TAG = "main_audio_test";
 
-#define MAIN_PREVIEW_PERIOD_MS 10u
-#define MAIN_FRAME_LOG_PERIOD  60u
+#define MAIN_AUDIO_FRAME_SAMPLES 320u
+#define MAIN_AUDIO_READ_TIMEOUT_MS 30u
+#define MAIN_AUDIO_PLAY_TIMEOUT_MS 30u
+#define MAIN_AUDIO_LOG_PERIOD 50u
+
+static int16_t s_audio_frame[MAIN_AUDIO_FRAME_SAMPLES];
 
 static void main_fatal(const char *stage, int ret)
 {
@@ -27,113 +30,98 @@ static void main_fatal(const char *stage, int ret)
     }
 }
 
-static int main_init_pca9557(void)
+static int main_audio_peak_abs(const int16_t *pcm, uint32_t samples)
 {
-    d_pca9557_wdriver_ops_t ops = {
-        .get_i2c_bus_handle = wdriver_i2c_get_bus_handle,
-        .i2c_write_reg = wdriver_i2c_write_reg,
-        .i2c_read_reg = wdriver_i2c_read_reg,
-    };
+    int peak = 0;
 
-    return d_pca9557_init(&ops);
-}
-
-static void main_log_frame(uint32_t frame_count, const camera_fb_t *fb, int draw_ret)
-{
-    if ((frame_count % MAIN_FRAME_LOG_PERIOD) != 0u) {
-        return;
+    for (uint32_t i = 0; i < samples; i++) {
+        int value = pcm[i];
+        if (value < 0) {
+            value = -value;
+        }
+        if (value > peak) {
+            peak = value;
+        }
     }
 
-    OSAL_LOGI(TAG,
-              "preview frame=%u size=%ux%u len=%u format=%d draw_ret=%d",
-              (unsigned int)frame_count,
-              (unsigned int)fb->width,
-              (unsigned int)fb->height,
-              (unsigned int)fb->len,
-              (int)fb->format,
-              draw_ret);
+    return peak;
 }
 
 void app_main(void)
 {
-    OSAL_LOGI(TAG, "new board LCD + camera RGB565 test start");
+    OSAL_LOGI(TAG, "ES audio loopback test start");
 
     int ret = wdriver_i2c_init();
     if (ret != 0) {
         main_fatal("I2C init", ret);
     }
 
-    ret = wdriver_spi_init();
+    ret = wdriver_i2s_init();
     if (ret != 0) {
-        main_fatal("SPI init", ret);
+        main_fatal("I2S init", ret);
     }
 
-    ret = main_init_pca9557();
+    ret = d_audio_init();
     if (ret != 0) {
-        main_fatal("PCA9557 init", ret);
+        main_fatal("ES audio driver init", ret);
     }
 
-    ret = d_pca9557_set_camera_pwdn(PCA9557_LEVEL_LOW);
+    ret = service_init_audio();
     if (ret != 0) {
-        main_fatal("camera power enable", ret);
-    }
-    osal_delay_ms(100u);
-
-    ret = d_lcd_display_init();
-    if (ret != 0) {
-        main_fatal("LCD display init", ret);
+        main_fatal("audio service init", ret);
     }
 
-    ret = d_lcd_display_on(1);
+    ret = service_audio_set_volume(80u);
     if (ret != 0) {
-        main_fatal("LCD display on", ret);
+        OSAL_LOGW(TAG, "set volume failed, ret=%d", ret);
     }
 
-    ret = d_camera_init();
+    ret = service_audio_set_mute(0);
     if (ret != 0) {
-        main_fatal("camera init", ret);
+        OSAL_LOGW(TAG, "unmute failed, ret=%d", ret);
     }
 
-    ret = d_camera_set_rgb565_mode();
+    ret = service_audio_start_playback();
     if (ret != 0) {
-        main_fatal("camera RGB565 mode", ret);
+        main_fatal("audio playback start", ret);
     }
 
-    (void)d_lcd_fill_screen(0x0000u);
+    OSAL_LOGI(TAG, "audio loopback running, frame_samples=%u",
+              (unsigned int)MAIN_AUDIO_FRAME_SAMPLES);
 
     uint32_t frame_count = 0u;
     while (1) {
-        camera_fb_t *fb = d_camera_get_frame();
-        if (fb == NULL) {
-            OSAL_LOGE(TAG, "camera get frame failed");
-            osal_delay_ms(100u);
+        int read_samples = service_audio_read(s_audio_frame,
+                                              MAIN_AUDIO_FRAME_SAMPLES,
+                                              MAIN_AUDIO_READ_TIMEOUT_MS);
+        if (read_samples < 0) {
+            OSAL_LOGE(TAG, "audio read failed, ret=%d", read_samples);
+            osal_delay_ms(20u);
+            continue;
+        }
+        if (read_samples == 0) {
+            OSAL_LOGW(TAG, "audio read timeout");
+            osal_delay_ms(5u);
             continue;
         }
 
-        int draw_ret = -1;
-        if (fb->format == PIXFORMAT_RGB565 &&
-            fb->width <= d_lcd_H_RES &&
-            fb->height <= d_lcd_V_RES &&
-            fb->len >= ((size_t)fb->width * (size_t)fb->height * sizeof(uint16_t))) {
-            const int x = ((int)d_lcd_H_RES - (int)fb->width) / 2;
-            const int y = ((int)d_lcd_V_RES - (int)fb->height) / 2;
-            draw_ret = d_lcd_draw_bitmap(x,
-                                         y,
-                                         x + (int)fb->width,
-                                         y + (int)fb->height,
-                                         fb->buf);
-        } else {
-            OSAL_LOGE(TAG,
-                      "unexpected camera frame: format=%d size=%ux%u len=%u",
-                      (int)fb->format,
-                      (unsigned int)fb->width,
-                      (unsigned int)fb->height,
-                      (unsigned int)fb->len);
+        int played_samples = service_audio_play(s_audio_frame,
+                                                (uint32_t)read_samples,
+                                                MAIN_AUDIO_PLAY_TIMEOUT_MS);
+        if (played_samples < 0) {
+            OSAL_LOGE(TAG, "audio play failed, ret=%d", played_samples);
+            osal_delay_ms(20u);
+            continue;
         }
 
         frame_count++;
-        main_log_frame(frame_count, fb, draw_ret);
-        d_camera_return_frame(fb);
-        osal_delay_ms(MAIN_PREVIEW_PERIOD_MS);
+        if ((frame_count % MAIN_AUDIO_LOG_PERIOD) == 0u) {
+            OSAL_LOGI(TAG,
+                      "audio frame=%u read=%d played=%d peak=%d",
+                      (unsigned int)frame_count,
+                      read_samples,
+                      played_samples,
+                      main_audio_peak_abs(s_audio_frame, (uint32_t)read_samples));
+        }
     }
 }

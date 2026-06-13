@@ -27,18 +27,9 @@
 #define SERVICE_INIT_NETWORK_ML307C 1
 /** @brief 使用 WiFi STA 网络。 */
 #define SERVICE_INIT_NETWORK_WIFI 2
-/** @brief 使用 ES7210 + ES8311 音频方案。 */
-#define SERVICE_INIT_AUDIO_ES 1
-/** @brief 使用 INMP441 + MAX98357A 音频方案。 */
-#define SERVICE_INIT_AUDIO_I2S 2
-
 /** @brief 当前网络方案。 */
 #ifndef SERVICE_INIT_NETWORK
 #define SERVICE_INIT_NETWORK SERVICE_INIT_NETWORK_WIFI
-#endif
-/** @brief 当前音频方案，默认 ES7210 + ES8311。 */
-#ifndef SERVICE_INIT_AUDIO
-#define SERVICE_INIT_AUDIO SERVICE_INIT_AUDIO_I2S
 #endif
 
 #endif /* SERVICE_CONFIG_H */

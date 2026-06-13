@@ -6,7 +6,6 @@ idf_component_register(
         "."
 
     REQUIRES
-        app
         wdriver
         device
         osal
