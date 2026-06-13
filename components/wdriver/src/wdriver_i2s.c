@@ -60,8 +60,12 @@ static i2s_std_config_t wdriver_i2s_get_es_std_config(void)
             .ext_clk_freq_hz = 0,
             .mclk_multiple = I2S_MCLK_MULTIPLE_384,
         },
+        /*
+         * ES7210 在标准 I2S 下把 MIC1/MIC2 放在 left/right 两个 slot。
+         * 这里使用 stereo slots 是为了完整采集两路 MIC，业务层仍可输出单声道。
+         */
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_MONO),
+                                                        I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = WDRIVER_AUDIO_MCLK_IO,
             .bclk = WDRIVER_AUDIO_BCLK_IO,
@@ -75,7 +79,7 @@ static i2s_std_config_t wdriver_i2s_get_es_std_config(void)
             },
         },
     };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
     return std_cfg;
 }
 
@@ -151,7 +155,7 @@ static int wdriver_i2s_channels_init(void)
     }
 
     WDRIVER_LOGI(TAG,
-             "音频 I2S 初始化成功, port=%d, sample_rate=%u, mclk=%d, bclk=%d, lrck=%d, dout=%d, din=%d",
+             "音频 I2S 初始化成功, port=%d, sample_rate=%u, slots=stereo, mclk=%d, bclk=%d, lrck=%d, dout=%d, din=%d",
              WDRIVER_I2S_ES_PORT,
              (unsigned int)WDRIVER_I2S_SAMPLE_RATE_HZ,
              WDRIVER_AUDIO_MCLK_IO,
