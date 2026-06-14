@@ -12,6 +12,8 @@
 #include "osal_log.h"
 #include "osal_task.h"
 #include "service_init.h"
+#include "service_screen.h"
+#include "ui_splash.h"
 #include "wdriver.h"
 
 static const char *TAG = "main";
@@ -99,7 +101,7 @@ void app_main(void)
 
     (void)main_set_stage_running(APP_BOOT_STAGE_NETWORK);
     app_boot_status_set(APP_BOOT_STAGE_NETWORK, APP_BOOT_STATE_OK, 0);
-    OSAL_LOGI(TAG, "网络阶段交由 app_network 后台启动");
+    OSAL_LOGI(TAG, "网络阶段由运行期业务启动，开机不自动初始化 4G");
 
     (void)main_set_stage_running(APP_BOOT_STAGE_CAMERA);
 #if D_INIT_ENABLE_CAMERA
@@ -122,6 +124,13 @@ void app_main(void)
     ret = app_business_start();
     if (main_finish_stage(APP_BOOT_STAGE_RUNTIME, ret, 1) != 0) {
         main_fatal("业务任务启动", ret);
+    }
+
+    if (service_screen_lock(1000u) == 0) {
+        ui_splash_finish();
+        service_screen_unlock();
+    } else {
+        OSAL_LOGW(TAG, "启动页结束失败: LVGL 加锁超时");
     }
 
     OSAL_LOGI(TAG, "业务固件启动完成");

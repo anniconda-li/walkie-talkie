@@ -49,12 +49,6 @@ static uint8_t s_es7210_inited = 0u;
 /** @brief 初始化时承接并保存的 WDRIVER 能力函数表。 */
 static d_es7210_wdriver_ops_t s_d_ops;
 
-/** @brief 读取日志节流计数器，避免高频 PCM 读取刷屏。 */
-static uint32_t s_d_read_log_count = 0u;
-
-/** @brief 通道峰值日志节流计数器。 */
-static uint32_t s_d_channel_log_count = 0u;
-
 /** @brief ES7210 原始双通道 PCM 读取缓存。 */
 static uint8_t s_d_raw_buf[D_ES7210_MAX_FRAMES * 4u];
 
@@ -158,7 +152,7 @@ static int es7210_config_default(void)
 }
 
 /**
- * @brief 读取一段 ES7210 PCM 原始数据并做日志节流。
+ * @brief 读取一段 ES7210 PCM 原始数据。
  */
 static int es7210_read(uint8_t *data,
                        uint32_t len,
@@ -171,14 +165,7 @@ static int es7210_read(uint8_t *data,
     }
 
     int ret = s_d_ops.i2s_read(data, len, timeout_ms);
-    if (ret >= 0) {
-        s_d_read_log_count++;
-        if ((s_d_read_log_count % 100u) != 0u) {
-            return ret;
-        }
-        D_LOGI(TAG, "ES7210 读取完成, request=%u, read=%d",
-                 (unsigned int)len, ret);
-    } else {
+    if (ret < 0) {
         D_LOGE(TAG, "ES7210 读取失败, ret=%d", ret);
     }
 
@@ -195,12 +182,6 @@ static int16_t d_es7210_read_i16_le(const uint8_t *data, uint32_t sample_index)
     return (int16_t)raw;
 }
 
-static int d_es7210_abs_i16(int16_t sample)
-{
-    int value = sample;
-    return value < 0 ? -value : value;
-}
-
 int d_es7210_init(const d_es7210_wdriver_ops_t *ops)
 {
     if (s_es7210_inited != 0u) {
@@ -215,8 +196,6 @@ int d_es7210_init(const d_es7210_wdriver_ops_t *ops)
     }
 
     s_d_ops = *ops;
-    s_d_read_log_count = 0u;
-    s_d_channel_log_count = 0u;
     int ret = es7210_config_default();
     if (ret != 0) {
         memset(&s_d_ops, 0, sizeof(s_d_ops));
@@ -235,8 +214,6 @@ int d_es7210_deinit(void)
         D_LOGI(TAG, "ES7210 驱动已释放");
     }
     s_es7210_inited = 0u;
-    s_d_read_log_count = 0u;
-    s_d_channel_log_count = 0u;
     memset(&s_d_ops, 0, sizeof(s_d_ops));
     return 0;
 }
@@ -253,8 +230,6 @@ int d_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
     }
 
     uint32_t total = 0u;
-    int mic1_peak = 0;
-    int mic2_peak = 0;
     while (total < samples) {
         uint32_t frames = samples - total;
         if (frames > D_ES7210_MAX_FRAMES) {
@@ -274,14 +249,6 @@ int d_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
         for (uint32_t i = 0; i < read_frames; i++) {
             int16_t mic1 = d_es7210_read_i16_le(s_d_raw_buf, i * 2u);
             int16_t mic2 = d_es7210_read_i16_le(s_d_raw_buf, i * 2u + 1u);
-            int mic1_abs = d_es7210_abs_i16(mic1);
-            int mic2_abs = d_es7210_abs_i16(mic2);
-            if (mic1_abs > mic1_peak) {
-                mic1_peak = mic1_abs;
-            }
-            if (mic2_abs > mic2_peak) {
-                mic2_peak = mic2_abs;
-            }
 
 #if D_ES7210_CAPTURE_SELECT == D_ES7210_CAPTURE_MIC2
             pcm[total + i] = mic2;
@@ -295,16 +262,6 @@ int d_es7210_read_pcm(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 
         if ((uint32_t)read_bytes < read_len) {
             break;
-        }
-    }
-
-    if (total > 0u) {
-        s_d_channel_log_count++;
-        if ((s_d_channel_log_count % 50u) == 0u) {
-            D_LOGI(TAG, "ES7210 通道峰值, mic1=%d, mic2=%d, 输出通道=%d",
-                   mic1_peak,
-                   mic2_peak,
-                   D_ES7210_CAPTURE_SELECT);
         }
     }
 

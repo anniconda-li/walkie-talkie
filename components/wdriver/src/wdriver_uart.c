@@ -31,11 +31,6 @@ static const char *TAG = "wdriver_uart";
  */
 int wdriver_uart_init(void)
 {
-    if (s_uart_inited) {
-        WDRIVER_LOGI(TAG, "UART 已初始化");
-        return 0;
-    }
-
     uart_config_t uart_config = {
         .baud_rate = WDRIVER_UART_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
@@ -50,6 +45,13 @@ int wdriver_uart_init(void)
                                  WDRIVER_UART_RX_IO,
                                  WDRIVER_UART_RTS_IO,
                                  WDRIVER_UART_CTS_IO));
+
+    if (s_uart_inited) {
+        WDRIVER_LOGI(TAG, "UART 已初始化，已刷新参数和引脚, port=%d, baud=%d",
+                     WDRIVER_UART_PORT,
+                     WDRIVER_UART_BAUD_RATE);
+        return 0;
+    }
 
     uart_queue = osal_queue_create(10, sizeof(uint8_t));
     ESP_ERROR_CHECK(uart_driver_install(WDRIVER_UART_PORT, 1024, 1024, 10,

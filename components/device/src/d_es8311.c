@@ -40,9 +40,6 @@ static uint8_t s_es8311_inited = 0u;
 /** @brief 初始化时承接并保存的 WDRIVER 能力函数表。 */
 static d_es8311_wdriver_ops_t s_d_ops;
 
-/** @brief 播放日志节流计数器，避免高频 PCM 写入刷屏。 */
-static uint32_t s_d_play_log_count = 0u;
-
 /** @brief ES8311 单声道转双声道播放缓存。 */
 static int16_t s_d_stereo_buf[D_ES8311_MAX_FRAMES * 2u];
 
@@ -121,7 +118,7 @@ static int es8311_config_default(void)
 }
 
 /**
- * @brief 写入一段 ES8311 播放 PCM 数据并做日志节流。
+ * @brief 写入一段 ES8311 播放 PCM 数据。
  */
 static int es8311_play(const uint8_t *data,
                        uint32_t len,
@@ -134,14 +131,7 @@ static int es8311_play(const uint8_t *data,
     }
 
     int ret = s_d_ops.i2s_write(data, len, timeout_ms);
-    if (ret >= 0) {
-        s_d_play_log_count++;
-        if ((s_d_play_log_count % 100u) != 0u) {
-            return ret;
-        }
-        D_LOGI(TAG, "ES8311 播放写入完成, request=%u, written=%d",
-                 (unsigned int)len, ret);
-    } else {
+    if (ret < 0) {
         D_LOGE(TAG, "ES8311 播放写入失败, ret=%d", ret);
     }
 
@@ -224,7 +214,6 @@ int d_es8311_init(const d_es8311_wdriver_ops_t *ops)
     }
 
     s_d_ops = *ops;
-    s_d_play_log_count = 0u;
     int ret = es8311_config_default();
     if (ret != 0) {
         memset(&s_d_ops, 0, sizeof(s_d_ops));
@@ -243,7 +232,6 @@ int d_es8311_deinit(void)
         D_LOGI(TAG, "ES8311 驱动已释放");
     }
     s_es8311_inited = 0u;
-    s_d_play_log_count = 0u;
     memset(&s_d_ops, 0, sizeof(s_d_ops));
     return 0;
 }

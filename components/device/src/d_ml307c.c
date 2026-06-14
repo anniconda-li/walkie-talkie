@@ -36,6 +36,8 @@ static const char *TAG = "d_ml307c";
 #define ML307C_HTTP_ROUTE           "6[1]"        /**< HTTP 响应路由标识。 */
 #define D_ML307C_LOCK_TIMEOUT_MS    5000u         /**< ML307C 互斥锁默认等待时间。 */
 #define ML307C_TIMEOUT_SNIPPET_LEN  160u          /**< AT 超时日志中保留的响应摘要长度。 */
+#define ML307C_ALIVE_ATTEMPT_MS     2000u         /**< 单次 AT 存活检测等待时间。 */
+#define ML307C_ALIVE_RETRY_GAP_MS   300u          /**< AT 存活检测失败后的重试间隔。 */
 
 /**
  * @brief ML307C 内部依赖的底层能力函数表。
@@ -117,6 +119,7 @@ static int ml307c_http_post(struct ml307c_dev * dev,
 static int ml307c_tcp_close(struct ml307c_dev * dev);
 static int d_ml307c_lock(uint32_t timeout_ms);
 static void d_ml307c_unlock(void);
+static int ml307c_response_has_line(const char *resp, const char *line);
 
 /**
  * @brief 在字节缓存中查找指定文本片段。
@@ -222,6 +225,31 @@ static int ml307c_append_response(struct ml307c_dev * dev, const uint8_t *data, 
 }
 
 /**
+ * @brief 判断响应中是否存在独立一行目标文本。
+ */
+static int ml307c_response_has_line(const char *resp, const char *line)
+{
+    if (resp == NULL || line == NULL || line[0] == '\0') {
+        return 0;
+    }
+
+    size_t line_len = strlen(line);
+    const char *p = resp;
+    while ((p = strstr(p, line)) != NULL) {
+        char before = (p == resp) ? '\n' : p[-1];
+        char after = p[line_len];
+        int before_ok = (before == '\r' || before == '\n');
+        int after_ok = (after == '\0' || after == '\r' || after == '\n');
+        if (before_ok && after_ok) {
+            return 1;
+        }
+        p += line_len;
+    }
+
+    return 0;
+}
+
+/**
  * @brief 等待 AT 命令响应并捕获完整响应文本。
  */
 static int ml307c_wait_response(struct ml307c_dev * dev,
@@ -248,13 +276,14 @@ static int ml307c_wait_response(struct ml307c_dev * dev,
             if (expect != NULL && expect[0] != '\0' && strstr(resp, expect) != NULL) {
                 expect_found = 1;
             }
-            if (strstr(resp, ML307C_CME_ERROR) != NULL || strstr(resp, ML307C_ERROR) != NULL) {
+            if (strstr(resp, ML307C_CME_ERROR) != NULL ||
+                ml307c_response_has_line(resp, ML307C_ERROR)) {
                 if (out != NULL && out_size > 0u) {
                     snprintf(out, out_size, "%s", resp);
                 }
                 return -2;
             }
-            if (expect_found && strstr(resp, ML307C_OK) != NULL) {
+            if (expect_found && ml307c_response_has_line(resp, ML307C_OK)) {
                 if (out != NULL && out_size > 0u) {
                     snprintf(out, out_size, "%s", resp);
                 }
@@ -661,9 +690,23 @@ static int ml307c_check_alive(struct ml307c_dev * dev)
         return -1;
     }
 
-    int ret = ml307c_send_cmd(dev, "AT" ML307C_CRLF, ML307C_OK, ml307c_get_timeout(dev));
-    if (ret == 0) {
-        dev->is_ready = 1u;
+    uint32_t start = dev->itf.get_tick();
+    uint32_t timeout_ms = ml307c_get_timeout(dev);
+    uint32_t attempt_ms = timeout_ms < ML307C_ALIVE_ATTEMPT_MS ? timeout_ms : ML307C_ALIVE_ATTEMPT_MS;
+    int ret = -3;
+
+    do {
+        ret = ml307c_send_cmd(dev, "AT" ML307C_CRLF, ML307C_OK, attempt_ms);
+        if (ret == 0) {
+            dev->is_ready = 1u;
+            return 0;
+        }
+
+        dev->itf.delay_ms(ML307C_ALIVE_RETRY_GAP_MS);
+    } while ((dev->itf.get_tick() - start) < timeout_ms);
+
+    if (ret != 0) {
+        dev->is_ready = 0u;
     }
 
     return ret;

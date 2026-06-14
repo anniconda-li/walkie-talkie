@@ -495,7 +495,7 @@ int app_business_start(void)
 
     ret = app_network_start();
     if (ret != 0) {
-        APP_LOGE(TAG, "网络启动失败，WiFi 和 4G 均不可用, ret=%d", ret);
+        APP_LOGE(TAG, "开机 WLAN 网络启动失败, ret=%d", ret);
         return ret;
     }
 
