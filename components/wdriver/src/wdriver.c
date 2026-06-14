@@ -29,13 +29,11 @@ int wdriver_init(void)
         return ret;
     }
 
-#if WDRIVER_INIT_ENABLE_UART
     ret = wdriver_uart_init();
     if (ret != 0) {
         WDRIVER_LOGE(TAG, "WDRIVER 初始化失败: UART 初始化失败, ret=%d", ret);
         return ret;
     }
-#endif
 
     ret = wdriver_i2s_init();
     if (ret != 0) {

@@ -10,4 +10,5 @@ idf_component_register(
         device
         osal
         service
+        app
 )

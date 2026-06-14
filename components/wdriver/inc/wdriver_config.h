@@ -39,11 +39,6 @@
 #define WDRIVER_LOGE(tag, fmt, ...) do { (void)(tag); } while (0)
 #endif /* WDRIVER_CONFIG_H */
 
-/** @brief 是否初始化外部 UART。WiFi 网络方案不需要 ML307C UART。 */
-#ifndef WDRIVER_INIT_ENABLE_UART
-#define WDRIVER_INIT_ENABLE_UART 0
-#endif
-
 /**
  * @brief ES7210/ES8311 共用音频 I2S 引脚定义。
  */

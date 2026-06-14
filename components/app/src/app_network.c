@@ -304,25 +304,116 @@ int app_network_get_wifi_ssid(char *ssid, size_t size)
     return 0;
 }
 
-static void app_network_task(void *arg)
+static int app_network_prepare_wifi_backend(void)
 {
-    (void)arg;
-
     int wifi_ret = d_wifi_prepare();
     if (wifi_ret != 0) {
         APP_LOGW(TAG, "WiFi 资源准备失败, ret=%d", wifi_ret);
-    } else {
-        (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+        return wifi_ret;
+    }
+
+    APP_LOGI(TAG, "WiFi 后端准备成功");
+    return 0;
+}
+
+static int app_network_prepare_4g_backend(void)
+{
+    int ret = wdriver_uart_init();
+    if (ret != 0) {
+        APP_LOGW(TAG, "4G UART 初始化失败, ret=%d", ret);
+        return ret;
     }
 
     d_ml307c_wdriver_ops_t ops = app_network_ml307c_ops();
     ml307c_config_t cfg = app_network_ml307c_cfg();
-    int ml_ret = d_ml307c_prepare(&ops, &cfg);
-    if (ml_ret != 0) {
-        APP_LOGW(TAG, "4G 资源准备失败, ret=%d", ml_ret);
+    ret = d_ml307c_prepare(&ops, &cfg);
+    if (ret != 0) {
+        APP_LOGW(TAG, "4G 资源准备失败, ret=%d", ret);
+        return ret;
     }
 
+    APP_LOGI(TAG, "4G 后端准备成功");
+    return 0;
+}
+
+static int app_network_select_boot_backend(int wifi_ready, int g4_ready)
+{
     app_network_mode_t saved_mode = app_network_load_mode();
+    service_network_backend_t first_backend;
+    service_network_backend_t fallback_backend;
+    app_network_mode_t first_mode;
+    app_network_mode_t fallback_mode;
+    int has_fallback = 0;
+
+    if (saved_mode == APP_NETWORK_MODE_4G && g4_ready) {
+        first_backend = SERVICE_NETWORK_BACKEND_4G;
+        first_mode = APP_NETWORK_MODE_4G;
+        if (wifi_ready) {
+            fallback_backend = SERVICE_NETWORK_BACKEND_WIFI;
+            fallback_mode = APP_NETWORK_MODE_WIFI;
+            has_fallback = 1;
+        }
+    } else if (wifi_ready) {
+        first_backend = SERVICE_NETWORK_BACKEND_WIFI;
+        first_mode = APP_NETWORK_MODE_WIFI;
+        if (g4_ready) {
+            fallback_backend = SERVICE_NETWORK_BACKEND_4G;
+            fallback_mode = APP_NETWORK_MODE_4G;
+            has_fallback = 1;
+        }
+    } else if (g4_ready) {
+        first_backend = SERVICE_NETWORK_BACKEND_4G;
+        first_mode = APP_NETWORK_MODE_4G;
+    } else {
+        return -1;
+    }
+
+    int ret = service_init_network_for(first_backend);
+    if (ret == 0) {
+        app_network_set_mode(first_mode);
+        return 0;
+    }
+
+    APP_LOGW(TAG, "首选网络服务装配失败, backend=%d, ret=%d", (int)first_backend, ret);
+    if (has_fallback) {
+        int fallback_ret = service_init_network_for(fallback_backend);
+        if (fallback_ret == 0) {
+            app_network_set_mode(fallback_mode);
+            APP_LOGW(TAG, "已回退到备用网络服务, backend=%d", (int)fallback_backend);
+            return 0;
+        }
+        APP_LOGW(TAG, "备用网络服务装配失败, backend=%d, ret=%d", (int)fallback_backend, fallback_ret);
+        return fallback_ret;
+    }
+
+    return ret;
+}
+
+static int app_network_prepare_boot_backends(void)
+{
+    int wifi_ret = app_network_prepare_wifi_backend();
+    int g4_ret = app_network_prepare_4g_backend();
+
+    if (wifi_ret != 0 && g4_ret != 0) {
+        APP_LOGE(TAG, "WiFi 和 4G 均初始化失败, wifi_ret=%d, g4_ret=%d", wifi_ret, g4_ret);
+        return -2;
+    }
+
+    return app_network_select_boot_backend(wifi_ret == 0, g4_ret == 0);
+}
+
+static void app_network_task(void *arg)
+{
+    (void)arg;
+
+    app_network_mode_t saved_mode = app_network_load_mode();
+
+    if (saved_mode == APP_NETWORK_MODE_NONE) {
+        while (1) {
+            osal_delay_ms(60000u);
+        }
+    }
+
     if (saved_mode == APP_NETWORK_MODE_WIFI) {
         char ssid[33];
         char password[65];
@@ -332,8 +423,14 @@ static void app_network_task(void *arg)
         }
     } else if (saved_mode == APP_NETWORK_MODE_4G) {
         app_network_4g_status_t status;
-        if (app_network_select_4g(&status) != 0) {
+        int ret = app_network_select_4g(&status);
+        if (ret != 0) {
             APP_LOGW(TAG, "开机自动选择 4G 失败, status=%d", (int)status);
+            if (d_wifi_is_initialized() == 1) {
+                (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+                app_network_set_mode(APP_NETWORK_MODE_WIFI);
+                APP_LOGW(TAG, "4G 不可用，已回退到 WLAN 网络服务");
+            }
         }
     }
 
@@ -355,12 +452,17 @@ int app_network_start(void)
         }
     }
 
-    int ret = osal_task_create("app_network",
-                               app_network_task,
-                               NULL,
-                               6144u,
-                               4u,
-                               NULL);
+    int ret = app_network_prepare_boot_backends();
+    if (ret != 0) {
+        return ret;
+    }
+
+    ret = osal_task_create("app_network",
+                           app_network_task,
+                           NULL,
+                           6144u,
+                           4u,
+                           NULL);
     if (ret != 0) {
         return ret;
     }
