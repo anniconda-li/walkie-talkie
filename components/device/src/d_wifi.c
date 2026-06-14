@@ -267,9 +267,14 @@ int d_wifi_init(const d_wifi_config_t *cfg)
 }
 
 /**
- * @brief 关闭 WiFi 网络层持有的 socket。
+ * @brief 断开 WiFi 并关闭网络层持有的 socket。
  */
 int d_wifi_deinit(void)
+{
+    return d_wifi_disconnect();
+}
+
+int d_wifi_disconnect(void)
 {
     if (s_udp_sock >= 0) {
         close(s_udp_sock);
@@ -278,6 +283,11 @@ int d_wifi_deinit(void)
     if (s_tcp_sock >= 0) {
         close(s_tcp_sock);
         s_tcp_sock = -1;
+    }
+    s_udp_peer_len = 0;
+    s_wifi_got_ip = 0;
+    if (s_wifi_started) {
+        (void)esp_wifi_disconnect();
     }
     return 0;
 }

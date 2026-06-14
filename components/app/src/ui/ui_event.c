@@ -656,9 +656,15 @@ static void settings_refresh_network_selected(ui_settings_view_t *view)
         return;
     }
 
-    settings_set_network_selected(view, view->selected_network == UI_SETTINGS_NETWORK_NONE
-                                             ? UI_SETTINGS_NETWORK_WLAN
-                                             : view->selected_network);
+    if(g_callbacks.settings_network_mode_get != NULL) {
+        settings_set_network_selected(view, g_callbacks.settings_network_mode_get());
+        return;
+    }
+
+    settings_set_network_selected(view,
+                                  view->selected_network == UI_SETTINGS_NETWORK_NONE
+                                      ? UI_SETTINGS_NETWORK_WLAN
+                                      : view->selected_network);
 }
 
 static void settings_wlan_back_event_cb(lv_event_t *e)
@@ -882,6 +888,9 @@ static void settings_4g_event_cb(lv_event_t *e)
        g_callbacks.settings_4g_select_requested == NULL) {
         return;
     }
+    if(view->selected_network == UI_SETTINGS_NETWORK_4G) {
+        return;
+    }
 
     g_callbacks.settings_4g_select_requested();
 }
@@ -896,10 +905,20 @@ static void settings_wlan_select_event_cb(lv_event_t *e)
     }
 
     if(code == LV_EVENT_CLICKED) {
-        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
-        settings_refresh_wlan_ssid(view);
+        if(view->selected_network == UI_SETTINGS_NETWORK_WLAN) {
+            return;
+        }
+        if(view->network_status_label != NULL) {
+            lv_obj_remove_flag(view->network_status_label, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(view->network_status_label, "正在切换WLAN...");
+        }
+        if(g_callbacks.settings_wifi_select_requested != NULL) {
+            g_callbacks.settings_wifi_select_requested();
+        } else {
+            lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
+            settings_wifi_scan(view);
+        }
     } else if(code == LV_EVENT_LONG_PRESSED) {
-        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
         lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
         settings_wifi_scan(view);
     }
@@ -1085,8 +1104,7 @@ void ui_event_register_settings(ui_settings_view_t *view)
     if(view->cancel_button != NULL) {
         lv_obj_add_event_cb(view->cancel_button, settings_wifi_cancel_event_cb, LV_EVENT_CLICKED, view);
     }
-    view->selected_network = UI_SETTINGS_NETWORK_WLAN;
-    settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
+    settings_refresh_network_selected(view);
     settings_refresh_wlan_ssid(view);
 }
 
@@ -1168,6 +1186,10 @@ void ui_event_settings_show_wifi_connect_result(int ret)
     if(view->wlan_status_label != NULL) {
         lv_label_set_text(view->wlan_status_label, "连接失败");
     }
+    if(view->network_status_label != NULL) {
+        lv_label_set_text(view->network_status_label, "WLAN连接失败");
+    }
+    settings_refresh_network_selected(view);
 }
 
 void ui_event_settings_show_4g_select_result(ui_settings_4g_status_t status, int ret)
@@ -1183,6 +1205,7 @@ void ui_event_settings_show_4g_select_result(ui_settings_4g_status_t status, int
     if(ret == 0) {
         settings_set_network_selected(view, UI_SETTINGS_NETWORK_4G);
     } else {
-        settings_set_network_selected(view, UI_SETTINGS_NETWORK_WLAN);
+        settings_refresh_network_selected(view);
     }
+    settings_refresh_wlan_ssid(view);
 }

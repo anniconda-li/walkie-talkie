@@ -13,6 +13,7 @@
 #include "osal_mutex.h"
 #include "osal_task.h"
 #include "service_init.h"
+#include "service_network.h"
 #include "wdriver_uart.h"
 
 #include <string.h>
@@ -28,6 +29,7 @@ static const char *TAG = "app_network";
 #define APP_NETWORK_4G_SOCKET_ID       1u
 
 static volatile int s_started = 0;
+static volatile int s_switching = 0;
 static app_network_mode_t s_mode = APP_NETWORK_MODE_NONE;
 static osal_mutex_t s_lock = NULL;
 
@@ -43,6 +45,28 @@ static void app_network_unlock(void)
 {
     if (s_lock != NULL) {
         osal_mutex_unlock(s_lock);
+    }
+}
+
+static int app_network_begin_switch(void)
+{
+    if (app_network_lock() != 0) {
+        return -1;
+    }
+    if (s_switching) {
+        app_network_unlock();
+        return -2;
+    }
+    s_switching = 1;
+    app_network_unlock();
+    return 0;
+}
+
+static void app_network_end_switch(void)
+{
+    if (app_network_lock() == 0) {
+        s_switching = 0;
+        app_network_unlock();
     }
 }
 
@@ -72,6 +96,16 @@ static void app_network_set_mode(app_network_mode_t mode)
         s_mode = mode;
         app_network_unlock();
     }
+}
+
+static void app_network_enter_user_mode(app_network_mode_t mode)
+{
+    (void)service_network_deinit();
+    if (mode == APP_NETWORK_MODE_4G) {
+        (void)d_wifi_disconnect();
+    }
+    app_network_set_mode(mode);
+    app_intercom_network_changed();
 }
 
 static int app_network_nvs_open(nvs_handle_t *handle, nvs_open_mode_t mode)
@@ -202,26 +236,56 @@ int app_network_scan_wifi(app_network_wifi_ap_t *items, size_t max, size_t *coun
 
 int app_network_connect_wifi(const char *ssid, const char *password)
 {
+    int ret;
+
     if (password == NULL || strlen(password) < 8u) {
         return -1;
     }
 
-    int ret = d_wifi_connect(ssid, password, APP_NETWORK_WIFI_CONNECT_MS);
+    ret = app_network_begin_switch();
+    if (ret != 0) {
+        return ret;
+    }
+
+    app_network_enter_user_mode(APP_NETWORK_MODE_WIFI);
+
+    ret = d_wifi_connect(ssid, password, APP_NETWORK_WIFI_CONNECT_MS);
     if (ret != 0) {
         APP_LOGW(TAG, "WiFi 连接失败, ssid=%s, ret=%d", ssid != NULL ? ssid : "", ret);
+        (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+        app_network_end_switch();
         return ret;
     }
 
     ret = service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
     if (ret != 0) {
+        app_network_end_switch();
         return ret;
     }
 
     app_network_save_wifi(ssid, password);
-    app_network_set_mode(APP_NETWORK_MODE_WIFI);
     app_intercom_network_changed();
     APP_LOGI(TAG, "已切换到 WLAN");
+    app_network_end_switch();
     return 0;
+}
+
+int app_network_select_saved_wifi(void)
+{
+    char ssid[33];
+    char password[65];
+
+    if (app_network_load_wifi(ssid, sizeof(ssid), password, sizeof(password)) != 0) {
+        APP_LOGW(TAG, "未找到已保存 WLAN 配置");
+        if (app_network_begin_switch() == 0) {
+            app_network_enter_user_mode(APP_NETWORK_MODE_WIFI);
+            (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+            app_network_end_switch();
+        }
+        return -1;
+    }
+
+    return app_network_connect_wifi(ssid, password);
 }
 
 int app_network_select_4g(app_network_4g_status_t *status)
@@ -230,11 +294,22 @@ int app_network_select_4g(app_network_4g_status_t *status)
     ml307c_config_t cfg = app_network_ml307c_cfg();
     d_ml307c_status_t ml_status = {0};
 
-    int ret = wdriver_uart_init();
+    int ret = app_network_begin_switch();
+    if (ret != 0) {
+        if (status != NULL) {
+            *status = APP_NETWORK_4G_UNAVAILABLE;
+        }
+        return ret;
+    }
+
+    app_network_enter_user_mode(APP_NETWORK_MODE_4G);
+
+    ret = wdriver_uart_init();
     if (ret != 0) {
         if (status != NULL) {
             *status = APP_NETWORK_4G_NO_AT;
         }
+        app_network_end_switch();
         return ret;
     }
 
@@ -243,6 +318,7 @@ int app_network_select_4g(app_network_4g_status_t *status)
         if (status != NULL) {
             *status = APP_NETWORK_4G_NO_AT;
         }
+        app_network_end_switch();
         return ret;
     }
 
@@ -253,18 +329,20 @@ int app_network_select_4g(app_network_4g_status_t *status)
         *status = mapped;
     }
     if (mapped != APP_NETWORK_4G_OK) {
+        app_network_end_switch();
         return -2;
     }
 
     ret = service_init_network_for(SERVICE_NETWORK_BACKEND_4G);
     if (ret != 0) {
+        app_network_end_switch();
         return ret;
     }
 
     app_network_save_4g();
-    app_network_set_mode(APP_NETWORK_MODE_4G);
     app_intercom_network_changed();
     APP_LOGI(TAG, "已切换到 4G");
+    app_network_end_switch();
     return 0;
 }
 
@@ -272,11 +350,17 @@ int app_network_recover(void)
 {
     app_network_mode_t mode = app_network_get_mode();
 
-    if (mode == APP_NETWORK_MODE_4G) {
-        app_network_4g_status_t status;
-        return app_network_select_4g(&status);
+    if (s_switching) {
+        return -1;
     }
-    if (mode == APP_NETWORK_MODE_WIFI || d_wifi_is_initialized() == 1) {
+
+    if (mode == APP_NETWORK_MODE_4G) {
+        if (d_ml307c_is_initialized() != 1) {
+            return -1;
+        }
+        return service_init_network_for(SERVICE_NETWORK_BACKEND_4G);
+    }
+    if (mode == APP_NETWORK_MODE_WIFI) {
         return service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
     }
 
@@ -324,6 +408,26 @@ static int app_network_prepare_wifi_backend(void)
     return 0;
 }
 
+static void app_network_prepare_4g_backend(void)
+{
+    d_ml307c_wdriver_ops_t ops = app_network_ml307c_ops();
+    ml307c_config_t cfg = app_network_ml307c_cfg();
+
+    int ret = wdriver_uart_init();
+    if (ret != 0) {
+        APP_LOGW(TAG, "4G UART 预初始化失败, ret=%d", ret);
+        return;
+    }
+
+    ret = d_ml307c_prepare(&ops, &cfg);
+    if (ret != 0) {
+        APP_LOGW(TAG, "4G 后端预准备失败, ret=%d", ret);
+        return;
+    }
+
+    APP_LOGI(TAG, "4G 后端预准备成功");
+}
+
 static int app_network_prepare_boot_backend(void)
 {
     int wifi_ret = app_network_prepare_wifi_backend();
@@ -347,6 +451,15 @@ static void app_network_task(void *arg)
     (void)arg;
 
     app_network_mode_t saved_mode = app_network_load_mode();
+
+    app_network_prepare_4g_backend();
+
+    if (saved_mode == APP_NETWORK_MODE_4G) {
+        app_network_4g_status_t status;
+        if (app_network_select_4g(&status) != 0) {
+            APP_LOGW(TAG, "开机自动切换 4G 失败, status=%d", (int)status);
+        }
+    }
 
     if (saved_mode == APP_NETWORK_MODE_NONE || saved_mode == APP_NETWORK_MODE_4G) {
         while (1) {

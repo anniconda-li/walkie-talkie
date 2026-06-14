@@ -74,6 +74,7 @@ static int s_audio_session_busy = 0;
 static volatile int s_wifi_scan_busy = 0;
 static volatile int s_wifi_connect_busy = 0;
 static volatile int s_4g_select_busy = 0;
+static volatile int s_network_switch_busy = 0;
 
 typedef struct {
     char ssid[33];
@@ -361,12 +362,13 @@ static void app_business_wifi_connect_task(void *arg)
 
     (void)app_ui_settings_show_wifi_connect_result(ret);
     s_wifi_connect_busy = 0;
+    s_network_switch_busy = 0;
     osal_task_delete_current();
 }
 
 static void app_business_on_wifi_connect(const char *ssid, const char *password)
 {
-    if (ssid == NULL || ssid[0] == '\0' || s_wifi_connect_busy) {
+    if (ssid == NULL || ssid[0] == '\0' || s_wifi_connect_busy || s_network_switch_busy) {
         return;
     }
     if (password == NULL || strlen(password) < 8u) {
@@ -384,6 +386,7 @@ static void app_business_on_wifi_connect(const char *ssid, const char *password)
     strncpy(req->password, password != NULL ? password : "", sizeof(req->password) - 1u);
 
     s_wifi_connect_busy = 1;
+    s_network_switch_busy = 1;
     if (osal_task_create("wifi_conn",
                          app_business_wifi_connect_task,
                          req,
@@ -391,7 +394,42 @@ static void app_business_on_wifi_connect(const char *ssid, const char *password)
                          4u,
                          NULL) != 0) {
         s_wifi_connect_busy = 0;
+        s_network_switch_busy = 0;
         free(req);
+        (void)app_ui_settings_show_wifi_connect_result(-1);
+    }
+}
+
+static void app_business_wifi_select_task(void *arg)
+{
+    (void)arg;
+
+    int ret = app_network_select_saved_wifi();
+    (void)app_ui_settings_show_wifi_connect_result(ret);
+    s_wifi_connect_busy = 0;
+    s_network_switch_busy = 0;
+    osal_task_delete_current();
+}
+
+static void app_business_on_wifi_select(void)
+{
+    if (app_network_get_mode() == APP_NETWORK_MODE_WIFI) {
+        return;
+    }
+    if (s_wifi_connect_busy || s_network_switch_busy) {
+        return;
+    }
+
+    s_wifi_connect_busy = 1;
+    s_network_switch_busy = 1;
+    if (osal_task_create("wifi_sel",
+                         app_business_wifi_select_task,
+                         NULL,
+                         6144u,
+                         4u,
+                         NULL) != 0) {
+        s_wifi_connect_busy = 0;
+        s_network_switch_busy = 0;
         (void)app_ui_settings_show_wifi_connect_result(-1);
     }
 }
@@ -404,16 +442,21 @@ static void app_business_4g_select_task(void *arg)
     int ret = app_network_select_4g(&app_status);
     (void)app_ui_settings_show_4g_select_result(app_business_map_4g_status(app_status), ret);
     s_4g_select_busy = 0;
+    s_network_switch_busy = 0;
     osal_task_delete_current();
 }
 
 static void app_business_on_4g_select(void)
 {
-    if (s_4g_select_busy) {
+    if (app_network_get_mode() == APP_NETWORK_MODE_4G) {
+        return;
+    }
+    if (s_4g_select_busy || s_network_switch_busy) {
         return;
     }
 
     s_4g_select_busy = 1;
+    s_network_switch_busy = 1;
     if (osal_task_create("net_4g_sel",
                          app_business_4g_select_task,
                          NULL,
@@ -421,6 +464,7 @@ static void app_business_on_4g_select(void)
                          4u,
                          NULL) != 0) {
         s_4g_select_busy = 0;
+        s_network_switch_busy = 0;
         (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
     }
 }
@@ -449,6 +493,7 @@ static void app_business_register_ui_callbacks(void)
         .ai_cancel_requested = app_business_on_ai_cancel_requested,
         .settings_volume_changed = app_business_on_volume_changed,
         .settings_network_mode_get = app_business_get_network_mode,
+        .settings_wifi_select_requested = app_business_on_wifi_select,
         .settings_wifi_scan_requested = app_business_on_wifi_scan,
         .settings_wifi_connect_requested = app_business_on_wifi_connect,
         .settings_4g_select_requested = app_business_on_4g_select,

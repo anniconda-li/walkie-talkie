@@ -82,6 +82,15 @@ int service_network_init(const service_network_ops_t *ops)
         return s_network_ops_ready != 0u ? 0 : -1;
     }
 
+    if (s_network_io_mutex == NULL) {
+        s_network_io_mutex = osal_mutex_create();
+        if (s_network_io_mutex == NULL) {
+            SERVICE_LOGE(TAG, "网络服务初始化失败: I/O 互斥锁创建失败");
+            s_network_ops_ready = 0u;
+            return -4;
+        }
+    }
+
     if (service_network_ops_is_valid(ops) != 0) {
         SERVICE_LOGE(TAG, "网络服务初始化失败: ops 无效");
         s_network_ops_ready = 0u;
@@ -94,50 +103,58 @@ int service_network_init(const service_network_ops_t *ops)
         return -3;
     }
 
-    if (s_network_io_mutex == NULL) {
-        s_network_io_mutex = osal_mutex_create();
-        if (s_network_io_mutex == NULL) {
-            SERVICE_LOGE(TAG, "网络服务初始化失败: I/O 互斥锁创建失败");
-            s_network_ops_ready = 0u;
-            return -4;
-        }
+    if (service_network_lock_io() != 0) {
+        return -5;
     }
-
     s_network_ops = *ops;
     s_network_ops_ready = 1u;
+    service_network_unlock_io();
     return 0;
 }
 
 int service_network_deinit(void)
 {
-    /* 清空函数表后，所有公开 API 都会先被 s_network_ops_ready 拦住。 */
+    if (s_network_io_mutex != NULL && service_network_lock_io() != 0) {
+        return -1;
+    }
+
+    /* 清空函数表后，所有公开 API 都会被 s_network_ops_ready 拦住。 */
     s_network_ops = (service_network_ops_t){0};
     s_network_ops_ready = 0u;
     if (s_network_io_mutex != NULL) {
-        osal_mutex_delete(s_network_io_mutex);
-        s_network_io_mutex = NULL;
+        service_network_unlock_io();
     }
     return 0;
 }
 
 int service_network_get_status(service_network_status_t *status)
 {
-    /* service 层不解释具体状态来源，只转发给已绑定的 driver 适配函数。 */
-    if (s_network_ops_ready == 0u) {
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.get_status == NULL) {
+        service_network_unlock_io();
         return -1;
     }
 
-    return s_network_ops.get_status(status);
+    int ret = s_network_ops.get_status(status);
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_is_ready(void)
 {
-    /* ready 判断由 driver 定义，WiFi 表示 got IP，ML307C 表示数据链路可用。 */
-    if (s_network_ops_ready == 0u) {
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.is_ready == NULL) {
+        service_network_unlock_io();
         return -1;
     }
 
-    return s_network_ops.is_ready();
+    int ret = s_network_ops.is_ready();
+    service_network_unlock_io();
+    return ret;
 }
 
 int service_network_tcp_connect(const char *host, int port)
@@ -149,6 +166,10 @@ int service_network_tcp_connect(const char *host, int port)
 
     if (service_network_lock_io() != 0) {
         return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.tcp_connect == NULL) {
+        service_network_unlock_io();
+        return -1;
     }
     int ret = s_network_ops.tcp_connect(host, port);
     service_network_unlock_io();
@@ -164,6 +185,10 @@ int service_network_tcp_send(const uint8_t *data, int len)
     if (service_network_lock_io() != 0) {
         return -2;
     }
+    if (s_network_ops_ready == 0u || s_network_ops.tcp_send == NULL) {
+        service_network_unlock_io();
+        return -1;
+    }
     int ret = s_network_ops.tcp_send(data, len);
     service_network_unlock_io();
     return ret;
@@ -177,6 +202,10 @@ int service_network_tcp_close(void)
 
     if (service_network_lock_io() != 0) {
         return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.tcp_close == NULL) {
+        service_network_unlock_io();
+        return -1;
     }
     int ret = s_network_ops.tcp_close();
     service_network_unlock_io();
@@ -193,6 +222,10 @@ int service_network_udp_connect(const char *host, int port)
     if (service_network_lock_io() != 0) {
         return -2;
     }
+    if (s_network_ops_ready == 0u || s_network_ops.udp_connect == NULL) {
+        service_network_unlock_io();
+        return -1;
+    }
     int ret = s_network_ops.udp_connect(host, port);
     service_network_unlock_io();
     return ret;
@@ -206,6 +239,10 @@ int service_network_udp_send(const uint8_t *data, int len)
 
     if (service_network_lock_io() != 0) {
         return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.udp_send == NULL) {
+        service_network_unlock_io();
+        return -1;
     }
     int ret = s_network_ops.udp_send(data, len);
     service_network_unlock_io();
@@ -221,6 +258,10 @@ int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_m
 
     if (service_network_lock_io() != 0) {
         return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.read_downlink == NULL) {
+        service_network_unlock_io();
+        return -1;
     }
     int ret = s_network_ops.read_downlink(buf, len, timeout_ms);
     service_network_unlock_io();
@@ -242,6 +283,10 @@ int service_network_http_post(const char *url,
 
     if (service_network_lock_io() != 0) {
         return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.http_post == NULL) {
+        service_network_unlock_io();
+        return -1;
     }
     int ret = s_network_ops.http_post(url,
                                       content_type,

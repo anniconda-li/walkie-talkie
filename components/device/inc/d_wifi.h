@@ -80,6 +80,13 @@ int d_wifi_init(const d_wifi_config_t *cfg);
 int d_wifi_deinit(void);
 
 /**
+ * @brief 断开当前 WiFi STA 连接并关闭网络 socket。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_wifi_disconnect(void);
+
+/**
  * @brief 判断 WiFi STA 是否已经启动。
  *
  * @return 已启动返回 1；否则返回 0。

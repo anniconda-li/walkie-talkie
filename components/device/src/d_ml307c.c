@@ -21,6 +21,7 @@ static const char *TAG = "d_ml307c";
 #define ML307C_CME_ERROR            "+CME ERROR:" /**< AT CME 错误响应前缀。 */
 #define ML307C_DEFAULT_TIMEOUT_MS   3000u         /**< AT 命令默认超时时间。 */
 #define ML307C_RX_BUFFER_SIZE       2048u         /**< AT 响应接收缓存大小。 */
+#define ML307C_DOWNLINK_BUFFER_SIZE 4096u         /**< AT 等待期间暂存的 DTU 下行数据。 */
 #define ML307C_LINE_MAX_LEN         256u          /**< 单条 AT 响应日志/解析缓存长度。 */
 #define ML307C_DEFAULT_SOCKET_ID    1u            /**< 默认 DTU socket 通道号。 */
 #define ML307C_SOCKET_MAX_ID        4u            /**< ML307C 支持的最大 socket 通道号。 */
@@ -38,6 +39,7 @@ static const char *TAG = "d_ml307c";
 #define ML307C_TIMEOUT_SNIPPET_LEN  160u          /**< AT 超时日志中保留的响应摘要长度。 */
 #define ML307C_ALIVE_ATTEMPT_MS     2000u         /**< 单次 AT 存活检测等待时间。 */
 #define ML307C_ALIVE_RETRY_GAP_MS   300u          /**< AT 存活检测失败后的重试间隔。 */
+#define ML307C_STATUS_CACHE_MS      15000u        /**< 状态查询缓存时间，降低 UI 轮询 AT 频率。 */
 
 /**
  * @brief ML307C 内部依赖的底层能力函数表。
@@ -76,6 +78,12 @@ static struct ml307c_dev s_ml307c_dev;
 /** @brief 单例 ML307C AT 响应接收缓存。 */
 static uint8_t s_ml307c_rx_buf[ML307C_RX_BUFFER_SIZE];
 
+/** @brief AT 命令等待期间抢读到的 DTU 下行数据。 */
+static uint8_t s_ml307c_downlink_buf[ML307C_DOWNLINK_BUFFER_SIZE];
+
+/** @brief 暂存下行数据长度。 */
+static uint16_t s_ml307c_downlink_len = 0u;
+
 /** @brief 当前已初始化的 ML307C 设备指针。 */
 static struct ml307c_dev *s_ml307c = NULL;
 
@@ -87,6 +95,15 @@ static uint8_t s_ml307c_tcp_connected = 0u;
 
 /** @brief UDP 通道是否已由本层标记为连接。 */
 static uint8_t s_ml307c_udp_connected = 0u;
+
+/** @brief 最近一次主动 AT 查询得到的网络状态。DTU 数据期避免继续打 AT。 */
+static d_ml307c_status_t s_ml307c_cached_status;
+
+/** @brief 缓存状态是否有效。 */
+static uint8_t s_ml307c_cached_status_valid = 0u;
+
+/** @brief 最近一次状态缓存时间。 */
+static uint32_t s_ml307c_cached_status_tick = 0u;
 
 static void ml307c_log_response(const char *title, const char *resp);
 static void ml307c_log_timeout_summary(const char *cmd,
@@ -120,6 +137,10 @@ static int ml307c_tcp_close(struct ml307c_dev * dev);
 static int d_ml307c_lock(uint32_t timeout_ms);
 static void d_ml307c_unlock(void);
 static int ml307c_response_has_line(const char *resp, const char *line);
+static void ml307c_stash_downlink(const uint8_t *data, uint16_t len);
+static int ml307c_pop_downlink(uint8_t *buf, uint16_t len);
+static void d_ml307c_cache_status(const d_ml307c_status_t *status);
+static void d_ml307c_fill_ready_status(d_ml307c_status_t *status);
 
 /**
  * @brief 在字节缓存中查找指定文本片段。
@@ -178,6 +199,51 @@ static void ml307c_clear_buffer(struct ml307c_dev * dev)
     dev->rx_rb.tail = 0;
 }
 
+static void ml307c_stash_downlink(const uint8_t *data, uint16_t len)
+{
+    if (data == NULL || len == 0u) {
+        return;
+    }
+
+    if (len > sizeof(s_ml307c_downlink_buf)) {
+        data = &data[len - sizeof(s_ml307c_downlink_buf)];
+        len = sizeof(s_ml307c_downlink_buf);
+    }
+
+    uint16_t free_len = (uint16_t)(sizeof(s_ml307c_downlink_buf) - s_ml307c_downlink_len);
+    if (len > free_len) {
+        uint16_t drop_len = (uint16_t)(len - free_len);
+        if (drop_len >= s_ml307c_downlink_len) {
+            s_ml307c_downlink_len = 0u;
+        } else {
+            memmove(s_ml307c_downlink_buf,
+                    &s_ml307c_downlink_buf[drop_len],
+                    (size_t)(s_ml307c_downlink_len - drop_len));
+            s_ml307c_downlink_len = (uint16_t)(s_ml307c_downlink_len - drop_len);
+        }
+    }
+
+    memcpy(&s_ml307c_downlink_buf[s_ml307c_downlink_len], data, len);
+    s_ml307c_downlink_len = (uint16_t)(s_ml307c_downlink_len + len);
+}
+
+static int ml307c_pop_downlink(uint8_t *buf, uint16_t len)
+{
+    if (buf == NULL || len == 0u || s_ml307c_downlink_len == 0u) {
+        return 0;
+    }
+
+    uint16_t copy_len = s_ml307c_downlink_len < len ? s_ml307c_downlink_len : len;
+    memcpy(buf, s_ml307c_downlink_buf, copy_len);
+    if (copy_len < s_ml307c_downlink_len) {
+        memmove(s_ml307c_downlink_buf,
+                &s_ml307c_downlink_buf[copy_len],
+                (size_t)(s_ml307c_downlink_len - copy_len));
+    }
+    s_ml307c_downlink_len = (uint16_t)(s_ml307c_downlink_len - copy_len);
+    return (int)copy_len;
+}
+
 /**
  * @brief 读取并丢弃串口中残留的主动上报数据。
  */
@@ -192,6 +258,11 @@ static void ml307c_drain_uart(struct ml307c_dev * dev)
         int rlen = dev->itf.uart_read(tmp, sizeof(tmp), 20u);
         if (rlen <= 0) {
             break;
+        }
+
+        if (ml307c_find_bytes(tmp, (uint16_t)rlen, "WTK1") >= 0) {
+            ml307c_stash_downlink(tmp, (uint16_t)rlen);
+            continue;
         }
 
         tmp[rlen < (int)sizeof(tmp) ? rlen : ((int)sizeof(tmp) - 1)] = '\0';
@@ -265,11 +336,21 @@ static int ml307c_wait_response(struct ml307c_dev * dev,
 
     uint32_t start = dev->itf.get_tick();
     int expect_found = (expect == NULL || expect[0] == '\0') ? 1 : 0;
+    uint16_t downlink_len_at_start = s_ml307c_downlink_len;
 
     while ((dev->itf.get_tick() - start) < timeout_ms) {
         uint8_t tmp[128];
         int rlen = dev->itf.uart_read(tmp, sizeof(tmp), 100u);
         if (rlen > 0) {
+            if ((ml307c_find_bytes(tmp, (uint16_t)rlen, "WTK1") >= 0 ||
+                 s_ml307c_downlink_len != downlink_len_at_start) &&
+                ml307c_find_bytes(tmp, (uint16_t)rlen, expect) < 0 &&
+                ml307c_find_bytes(tmp, (uint16_t)rlen, ML307C_OK) < 0 &&
+                ml307c_find_bytes(tmp, (uint16_t)rlen, ML307C_ERROR) < 0) {
+                ml307c_stash_downlink(tmp, (uint16_t)rlen);
+                continue;
+            }
+
             (void)ml307c_append_response(dev, tmp, rlen);
 
             const char *resp = (const char *)dev->rx_rb.buf;
@@ -950,6 +1031,7 @@ static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t
         return -5;
     }
 
+    uint16_t downlink_len_before = s_ml307c_downlink_len;
     char resp[ML307C_LINE_MAX_LEN];
     int ret = ml307c_wait_response(dev,
                                    "AT+SENDR",
@@ -958,6 +1040,10 @@ static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t
                                    resp,
                                    sizeof(resp));
     if (ret != 0) {
+        if (ret == -3 && s_ml307c_downlink_len != downlink_len_before) {
+            D_LOGW(TAG, "ML307C SENDR 确认被下行数据抢占，按 UDP 已发出处理");
+            return 0;
+        }
         return ret;
     }
 
@@ -1252,6 +1338,39 @@ static int d_ml307c_reg_ready(int reg_state)
     return reg_state == 1 || reg_state == 5;
 }
 
+static void d_ml307c_cache_status(const d_ml307c_status_t *status)
+{
+    if (status == NULL) {
+        return;
+    }
+
+    s_ml307c_cached_status = *status;
+    s_ml307c_cached_status_valid = 1u;
+    if (s_ml307c != NULL) {
+        s_ml307c_cached_status_tick = s_ml307c->itf.get_tick();
+    }
+}
+
+static void d_ml307c_fill_ready_status(d_ml307c_status_t *status)
+{
+    if (status == NULL) {
+        return;
+    }
+
+    status->rssi = (s_ml307c_cached_status_valid != 0u &&
+                    s_ml307c_cached_status.rssi >= 0 &&
+                    s_ml307c_cached_status.rssi != 99)
+                       ? s_ml307c_cached_status.rssi
+                       : 20;
+    status->reg_state = (s_ml307c_cached_status_valid != 0u &&
+                         d_ml307c_reg_ready(s_ml307c_cached_status.reg_state))
+                            ? s_ml307c_cached_status.reg_state
+                            : 1;
+    status->link_state = 1;
+    status->sim_ready = 1;
+    status->at_ready = 1;
+}
+
 /**
  * @brief 获取 ML307C 全局互斥锁。
  */
@@ -1339,11 +1458,14 @@ int d_ml307c_init(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *cfg)
     if (ret != 0) {
         ml307c_deinit(s_ml307c);
         s_ml307c = NULL;
+        s_ml307c_cached_status_valid = 0u;
+        s_ml307c_cached_status_tick = 0u;
         return ret;
     }
 
     s_ml307c_tcp_connected = 0u;
     s_ml307c_udp_connected = 0u;
+    s_ml307c_downlink_len = 0u;
     return 0;
 }
 
@@ -1400,6 +1522,8 @@ int d_ml307c_prepare(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *c
         d_ml307c_unlock();
         ml307c_deinit(s_ml307c);
         s_ml307c = NULL;
+        s_ml307c_cached_status_valid = 0u;
+        s_ml307c_cached_status_tick = 0u;
         return ret;
     }
 
@@ -1411,6 +1535,7 @@ int d_ml307c_prepare(const d_ml307c_wdriver_ops_t *ops, const ml307c_config_t *c
 
     s_ml307c_tcp_connected = 0u;
     s_ml307c_udp_connected = 0u;
+    s_ml307c_downlink_len = 0u;
     return 0;
 }
 
@@ -1430,6 +1555,9 @@ int d_ml307c_deinit(void)
     }
     s_ml307c_tcp_connected = 0u;
     s_ml307c_udp_connected = 0u;
+    s_ml307c_cached_status_valid = 0u;
+    s_ml307c_cached_status_tick = 0u;
+    s_ml307c_downlink_len = 0u;
     return 0;
 }
 
@@ -1448,6 +1576,13 @@ int d_ml307c_get_status(d_ml307c_status_t *status)
 {
     if (s_ml307c == NULL || status == NULL) {
         return -1;
+    }
+
+    if (s_ml307c_cached_status_valid != 0u &&
+        ((s_ml307c_udp_connected != 0u || s_ml307c_tcp_connected != 0u) ||
+         (s_ml307c->itf.get_tick() - s_ml307c_cached_status_tick) < ML307C_STATUS_CACHE_MS)) {
+        *status = s_ml307c_cached_status;
+        return 0;
     }
 
     status->rssi = -1;
@@ -1472,6 +1607,7 @@ int d_ml307c_get_status(d_ml307c_status_t *status)
     (void)ml307c_get_link_state(s_ml307c, &status->link_state);
 
     d_ml307c_unlock();
+    d_ml307c_cache_status(status);
     return 0;
 }
 
@@ -1507,7 +1643,14 @@ int d_ml307c_tcp_connect(const char *host, int port)
     }
     ret = ml307c_tcp_connect(s_ml307c, host, port);
     d_ml307c_unlock();
-    s_ml307c_tcp_connected = ret == 0 ? 1u : 0u;
+    if (ret == 0) {
+        d_ml307c_status_t ready_status;
+        d_ml307c_fill_ready_status(&ready_status);
+        d_ml307c_cache_status(&ready_status);
+        s_ml307c_tcp_connected = 1u;
+    } else {
+        s_ml307c_tcp_connected = 0u;
+    }
     return ret;
 }
 
@@ -1529,6 +1672,9 @@ int d_ml307c_tcp_send(const uint8_t *data, int len)
     }
     ret = ml307c_tcp_send(s_ml307c, (uint8_t *)data, len);
     d_ml307c_unlock();
+    if (ret != 0) {
+        s_ml307c_tcp_connected = 0u;
+    }
     return ret;
 }
 
@@ -1561,6 +1707,9 @@ int d_ml307c_udp_connect(const char *host, int port)
     if (s_ml307c == NULL || host == NULL || port <= 0) {
         return -1;
     }
+    if (s_ml307c_udp_connected != 0u) {
+        return 0;
+    }
 
     int ret = d_ml307c_lock(D_ML307C_LOCK_TIMEOUT_MS);
     if (ret != 0) {
@@ -1568,7 +1717,14 @@ int d_ml307c_udp_connect(const char *host, int port)
     }
     ret = ml307c_udp_connect(s_ml307c, host, port);
     d_ml307c_unlock();
-    s_ml307c_udp_connected = ret == 0 ? 1u : 0u;
+    if (ret == 0) {
+        d_ml307c_status_t ready_status;
+        d_ml307c_fill_ready_status(&ready_status);
+        d_ml307c_cache_status(&ready_status);
+        s_ml307c_udp_connected = 1u;
+    } else {
+        s_ml307c_udp_connected = 0u;
+    }
     return ret;
 }
 
@@ -1590,6 +1746,9 @@ int d_ml307c_udp_send(const uint8_t *data, int len)
     }
     ret = ml307c_udp_send(s_ml307c, (uint8_t *)data, len);
     d_ml307c_unlock();
+    if (ret != 0) {
+        s_ml307c_udp_connected = 0u;
+    }
     return ret;
 }
 
@@ -1605,7 +1764,10 @@ int d_ml307c_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
     if (d_ml307c_lock(timeout_ms + 20u) != 0) {
         return 0;
     }
-    int ret = ml307c_read_raw(s_ml307c, buf, len, timeout_ms);
+    int ret = ml307c_pop_downlink(buf, len);
+    if (ret == 0) {
+        ret = ml307c_read_raw(s_ml307c, buf, len, timeout_ms);
+    }
     d_ml307c_unlock();
     return ret;
 }
