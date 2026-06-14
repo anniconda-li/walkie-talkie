@@ -85,6 +85,12 @@
 #define WDRIVER_BATTERY_ADC_EN_IO GPIO_NUM_17     /**< 电池采样使能脚，低电平使能。 */
 
 /**
+ * @brief 整板电源保持与电源按键引脚定义。
+ */
+#define WDRIVER_POWER_KEY_IO GPIO_NUM_18  /**< 电源键输入，按下为低电平。 */
+#define WDRIVER_POWER_HOLD_IO GPIO_NUM_19 /**< 整板供电保持输出，高电平保持上电。 */
+
+/**
  * @brief 项目 I2C 总线引脚定义。
  */
 #define WDRIVER_I2C_SDA_IO GPIO_NUM_1  /**< I2C SDA。 */
