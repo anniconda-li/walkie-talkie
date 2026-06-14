@@ -41,6 +41,25 @@ static volatile int s_started = 0;
 static volatile int s_network_ready = 0;
 
 /**
+ * @brief 电池电量轮询任务（1s 周期）。
+ *
+ * @param arg 未使用。
+ */
+static void app_status_monitor_battery_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        int level = 0;
+        if (service_battery_get(&level) == 0) {
+            (void)app_ui_set_battery_level(level);
+        }
+
+        osal_delay_ms(1000u);
+    }
+}
+
+/**
  * @brief 将网络状态转换为 0-4 格信号图标。
  *
  * CSQ 值（0-31）映射规则：
@@ -73,28 +92,6 @@ static int app_status_monitor_csq_to_bars(const service_network_status_t *status
         return 3;
     }
     return 4;
-}
-
-/**
- * @brief 电池电量轮询任务（1s 周期）。
- *
- * service_battery_get() 内部完成了 ADC 读取 → 一阶低通滤波 → 放电曲线查表 →
- * 5% 步进取整和显示滞回。本任务只将最终百分比推送给 UI。
- *
- * @param arg 未使用。
- */
-static void app_status_monitor_battery_task(void *arg)
-{
-    (void)arg;
-
-    while (1) {
-        /* service 层已经完成 ADC 滤波、百分比映射和显示滞回，UI 只消费百分比。 */
-        int level = 0;
-        if (service_battery_get(&level) == 0) {
-            (void)app_ui_set_battery_level(level);
-        }
-        osal_delay_ms(1000u);
-    }
 }
 
 /**
@@ -153,7 +150,7 @@ int app_status_monitor_start(void)
                                5u,
                                NULL);
     if (ret != 0) {
-        APP_LOGE(TAG, "电量监听任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "电池监听任务启动失败, ret=%d", ret);
         return ret;
     }
 

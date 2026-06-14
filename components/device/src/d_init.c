@@ -151,14 +151,14 @@ int d_init(void)
         return ret;
     }
 
-#if D_INIT_ENABLE_CAMERA
-    (void)d_optional_camera_init();
-#endif
-
     ret = d_power_init();
     if (ret != 0) {
         return ret;
     }
+
+#if D_INIT_ENABLE_CAMERA
+    (void)d_optional_camera_init();
+#endif
 
     ret = d_network_init();
     if (ret != 0) {

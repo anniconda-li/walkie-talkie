@@ -13,8 +13,8 @@
 
 static const char *TAG = "d_battery";
 
-#define d_battery_ADC_UNIT              ADC_UNIT_2
-#define d_battery_ADC_CHANNEL           ADC_CHANNEL_9
+#define d_battery_ADC_UNIT              ADC_UNIT_1
+#define d_battery_ADC_CHANNEL           ADC_CHANNEL_4
 #define d_battery_ADC_ATTEN             ADC_ATTEN_DB_12
 #define d_battery_ADC_BITWIDTH          ADC_BITWIDTH_DEFAULT
 #define d_battery_SAMPLE_COUNT          32u
