@@ -54,14 +54,24 @@ int app_ui_create(void)
 
 int app_ui_set_network_state(int state)
 {
+    return app_ui_set_network_status(state, 0);
+}
+
+int app_ui_set_network_status(int wifi_state, int cellular_state)
+{
     if (!s_ui_created) {
         return -1;
     }
 
-    if (state < 0) {
-        state = 0;
-    } else if (state > 4) {
-        state = 4;
+    if (wifi_state < 0) {
+        wifi_state = 0;
+    } else if (wifi_state > 4) {
+        wifi_state = 4;
+    }
+    if (cellular_state < 0) {
+        cellular_state = 0;
+    } else if (cellular_state > 4) {
+        cellular_state = 4;
     }
 
     if (service_screen_lock(100) != 0) {
@@ -69,7 +79,7 @@ int app_ui_set_network_state(int state)
         return -2;
     }
 
-    ui_shell_set_signal_level((uint8_t)state);
+    ui_shell_set_signal_levels((uint8_t)wifi_state, (uint8_t)cellular_state);
     service_screen_unlock();
     return 0;
 }

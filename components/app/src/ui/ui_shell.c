@@ -61,10 +61,13 @@ static lv_obj_t *g_bg;
 static lv_obj_t *g_status_bar;
 static lv_obj_t *g_app_name_label;
 static lv_obj_t *g_signal_bars[4];
+static lv_obj_t *g_wifi_arcs[3];
+static lv_obj_t *g_wifi_dot;
 static lv_obj_t *g_battery_level;
 static lv_obj_t *g_battery_label;
 static uint8_t g_battery_percent = 60;
-static uint8_t g_signal_level = 3;
+static uint8_t g_wifi_signal_level = 3;
+static uint8_t g_cellular_signal_level = 0;
 static lv_obj_t *g_app_content_root;
 static lv_obj_t *g_current_app_root;
 static lv_obj_t *g_menu_toggle;
@@ -237,6 +240,38 @@ static void create_status_signal(lv_obj_t *parent)
         lv_obj_set_style_border_width(g_signal_bars[i], 0, 0);
         lv_obj_set_style_pad_all(g_signal_bars[i], 0, 0);
     }
+
+    const int32_t wifi_center_x = 54;
+    const int32_t wifi_center_y = 23;
+    const int32_t wifi_arc_sizes[3] = {12, 22, 32};
+
+    for(int32_t i = 0; i < 3; i++) {
+        int32_t size = wifi_arc_sizes[i];
+        int32_t x = wifi_center_x - (size / 2);
+        int32_t y = wifi_center_y - (size / 2);
+
+        g_wifi_arcs[i] = lv_arc_create(parent);
+        lv_obj_remove_flag(g_wifi_arcs[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(g_wifi_arcs[i], size, size);
+        lv_obj_set_pos(g_wifi_arcs[i], x, y);
+        lv_arc_set_bg_angles(g_wifi_arcs[i], 225, 315);
+        lv_obj_set_style_arc_width(g_wifi_arcs[i], 2, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(g_wifi_arcs[i], COLOR_ARROW, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(g_wifi_arcs[i], 0, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(g_wifi_arcs[i], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(g_wifi_arcs[i], 0, 0);
+        lv_obj_remove_style(g_wifi_arcs[i], NULL, LV_PART_KNOB);
+    }
+
+    g_wifi_dot = lv_obj_create(parent);
+    lv_obj_remove_flag(g_wifi_dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_wifi_dot, 4, 4);
+    lv_obj_set_pos(g_wifi_dot, wifi_center_x - 2, wifi_center_y - 2);
+    lv_obj_set_style_radius(g_wifi_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(g_wifi_dot, COLOR_ARROW, 0);
+    lv_obj_set_style_bg_opa(g_wifi_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g_wifi_dot, 0, 0);
+    lv_obj_set_style_pad_all(g_wifi_dot, 0, 0);
 }
 
 static void refresh_signal_level(void)
@@ -247,8 +282,21 @@ static void refresh_signal_level(void)
         }
 
         lv_obj_set_style_bg_opa(g_signal_bars[i],
-                                i < g_signal_level ? LV_OPA_COVER : LV_OPA_30,
+                                i < g_cellular_signal_level ? LV_OPA_COVER : LV_OPA_30,
                                 0);
+    }
+
+    for(int32_t i = 0; i < 3; i++) {
+        if(g_wifi_arcs[i] == NULL) {
+            continue;
+        }
+        lv_obj_set_style_arc_opa(g_wifi_arcs[i],
+                                 (i + 2) <= g_wifi_signal_level ? LV_OPA_COVER : LV_OPA_30,
+                                 LV_PART_MAIN);
+    }
+
+    if(g_wifi_dot != NULL) {
+        lv_obj_set_style_bg_opa(g_wifi_dot, g_wifi_signal_level > 0 ? LV_OPA_COVER : LV_OPA_30, 0);
     }
 }
 
@@ -643,10 +691,19 @@ void ui_shell_set_battery_level(uint8_t percent)
 
 void ui_shell_set_signal_level(uint8_t level)
 {
-    if(level > 4) {
-        level = 4;
+    ui_shell_set_signal_levels(level, 0);
+}
+
+void ui_shell_set_signal_levels(uint8_t wifi_level, uint8_t cellular_level)
+{
+    if(wifi_level > 4) {
+        wifi_level = 4;
+    }
+    if(cellular_level > 4) {
+        cellular_level = 4;
     }
 
-    g_signal_level = level;
+    g_wifi_signal_level = wifi_level;
+    g_cellular_signal_level = cellular_level;
     refresh_signal_level();
 }

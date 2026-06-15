@@ -29,6 +29,8 @@ int app_ui_create(void);
  */
 int app_ui_set_network_state(int state);
 
+int app_ui_set_network_status(int wifi_state, int cellular_state);
+
 /**
  * @brief 更新电量显示。
  *

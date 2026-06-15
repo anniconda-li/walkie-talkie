@@ -106,13 +106,18 @@ static void app_status_monitor_network_task(void *arg)
     (void)arg;
 
     while (1) {
+        app_network_mode_t mode = app_network_get_mode();
         service_network_status_t status;
-        if (service_network_get_status(&status) == 0) {
+
+        if (mode == APP_NETWORK_MODE_4G) {
+            (void)app_ui_set_network_status(0, 4);
+            s_network_ready = 0;
+        } else if (service_network_get_status(&status) == 0) {
             int bars = app_status_monitor_network_to_bars(&status);
-            (void)app_ui_set_network_state(bars);
+            (void)app_ui_set_network_status(bars, 0);
             s_network_ready = bars > 0 ? 1 : 0;
         } else {
-            (void)app_ui_set_network_state(0);
+            (void)app_ui_set_network_status(0, 0);
             s_network_ready = 0;
             /* 初始化失败或掉线后交给 app_network 按当前用户选择恢复。 */
             (void)app_network_recover();
