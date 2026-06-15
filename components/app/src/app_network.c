@@ -216,6 +216,22 @@ int app_network_select_saved_wifi(void)
     return app_network_connect_wifi(ssid, password);
 }
 
+int app_network_select_4g(void)
+{
+    int ret = app_network_begin_switch();
+    if (ret != 0) {
+        return ret;
+    }
+
+    (void)service_network_deinit();
+    (void)d_wifi_disconnect();
+    app_network_set_mode(APP_NETWORK_MODE_4G);
+    app_intercom_network_changed();
+    app_network_end_switch();
+    APP_LOGI(TAG, "已切换到 4G 占位模式");
+    return 0;
+}
+
 int app_network_recover(void)
 {
     app_network_mode_t mode = app_network_get_mode();

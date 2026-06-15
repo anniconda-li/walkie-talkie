@@ -121,6 +121,7 @@ typedef struct {
     lv_obj_t *wlan_button;            /**< WLAN 模式选择框。 */
     lv_obj_t *cellular_button;        /**< 4G 模式选择框。 */
     lv_obj_t *wlan_ssid_label;        /**< WLAN 当前热点标签。 */
+    lv_obj_t *cellular_label;         /**< 4G 模式标签。 */
     lv_obj_t *network_status_label;   /**< 网络操作提示。 */
     lv_obj_t *wlan_page;              /**< WLAN 子页面。 */
     lv_obj_t *wlan_back_button;       /**< WLAN 子页面返回按钮。 */

@@ -280,6 +280,8 @@ static ui_settings_network_mode_t app_business_get_network_mode(void)
     switch (app_network_get_mode()) {
         case APP_NETWORK_MODE_WIFI:
             return UI_SETTINGS_NETWORK_WLAN;
+        case APP_NETWORK_MODE_4G:
+            return UI_SETTINGS_NETWORK_4G;
         default:
             return UI_SETTINGS_NETWORK_NONE;
     }
@@ -417,7 +419,8 @@ static void app_business_on_wifi_select(void)
 
 static void app_business_on_4g_select(void)
 {
-    (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
+    int ret = app_network_select_4g();
+    (void)app_ui_settings_show_4g_select_result(ret == 0 ? UI_SETTINGS_4G_OK : UI_SETTINGS_4G_UNAVAILABLE, ret);
 }
 
 /**

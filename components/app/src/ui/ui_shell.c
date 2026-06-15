@@ -21,6 +21,13 @@
 #define STATUS_BAR_Y           0
 #define APP_NAME_Y             48
 
+#define BATTERY_BODY_W         26
+#define BATTERY_BODY_H         16
+#define BATTERY_BORDER_W       2
+#define BATTERY_PAD            1
+#define BATTERY_FILL_W         (BATTERY_BODY_W - (BATTERY_BORDER_W * 2) - (BATTERY_PAD * 2))
+#define BATTERY_FILL_H         (BATTERY_BODY_H - (BATTERY_BORDER_W * 2) - (BATTERY_PAD * 2))
+
 #define MENU_TOGGLE_W          34
 #define MENU_TOGGLE_H          40
 #define MENU_BAR_W             50
@@ -249,18 +256,19 @@ static void create_status_battery(lv_obj_t *parent)
 {
     lv_obj_t *body = lv_obj_create(parent);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(body, 26, 16);
+    lv_obj_set_size(body, BATTERY_BODY_W, BATTERY_BODY_H);
     lv_obj_set_pos(body, UI_SCREEN_WIDTH - 68, 7);
     lv_obj_set_style_radius(body, 4, 0);
+    lv_obj_set_style_clip_corner(body, true, 0);
     lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_color(body, COLOR_ARROW, 0);
-    lv_obj_set_style_border_width(body, 2, 0);
-    lv_obj_set_style_pad_all(body, 1, 0);
+    lv_obj_set_style_border_width(body, BATTERY_BORDER_W, 0);
+    lv_obj_set_style_pad_all(body, BATTERY_PAD, 0);
 
     g_battery_level = lv_obj_create(body);
     lv_obj_remove_flag(g_battery_level, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(g_battery_level, 20, 10);
-    lv_obj_set_pos(g_battery_level, 1, 0);
+    lv_obj_set_size(g_battery_level, BATTERY_FILL_W, BATTERY_FILL_H);
+    lv_obj_set_pos(g_battery_level, 0, 0);
     lv_obj_set_style_radius(g_battery_level, 1, 0);
     lv_obj_set_style_bg_color(g_battery_level, lv_color_make(0x41, 0xD1, 0x78), 0);
     lv_obj_set_style_bg_opa(g_battery_level, LV_OPA_COVER, 0);
@@ -294,7 +302,7 @@ static void refresh_battery_level(void)
         return;
     }
 
-    width = (20 * (int32_t)g_battery_percent) / 100;
+    width = (BATTERY_FILL_W * (int32_t)g_battery_percent) / 100;
     lv_obj_set_width(g_battery_level, width);
 
     if(g_battery_label != NULL) {

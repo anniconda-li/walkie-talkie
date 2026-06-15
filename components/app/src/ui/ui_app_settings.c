@@ -102,9 +102,23 @@ static lv_obj_t *create_caption(lv_obj_t *parent, const char *text, int32_t y)
 {
     lv_obj_t *label = lv_label_create(parent);
     lv_label_set_text(label, text);
-    lv_obj_set_pos(label, 2, y);
-    lv_obj_set_style_text_color(label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+    lv_obj_set_pos(label, 12, y);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
     return label;
+}
+
+static lv_obj_t *create_setting_box(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(box, x, y);
+    lv_obj_set_size(box, w, h);
+    lv_obj_set_style_radius(box, 14, 0);
+    lv_obj_set_style_bg_color(box, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    return box;
 }
 
 /**
@@ -120,8 +134,8 @@ static lv_obj_t *create_caption(lv_obj_t *parent, const char *text, int32_t y)
 static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
 {
     lv_obj_t *slider = lv_slider_create(parent);
-    lv_obj_set_pos(slider, 2, y);
-    lv_obj_set_size(slider, 188, 10);
+    lv_obj_set_pos(slider, 12, y);
+    lv_obj_set_size(slider, 164, 10);
     lv_slider_set_range(slider, 0, 100);
     lv_slider_set_value(slider, value, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(slider, lv_color_make(0x45, 0x45, 0x45), LV_PART_MAIN);
@@ -130,22 +144,31 @@ static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
     return slider;
 }
 
-static lv_obj_t *create_network_button(lv_obj_t *parent, const char *text, int32_t x, int32_t y)
+static lv_obj_t *create_network_button(lv_obj_t *parent,
+                                       const char *text,
+                                       int32_t x,
+                                       int32_t y,
+                                       lv_obj_t **label_out)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_pos(btn, x, y);
     lv_obj_set_size(btn, 90, 58);
-    lv_obj_set_style_radius(btn, 8, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
-    lv_obj_set_style_border_color(btn, lv_color_make(0x55, 0x55, 0x55), 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_radius(btn, 14, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_black(), 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
 
     lv_obj_t *label = lv_label_create(btn);
     lv_label_set_text(label, text);
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_set_size(label, 78, 24);
+    lv_obj_center(label);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    if(label_out != NULL) {
+        *label_out = label;
+    }
     return btn;
 }
 
@@ -301,32 +324,38 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 
     g_settings_panel = create_panel(root);
 
-    g_settings_view.wlan_button = create_network_button(g_settings_panel, "WLAN", 2, 2);
-    g_settings_view.wlan_ssid_label = lv_label_create(g_settings_view.wlan_button);
-    lv_label_set_text(g_settings_view.wlan_ssid_label, "");
-    lv_obj_set_pos(g_settings_view.wlan_ssid_label, 8, 30);
-    lv_obj_set_size(g_settings_view.wlan_ssid_label, 74, 24);
-    lv_label_set_long_mode(g_settings_view.wlan_ssid_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(g_settings_view.wlan_ssid_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(g_settings_view.wlan_ssid_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+    g_settings_view.wlan_button = create_network_button(g_settings_panel,
+                                                        "WLAN",
+                                                        2,
+                                                        2,
+                                                        &g_settings_view.wlan_ssid_label);
 
-    g_settings_view.cellular_button = create_network_button(g_settings_panel, "4G", 100, 2);
+    g_settings_view.cellular_button = create_network_button(g_settings_panel,
+                                                            "4G",
+                                                            100,
+                                                            2,
+                                                            &g_settings_view.cellular_label);
+
+    lv_obj_t *volume_box = create_setting_box(g_settings_panel, 2, 70, 188, 62);
+    lv_obj_t *firmware_box = create_setting_box(g_settings_panel, 2, 142, 188, 58);
 
     /* 音量行 */
-    g_settings_view.volume_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 78);
-    g_settings_view.volume_slider = create_slider(g_settings_panel, 108, 56);
+    g_settings_view.volume_label = create_caption(volume_box, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 9);
+    g_settings_view.volume_slider = create_slider(volume_box, 39, 56);
 
     /* 固件版本信息行（只读标签） */
-    g_settings_view.firmware_label = create_caption(g_settings_panel, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 150);
+    g_settings_view.firmware_label = create_caption(firmware_box, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 8);
 
-    g_settings_view.version_label = lv_label_create(g_settings_panel);
+    g_settings_view.version_label = lv_label_create(firmware_box);
     set_firmware_version_label(g_settings_view.version_label);
-    lv_obj_set_pos(g_settings_view.version_label, 2, 174);
-    lv_obj_set_style_text_color(g_settings_view.version_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
+    lv_obj_set_pos(g_settings_view.version_label, 12, 33);
+    lv_obj_set_width(g_settings_view.version_label, 164);
+    lv_label_set_long_mode(g_settings_view.version_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_color(g_settings_view.version_label, lv_color_white(), 0);
 
     g_settings_view.network_status_label = lv_label_create(g_settings_panel);
     lv_label_set_text(g_settings_view.network_status_label, "");
-    lv_obj_set_pos(g_settings_view.network_status_label, 2, 182);
+    lv_obj_set_pos(g_settings_view.network_status_label, 2, 210);
     lv_obj_set_width(g_settings_view.network_status_label, 188);
     lv_obj_set_style_text_color(g_settings_view.network_status_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
     lv_obj_add_flag(g_settings_view.network_status_label, LV_OBJ_FLAG_HIDDEN);

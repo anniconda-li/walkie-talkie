@@ -25,6 +25,7 @@
 #include "ui_i18n.h"
 #include "ui_shell.h"
 #include "ui_theme.h"
+#include <stdbool.h>
 #include <string.h>
 
 #define INTERCOM_CHANNEL_MIN 1
@@ -43,6 +44,7 @@ static ui_event_callbacks_t g_callbacks;
 static ui_ai_view_t *g_ai_view = NULL;
 static ui_settings_view_t *g_settings_view = NULL;
 static lv_timer_t *g_ai_wait_timer = NULL;
+static lv_timer_t *g_settings_refresh_timer = NULL;
 static uint8_t g_ai_waiting = 0u;
 static uint8_t g_ai_wait_dot_count = 0u;
 static ui_text_id_t g_ai_message_id = UI_TEXT_AI_IDLE;
@@ -586,23 +588,25 @@ static void settings_set_network_selected(ui_settings_view_t *view, ui_settings_
     }
 
     view->selected_network = mode;
-    lv_color_t active = UI_COLOR_SETTINGS;
-    lv_color_t idle = lv_color_make(0x55, 0x55, 0x55);
+    lv_color_t active_bg = lv_color_white();
+    lv_color_t active_text = lv_color_black();
+    lv_color_t idle_bg = lv_color_black();
+    lv_color_t idle_text = lv_color_white();
     if(view->wlan_button != NULL) {
-        lv_obj_set_style_border_color(view->wlan_button,
-                                      mode == UI_SETTINGS_NETWORK_WLAN ? active : idle,
-                                      0);
-        lv_obj_set_style_border_width(view->wlan_button,
-                                      mode == UI_SETTINGS_NETWORK_WLAN ? 3 : 1,
-                                      0);
+        bool active = mode == UI_SETTINGS_NETWORK_WLAN;
+        lv_obj_set_style_bg_color(view->wlan_button, active ? active_bg : idle_bg, 0);
+        lv_obj_set_style_border_width(view->wlan_button, 0, 0);
+        if(view->wlan_ssid_label != NULL) {
+            lv_obj_set_style_text_color(view->wlan_ssid_label, active ? active_text : idle_text, 0);
+        }
     }
     if(view->cellular_button != NULL) {
-        lv_obj_set_style_border_color(view->cellular_button,
-                                      mode == UI_SETTINGS_NETWORK_4G ? active : idle,
-                                      0);
-        lv_obj_set_style_border_width(view->cellular_button,
-                                      mode == UI_SETTINGS_NETWORK_4G ? 3 : 1,
-                                      0);
+        bool active = mode == UI_SETTINGS_NETWORK_4G;
+        lv_obj_set_style_bg_color(view->cellular_button, active ? active_bg : idle_bg, 0);
+        lv_obj_set_style_border_width(view->cellular_button, 0, 0);
+        if(view->cellular_label != NULL) {
+            lv_obj_set_style_text_color(view->cellular_label, active ? active_text : idle_text, 0);
+        }
     }
 }
 
@@ -610,16 +614,20 @@ static void settings_refresh_wlan_ssid(ui_settings_view_t *view)
 {
     char ssid[33];
     lv_point_t text_size;
+    const char *current_text;
 
     if(view == NULL || view->wlan_ssid_label == NULL) {
         return;
     }
 
     ssid[0] = '\0';
+    current_text = lv_label_get_text(view->wlan_ssid_label);
     if(g_callbacks.settings_wifi_ssid_get != NULL &&
        g_callbacks.settings_wifi_ssid_get(ssid, sizeof(ssid)) == 0 &&
        ssid[0] != '\0') {
-        lv_label_set_text(view->wlan_ssid_label, ssid);
+        if(current_text == NULL || strcmp(current_text, ssid) != 0) {
+            lv_label_set_text(view->wlan_ssid_label, ssid);
+        }
         const lv_font_t *font = lv_obj_get_style_text_font(view->wlan_ssid_label, LV_PART_MAIN);
         int32_t letter_space = lv_obj_get_style_text_letter_space(view->wlan_ssid_label, LV_PART_MAIN);
         int32_t line_space = lv_obj_get_style_text_line_space(view->wlan_ssid_label, LV_PART_MAIN);
@@ -629,7 +637,9 @@ static void settings_refresh_wlan_ssid(ui_settings_view_t *view)
                                    ? LV_LABEL_LONG_SCROLL_CIRCULAR
                                    : LV_LABEL_LONG_CLIP);
     } else {
-        lv_label_set_text(view->wlan_ssid_label, "");
+        if(current_text == NULL || strcmp(current_text, "WLAN") != 0) {
+            lv_label_set_text(view->wlan_ssid_label, "WLAN");
+        }
         lv_label_set_long_mode(view->wlan_ssid_label, LV_LABEL_LONG_CLIP);
     }
 }
@@ -665,6 +675,17 @@ static void settings_refresh_network_selected(ui_settings_view_t *view)
                                   view->selected_network == UI_SETTINGS_NETWORK_NONE
                                       ? UI_SETTINGS_NETWORK_WLAN
                                       : view->selected_network);
+}
+
+static void settings_refresh_timer_cb(lv_timer_t *timer)
+{
+    ui_settings_view_t *view = (ui_settings_view_t *)lv_timer_get_user_data(timer);
+    if(view == NULL || view != g_settings_view) {
+        return;
+    }
+
+    settings_refresh_network_selected(view);
+    settings_refresh_wlan_ssid(view);
 }
 
 static void settings_wlan_back_event_cb(lv_event_t *e)
@@ -1106,12 +1127,22 @@ void ui_event_register_settings(ui_settings_view_t *view)
     }
     settings_refresh_network_selected(view);
     settings_refresh_wlan_ssid(view);
+    if(g_settings_refresh_timer == NULL) {
+        g_settings_refresh_timer = lv_timer_create(settings_refresh_timer_cb, 1000, view);
+    } else {
+        lv_timer_set_user_data(g_settings_refresh_timer, view);
+        lv_timer_resume(g_settings_refresh_timer);
+    }
 }
 
 void ui_event_unregister_settings(ui_settings_view_t *view)
 {
     if(g_settings_view == view) {
         g_settings_view = NULL;
+    }
+    if(g_settings_refresh_timer != NULL) {
+        lv_timer_delete(g_settings_refresh_timer);
+        g_settings_refresh_timer = NULL;
     }
 }
 
