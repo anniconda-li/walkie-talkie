@@ -223,7 +223,7 @@ int app_ui_settings_show_4g_select_result(ui_settings_4g_status_t status, int re
     }
 
     if (service_screen_lock(1000) != 0) {
-        APP_LOGE(TAG, "4G 选择结果更新失败: LVGL 加锁超时");
+        APP_LOGE(TAG, "网络选择结果更新失败: LVGL 加锁超时");
         return -2;
     }
 

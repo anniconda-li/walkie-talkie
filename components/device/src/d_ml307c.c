@@ -34,7 +34,15 @@ static const char *TAG = "d_ml307c";
 #define ML307C_HTTP_TIMEOUT_MS      30000u        /**< HTTP 默认超时时间。 */
 #define ML307C_HTTP_LATENCY_MS      100u          /**< HTTP 命令中配置的发送延迟。 */
 #define ML307C_HTTP_TASK_ID         1u            /**< HTTP 任务默认 ID。 */
+#define ML307C_HTTP_TASK_MAX_ID     5u            /**< 手册定义的最大 HTTP 通道 ID。 */
 #define ML307C_HTTP_ROUTE           "6[1]"        /**< HTTP 响应路由标识。 */
+#define ML307C_HTTP_METHOD_GET      0u            /**< AT+HTTPURL 请求方法：按手册示例 0 表示 GET。 */
+#define ML307C_HTTP_METHOD_POST     1u            /**< AT+HTTPURL 请求方法：按手册示例 1 表示 POST。 */
+#define ML307C_HTTP_CONN_TIMEOUT_S  3u            /**< AT+HTTPCFG 连接超时，手册范围 0-10 秒。 */
+#define ML307C_HTTP_RSP_TIMEOUT_S   5u            /**< AT+HTTPCFG 响应超时，手册范围 0-10 秒。 */
+#define ML307C_HTTP_DNS_IPV4_FIRST  0u            /**< AT+HTTPCFG DNS 优先级：IPv4 优先。 */
+#define ML307C_HTTP_ENCODE_NONE     0u            /**< AT+HTTPCFG URL 不编码。 */
+#define ML307C_HTTP_RECOVER_GAP_MS  500u          /**< HTTP 实例完成后给模块释放资源的间隔。 */
 #define D_ML307C_LOCK_TIMEOUT_MS    5000u         /**< ML307C 互斥锁默认等待时间。 */
 #define ML307C_TIMEOUT_SNIPPET_LEN  160u          /**< AT 超时日志中保留的响应摘要长度。 */
 #define ML307C_ALIVE_ATTEMPT_MS     2000u         /**< 单次 AT 存活检测等待时间。 */
@@ -105,12 +113,24 @@ static uint8_t s_ml307c_cached_status_valid = 0u;
 /** @brief 最近一次状态缓存时间。 */
 static uint32_t s_ml307c_cached_status_tick = 0u;
 
+/** @brief 下次使用的 HTTP 通道 ID，轮换以规避模块复用同一通道时的状态残留。 */
+static uint8_t s_ml307c_http_next_id = ML307C_HTTP_TASK_ID;
+
 static void ml307c_log_response(const char *title, const char *resp);
 static void ml307c_log_timeout_summary(const char *cmd,
                                        const char *expect,
                                        const uint8_t *data,
                                        uint16_t len);
+static int ml307c_uart_write_all(struct ml307c_dev *dev,
+                                 const uint8_t *data,
+                                 uint32_t len,
+                                 uint32_t timeout_ms);
+static int ml307c_wait_token(struct ml307c_dev *dev,
+                             const char *cmd,
+                             const char *token,
+                             uint32_t timeout_ms);
 static int ml307c_parse_first_int_after(const char *resp, const char *prefix, int *value);
+static uint8_t d_ml307c_alloc_http_id(void);
 static struct ml307c_dev * ml307c_init(ml307c_config_t *cfg, ml307c_interface_t *itf);
 static void ml307c_deinit(struct ml307c_dev * dev);
 static int ml307c_check_alive(struct ml307c_dev * dev);
@@ -270,6 +290,46 @@ static void ml307c_drain_uart(struct ml307c_dev * dev)
     }
 }
 
+static int ml307c_uart_write_all(struct ml307c_dev *dev,
+                                 const uint8_t *data,
+                                 uint32_t len,
+                                 uint32_t timeout_ms)
+{
+    if (dev == NULL || (data == NULL && len > 0u)) {
+        return -1;
+    }
+    if (len == 0u) {
+        return 0;
+    }
+    if (timeout_ms == 0u) {
+        timeout_ms = ml307c_get_timeout(dev);
+    }
+
+    uint32_t start = dev->itf.get_tick();
+    uint32_t offset = 0u;
+    while (offset < len) {
+        uint32_t remain = len - offset;
+        uint16_t write_len = remain > 512u ? 512u : (uint16_t)remain;
+        int written = dev->itf.uart_write((uint8_t *)&data[offset], write_len);
+        if (written > 0) {
+            uint16_t accepted = written > (int)write_len ? write_len : (uint16_t)written;
+            offset += (uint32_t)accepted;
+            continue;
+        }
+        if ((dev->itf.get_tick() - start) >= timeout_ms) {
+            D_LOGW(TAG,
+                   "ML307C UART 写入超时, written=%u, total=%u, last=%d",
+                   (unsigned int)offset,
+                   (unsigned int)len,
+                   written);
+            return -2;
+        }
+        dev->itf.delay_ms(10u);
+    }
+
+    return 0;
+}
+
 /**
  * @brief 将串口读取到的数据追加到 AT 响应缓存。
  */
@@ -293,6 +353,43 @@ static int ml307c_append_response(struct ml307c_dev * dev, const uint8_t *data, 
     dev->rx_rb.head = (uint16_t)(dev->rx_rb.head + copy_len);
     dev->rx_rb.buf[dev->rx_rb.head] = '\0';
     return copy_len;
+}
+
+static int ml307c_wait_token(struct ml307c_dev *dev,
+                             const char *cmd,
+                             const char *token,
+                             uint32_t timeout_ms)
+{
+    if (dev == NULL || token == NULL || token[0] == '\0') {
+        return -1;
+    }
+    if (timeout_ms == 0u) {
+        timeout_ms = ml307c_get_timeout(dev);
+    }
+
+    uint32_t start = dev->itf.get_tick();
+    while ((dev->itf.get_tick() - start) < timeout_ms) {
+        uint8_t tmp[128];
+        int rlen = dev->itf.uart_read(tmp, sizeof(tmp), 100u);
+        if (rlen > 0) {
+            (void)ml307c_append_response(dev, tmp, rlen);
+            const char *resp = (const char *)dev->rx_rb.buf;
+            if (strstr(resp, token) != NULL) {
+                return 0;
+            }
+            if (strstr(resp, ML307C_CME_ERROR) != NULL ||
+                ml307c_response_has_line(resp, ML307C_ERROR)) {
+                return -2;
+            }
+        }
+        dev->itf.delay_ms(10u);
+    }
+
+    ml307c_log_timeout_summary(cmd != NULL ? cmd : "wait token",
+                               token,
+                               dev->rx_rb.buf,
+                               dev->rx_rb.head);
+    return -3;
 }
 
 /**
@@ -1021,13 +1118,13 @@ static int ml307c_send_route(struct ml307c_dev * dev, const char *route, uint8_t
     ml307c_drain_uart(dev);
     ml307c_clear_buffer(dev);
 
-    if (dev->itf.uart_write((uint8_t *)prefix, (uint16_t)prefix_len) != prefix_len) {
+    if (ml307c_uart_write_all(dev, (const uint8_t *)prefix, (uint32_t)prefix_len, ml307c_get_timeout(dev)) != 0) {
         return -3;
     }
-    if (len > 0 && dev->itf.uart_write(data, (uint16_t)len) != len) {
+    if (len > 0 && ml307c_uart_write_all(dev, data, (uint32_t)len, ml307c_get_timeout(dev)) != 0) {
         return -4;
     }
-    if (dev->itf.uart_write((uint8_t *)ML307C_CRLF, 2u) != 2) {
+    if (ml307c_uart_write_all(dev, (const uint8_t *)ML307C_CRLF, 2u, ml307c_get_timeout(dev)) != 0) {
         return -5;
     }
 
@@ -1164,7 +1261,11 @@ static int ml307c_http_capture_response(struct ml307c_dev * dev,
     }
 
     *resp_len = total;
-    D_LOGW(TAG, "ML307C HTTP 响应等待超时, received=%u", (unsigned int)total);
+    if (total > 0u) {
+        ml307c_log_timeout_summary("AT+HTTP response", "+HTTP/OK", resp, total);
+    } else {
+        D_LOGW(TAG, "ML307C HTTP 响应等待超时, received=0");
+    }
     return -1;
 }
 
@@ -1195,26 +1296,36 @@ static int ml307c_http_post(struct ml307c_dev * dev,
     }
 
     const char *safe_header = header != NULL ? header : "";
+    uint8_t method = body_len > 0u ? ML307C_HTTP_METHOD_POST : ML307C_HTTP_METHOD_GET;
     char cmd[768];
 
     snprintf(cmd,
              sizeof(cmd),
-             "AT+HTTPURL=%u,1,1,\"%s\",\"%s\"" ML307C_CRLF,
+             "AT+HTTPURL=%u,1,%u,\"%s\",\"%s\"" ML307C_CRLF,
              (unsigned int)id,
+             (unsigned int)method,
              safe_header,
              url);
     int ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
     if (ret != 0) {
+        D_LOGW(TAG, "ML307C HTTPURL 失败, ret=%d", ret);
         return ret;
     }
 
     snprintf(cmd,
              sizeof(cmd),
-             "AT+HTTPCFG=%u,10,30,0,0" ML307C_CRLF,
-             (unsigned int)id);
+             "AT+HTTPCFG=%u,%u,%u,%u,%u" ML307C_CRLF,
+             (unsigned int)id,
+             (unsigned int)ML307C_HTTP_CONN_TIMEOUT_S,
+             (unsigned int)ML307C_HTTP_RSP_TIMEOUT_S,
+             (unsigned int)ML307C_HTTP_DNS_IPV4_FIRST,
+             (unsigned int)ML307C_HTTP_ENCODE_NONE);
     ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
     if (ret != 0) {
-        return ret;
+        D_LOGW(TAG, "ML307C HTTPCFG 不兼容或参数不支持, ret=%d, 继续使用默认 HTTP 配置", ret);
+        if (ret != -2) {
+            return ret;
+        }
     }
 
     snprintf(cmd,
@@ -1231,6 +1342,7 @@ static int ml307c_http_post(struct ml307c_dev * dev,
              ML307C_HTTP_ROUTE);
     ret = ml307c_send_cmd(dev, cmd, ML307C_OK, ml307c_get_timeout(dev));
     if (ret != 0) {
+        D_LOGW(TAG, "ML307C HTTPRESP 失败, ret=%d", ret);
         return ret;
     }
 
@@ -1246,19 +1358,39 @@ static int ml307c_http_post(struct ml307c_dev * dev,
     ml307c_clear_buffer(dev);
 
     uint16_t cmd_len = (uint16_t)strlen(cmd);
-    if (dev->itf.uart_write((uint8_t *)cmd, cmd_len) != cmd_len) {
+    ret = ml307c_uart_write_all(dev, (const uint8_t *)cmd, cmd_len, ml307c_get_timeout(dev));
+    if (ret != 0) {
+        D_LOGW(TAG, "ML307C HTTP 命令写入失败, ret=%d, len=%u", ret, (unsigned int)cmd_len);
         return -2;
     }
-    if (body_len > 0u && dev->itf.uart_write((uint8_t *)body, body_len) != body_len) {
-        return -3;
+    if (body_len > 0u) {
+        ret = ml307c_wait_token(dev, "AT+HTTP", ">", ml307c_get_timeout(dev));
+        if (ret != 0) {
+            D_LOGW(TAG, "ML307C HTTP body 输入提示等待失败, ret=%d", ret);
+            return -3;
+        }
+        ml307c_clear_buffer(dev);
+        ret = ml307c_uart_write_all(dev, body, body_len, timeout_ms + 5000u);
+        if (ret != 0) {
+            D_LOGW(TAG, "ML307C HTTP body 写入失败, ret=%d, len=%u", ret, (unsigned int)body_len);
+            return -4;
+        }
     }
 
     *resp_len = 0u;
-    return ml307c_http_capture_response(dev,
-                                        resp,
-                                        resp_size,
-                                        resp_len,
-                                        timeout_ms + 10000u);
+    ret = ml307c_http_capture_response(dev,
+                                       resp,
+                                       resp_size,
+                                       resp_len,
+                                       timeout_ms + 10000u);
+    if (ret != 0) {
+        D_LOGW(TAG,
+               "ML307C HTTP 响应捕获失败, ret=%d, body_len=%u, resp_len=%u",
+               ret,
+               (unsigned int)body_len,
+               (unsigned int)*resp_len);
+    }
+    return ret;
 }
 
 /**
@@ -1299,8 +1431,14 @@ int d_ml307c_http_post(const char *url,
     if (ret != 0) {
         return ret;
     }
+    uint8_t http_id = d_ml307c_alloc_http_id();
+    D_LOGI(TAG,
+           "ML307C HTTP POST 开始, id=%u, body=%u, url=%s",
+           (unsigned int)http_id,
+           (unsigned int)body_len,
+           url);
     ret = ml307c_http_post(s_ml307c,
-                           ML307C_HTTP_TASK_ID,
+                           http_id,
                            url,
                            header,
                            body_len > 0u ? body : (const uint8_t *)"",
@@ -1309,9 +1447,18 @@ int d_ml307c_http_post(const char *url,
                            (uint16_t)resp_size,
                            &local_resp_len,
                            timeout_ms);
+    s_ml307c->itf.delay_ms(ML307C_HTTP_RECOVER_GAP_MS);
     d_ml307c_unlock();
 
     *resp_len = local_resp_len;
+    if (ret != 0) {
+        D_LOGW(TAG,
+               "ML307C HTTP POST 失败, ret=%d, body=%u, resp_size=%u, resp_len=%u",
+               ret,
+               (unsigned int)body_len,
+               (unsigned int)resp_size,
+               (unsigned int)local_resp_len);
+    }
     return ret;
 }
 
@@ -1387,6 +1534,19 @@ static void d_ml307c_unlock(void)
     if (s_ml307c_mutex != NULL) {
         osal_mutex_unlock(s_ml307c_mutex);
     }
+}
+
+static uint8_t d_ml307c_alloc_http_id(void)
+{
+    uint8_t id = s_ml307c_http_next_id;
+    if (id < ML307C_HTTP_TASK_ID || id > ML307C_HTTP_TASK_MAX_ID) {
+        id = ML307C_HTTP_TASK_ID;
+    }
+
+    s_ml307c_http_next_id = (id >= ML307C_HTTP_TASK_MAX_ID)
+                                ? ML307C_HTTP_TASK_ID
+                                : (uint8_t)(id + 1u);
+    return id;
 }
 
 /**
@@ -1557,6 +1717,7 @@ int d_ml307c_deinit(void)
     s_ml307c_udp_connected = 0u;
     s_ml307c_cached_status_valid = 0u;
     s_ml307c_cached_status_tick = 0u;
+    s_ml307c_http_next_id = ML307C_HTTP_TASK_ID;
     s_ml307c_downlink_len = 0u;
     return 0;
 }

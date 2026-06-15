@@ -16,7 +16,6 @@ extern "C" {
  */
 typedef enum {
     SERVICE_NETWORK_BACKEND_WIFI = 0, /**< WiFi STA 后端。 */
-    SERVICE_NETWORK_BACKEND_4G = 1,   /**< ML307C 4G 后端。 */
 } service_network_backend_t;
 
 /**

@@ -4,17 +4,15 @@
  *
  * ## 模块职责
  * - 周期性读取 battery service 给出的电量百分比，更新 UI 电池图标
- * - 周期性查询 4G/WiFi 网络状态（信号格数），更新 UI 信号图标
+ * - 周期性查询 WiFi 网络状态（信号格数），更新 UI 信号图标
  * - 维护 s_network_ready 标志供心跳任务检测断线重连
  *
  * ## 任务列表
  * - biz_battery（优先级 5, 1s 周期）—— 读电量百分比 → 更新 UI
- * - biz_network（优先级 4, 3s 周期）—— 查 AT 信号 → 换算格数 → 更新 UI + s_network_ready
+ * - biz_network（优先级 4, 3s 周期）—— 查网络信号 → 换算格数 → 更新 UI + s_network_ready
  *
  * ## 调度方式
  * 两个任务都使用时间轮询（osal_delay_ms），不依赖 Notification。
- * 轮询周期较长（1s/3s）是为了降低 4G 模块的 AT 指令频率，
- * 因为每次 get_status 都会发多次 AT 指令（CSQ/CEREG/ISLINK），频繁查询会影响数据业务。
  */
 #include "app_status_monitor.h"
 
@@ -62,23 +60,22 @@ static void app_status_monitor_battery_task(void *arg)
 /**
  * @brief 将网络状态转换为 0-4 格信号图标。
  *
- * CSQ 值（0-31）映射规则：
- * - CSQ < 0 或 == 99（未知）→ 0 格
- * - CSQ 0-9   → 1 格
- * - CSQ 10-14 → 2 格
- * - CSQ 15-19 → 3 格
- * - CSQ 20-31 → 4 格
+ * WiFi driver 已把 RSSI 映射为 0-31 的通用信号值：
+ * - 信号 < 0 或 == 99（未知）→ 0 格
+ * - 信号 0-9   → 1 格
+ * - 信号 10-14 → 2 格
+ * - 信号 15-19 → 3 格
+ * - 信号 20-31 → 4 格
  *
- * 同时要求 AT 正常、SIM 正常、链路已连接，否则返回 0 格。
+ * 同时要求链路已连接，否则返回 0 格。
  *
  * @param status 网络状态快照。
  * @return 0-4 格；异常时返回 0。
  */
-static int app_status_monitor_csq_to_bars(const service_network_status_t *status)
+static int app_status_monitor_network_to_bars(const service_network_status_t *status)
 {
-    /* 网络未 ready 或 CSQ 未知时显示 0 格，避免 UI 给出误导性信号。 */
-    if (status == NULL || status->at_ready != 1 || status->sim_ready != 1 ||
-        status->link_state != 1 || status->rssi < 0 || status->rssi == 99) {
+    /* 网络未 ready 或信号未知时显示 0 格，避免 UI 给出误导性信号。 */
+    if (status == NULL || status->link_ready != 1 || status->rssi < 0 || status->rssi == 99) {
         return 0;
     }
 
@@ -98,13 +95,9 @@ static int app_status_monitor_csq_to_bars(const service_network_status_t *status
  * @brief 网络信号轮询任务（3s 周期）。
  *
  * ## 功能
- * 1. 查询 4G/WiFi 状态 → 换算信号格数 → 更新 UI
+ * 1. 查询 WiFi 状态 → 换算信号格数 → 更新 UI
  * 2. 更新 s_network_ready 标志（供心跳任务和 app_intercom 使用）
  * 3. 查询失败时尝试重新初始化网络服务（容错恢复）
- *
- * ## 为什么 3 秒
- * ML307C 每次 get_status 会发 4 条 AT 指令（AT/CSQ/CEREG/ISLINK），
- * 频繁查询会影响 TCP/UDP 数据收发。3 秒间隔在 UI 体验和模块负载间取得平衡。
  *
  * @param arg 未使用。
  */
@@ -115,7 +108,7 @@ static void app_status_monitor_network_task(void *arg)
     while (1) {
         service_network_status_t status;
         if (service_network_get_status(&status) == 0) {
-            int bars = app_status_monitor_csq_to_bars(&status);
+            int bars = app_status_monitor_network_to_bars(&status);
             (void)app_ui_set_network_state(bars);
             s_network_ready = bars > 0 ? 1 : 0;
         } else {

@@ -101,7 +101,7 @@ void app_main(void)
 
     (void)main_set_stage_running(APP_BOOT_STAGE_NETWORK);
     app_boot_status_set(APP_BOOT_STAGE_NETWORK, APP_BOOT_STATE_OK, 0);
-    OSAL_LOGI(TAG, "网络阶段由运行期业务启动，开机不自动初始化 4G");
+    OSAL_LOGI(TAG, "网络阶段由运行期业务启动");
 
     (void)main_set_stage_running(APP_BOOT_STAGE_CAMERA);
 #if D_INIT_ENABLE_CAMERA

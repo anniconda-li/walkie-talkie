@@ -19,10 +19,7 @@ extern "C" {
  */
 typedef struct {
     int rssi;          /**< 信号强度，0-31 表示有效，99 表示未知，负值表示查询失败。 */
-    int reg_state;     /**< CEREG 注册状态：1 本地注册，5 漫游注册。 */
-    int link_state;    /**< ISLINK 数据链路状态：1 已连接，0 未连接。 */
-    int sim_ready;     /**< 蜂窝 SIM 或等效链路前置条件：1 正常，0 异常。 */
-    int at_ready;      /**< 蜂窝 AT 或等效驱动通信状态：1 正常，0 异常。 */
+    int link_ready;    /**< WiFi 链路状态：1 已连接，0 未连接。 */
 } service_network_status_t;
 
 /**
@@ -107,10 +104,7 @@ int service_network_tcp_send(const uint8_t *data, int len);
 int service_network_tcp_close(void);
 
 /**
- * @brief 配置并等待 UDP DTU 通道就绪。
- *
- * 对 ML307C 后端表示配置 DTU UDP 通道；对 WiFi 后端表示记录 UDP 目标
- * 并准备 socket 收发。
+ * @brief 配置并等待 UDP 通道就绪。
  *
  * @param[in] host 服务器 IP 或域名。
  * @param[in] port 服务器端口。
@@ -119,7 +113,7 @@ int service_network_tcp_close(void);
 int service_network_udp_connect(const char *host, int port);
 
 /**
- * @brief 通过 UDP DTU 通道发送数据。
+ * @brief 通过 UDP 通道发送数据。
  *
  * @param[in] data 待发送数据缓冲区。
  * @param[in] len 待发送数据长度，单位字节。
@@ -141,7 +135,6 @@ int service_network_read_downlink(uint8_t *buf, uint16_t len, uint32_t timeout_m
  * @brief HTTP POST 上传二进制数据，并返回响应 body。
  *
  * App 层的 AI 分片协议使用该接口上传 WAV 分片、查询状态和拉取回复分片。
- * 具体网络后端负责处理 WiFi HTTP client 或 ML307C AT+HTTP 差异。
  *
  * @param[in] url 请求 URL。
  * @param[in] content_type 请求 Content-Type；为 NULL 时由后端使用默认值。

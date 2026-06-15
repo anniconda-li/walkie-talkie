@@ -3,8 +3,8 @@
  * @brief 网络服务能力门面实现。
  *
  * service_network 只保存一份由 service_init 传入的网络能力函数表，
- * 对 app 层提供稳定的网络 API。这里不包含 ML307C AT 指令或 WiFi socket
- * 细节，具体差异全部由下层 driver 的 ops 实现承担。
+ * 对 app 层提供稳定的网络 API。这里不包含 WiFi socket 细节，具体差异
+ * 全部由下层 driver 的 ops 实现承担。
  */
 #include "service_network.h"
 
@@ -23,7 +23,7 @@ static service_network_ops_t s_network_ops;
 /** @brief 网络 ops 是否已经完成绑定并通过初始化检查。 */
 static uint8_t s_network_ops_ready = 0u;
 
-/** @brief 串行化网络 I/O，避免 HTTP 与 UDP/TCP 同时进入底层 lwIP/AT 路径。 */
+/** @brief 串行化网络 I/O，避免 HTTP 与 UDP/TCP 同时进入底层网络路径。 */
 static osal_mutex_t s_network_io_mutex = NULL;
 
 static int service_network_lock_io(void)
@@ -214,7 +214,6 @@ int service_network_tcp_close(void)
 
 int service_network_udp_connect(const char *host, int port)
 {
-    /* 对 WiFi 是创建/记录 UDP 目标；对 ML307C 是配置 DTU UDP 通道。 */
     if (s_network_ops_ready == 0u) {
         return -1;
     }

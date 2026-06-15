@@ -14,12 +14,12 @@
  * 7. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ### UDP 接收（biz_udp_rx 任务，优先级 5）
- * 1. 轮询 UART 下行数据（80ms 超时）
+ * 1. 轮询网络下行数据（80ms 超时）
  * 2. 按 WTK1 魔数定位完整包 → 解析 → 若为音频包且非本机 → 播放
  *
  * ### 心跳（biz_heartbeat 任务，优先级 4）
  * 1. 每 10 秒发一次 HEARTBEAT 包
- * 2. 检测到网络断开后自动重建 UDP DTU 通道
+ * 2. 检测到网络断开后自动重建 UDP 通道
  *
  * ## 自定义应用层协议（基于 WTK1 魔数）
  * ```
@@ -38,7 +38,6 @@
 
 #include "app_business.h"
 #include "app_config.h"
-#include "app_network.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
@@ -49,7 +48,7 @@
 
 static const char *TAG = "app_intercom";
 
-/** @brief 对讲应用层协议魔数，用于在 UART 透传字节流中定位包头。 */
+/** @brief 对讲应用层协议魔数，用于在 UDP 下行字节流中定位包头。 */
 #define APP_INTERCOM_PACKET_MAGIC       "WTK1"
 /** @brief 协议头中设备名字段固定长度，短设备名使用 0 填充。 */
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
@@ -66,7 +65,7 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_TASK_STACK      4096u
 /** @brief 心跳和 UDP 重连任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    6144u
-/** @brief PTT 开始采集前等待 UDP DTU 就绪的最长时间。 */
+/** @brief PTT 开始采集前等待 UDP 就绪的最长时间。 */
 #define APP_INTERCOM_PTT_WAIT_UDP_MS    15000u
 /** @brief PTT 等待 UDP 就绪时的轮询间隔。 */
 #define APP_INTERCOM_PTT_WAIT_STEP_MS   100u
@@ -111,13 +110,10 @@ static osal_task_t s_heartbeat_task = NULL;
 /** @brief 对讲模块是否已启动。 */
 static volatile int s_started = 0;
 
-/** @brief UDP DTU 通道是否已连接就绪。
+/** @brief UDP 通道是否已连接就绪。
  *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
  *  底层 driver 会返回错误但不阻塞。 */
 static volatile int s_udp_ready = 0;
-
-/** @brief 避免 4G 模式下每 10 秒重复输出同一条对讲禁用日志。 */
-static uint8_t s_4g_udp_skip_logged = 0u;
 
 /** @brief 当前是否处于 PTT 按下状态。
  *  PTT 任务在 while(s_ptt_active) 循环中采集+发送，此标志为 0 时退出循环。 */
@@ -287,23 +283,12 @@ static int app_intercom_send_control(uint8_t type)
     /* 控制包没有 payload，用于服务器维护设备在线状态和频道状态。 */
     uint8_t packet[APP_INTERCOM_PACKET_HEADER_LEN];
     uint16_t len = app_intercom_build_packet(packet, type, NULL, 0u);
-    int ret = service_network_udp_send(packet, len);
-    if (ret != 0) {
-        s_udp_ready = 0;
-    }
-    return ret;
+    return service_network_udp_send(packet, len);
 }
 
 static void app_intercom_reconnect_udp_if_ready(void)
 {
     if (s_udp_ready) {
-        return;
-    }
-    if (app_network_get_mode() == APP_NETWORK_MODE_4G) {
-        if (s_4g_udp_skip_logged == 0u) {
-            APP_LOGW(TAG, "4G 模式暂不启用实时 UDP 对讲");
-            s_4g_udp_skip_logged = 1u;
-        }
         return;
     }
     int ready = service_network_is_ready();
@@ -325,10 +310,6 @@ static void app_intercom_reconnect_udp_if_ready(void)
 
 static int app_intercom_wait_udp_ready(uint32_t timeout_ms)
 {
-    if (app_network_get_mode() == APP_NETWORK_MODE_4G) {
-        return -1;
-    }
-
     uint32_t start = osal_get_tick_ms();
 
     while (s_ptt_active && !s_udp_ready && (osal_get_tick_ms() - start) < timeout_ms) {
@@ -352,7 +333,7 @@ static int app_intercom_wait_udp_ready(uint32_t timeout_ms)
  * ## 功能
  * 1. 启动时发送 REGISTER + CHANNEL 包（注册设备到服务器）
  * 2. 每 10 秒发送 HEARTBEAT 保活
- * 3. 检测网络后端 ready 后自动重连 UDP DTU
+ * 3. 检测网络后端 ready 后自动重连 UDP
  * 4. 重连后重新发送 REGISTER + CHANNEL，恢复在线状态
  *
  * ## 重连机制
@@ -369,7 +350,7 @@ static void app_intercom_heartbeat_task(void *arg)
     (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
     while (1) {
-        /* 网络恢复后在后台重建 UDP DTU 通道，并重新上报设备和频道。 */
+        /* 网络恢复后在后台重建 UDP 通道，并重新上报设备和频道。 */
         app_intercom_reconnect_udp_if_ready();
         (void)app_intercom_send_control(APP_INTERCOM_PKT_HEARTBEAT);
         (void)osal_task_notify_take(10000u);
@@ -423,9 +404,9 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
  * @brief UDP 接收任务入口。
  *
  * ## 粘包/半包处理
- * UART 透传（ML307C DTU 模式）的数据可能粘包或半包：
- * - 粘包：一次 UART read 可能返回多个完整包
- * - 半包：一个完整包可能跨两次 UART read
+ * UDP 下行数据可能粘包或半包：
+ * - 粘包：一次 read 可能返回多个完整包
+ * - 半包：一个完整包可能跨两次 read
  *
  * ## 处理策略
  * 1. 维护一个内部接收环形缓冲区 rx[1348]（= 最大包长 × 2）
@@ -446,16 +427,11 @@ static void app_intercom_udp_rx_task(void *arg)
     uint16_t used = 0u;
 
     while (1) {
-        if (app_network_get_mode() == APP_NETWORK_MODE_4G) {
-            osal_delay_ms(200u);
-            continue;
-        }
-
         int ret = service_network_read_downlink(&rx[used], (uint16_t)(sizeof(rx) - used), 80u);
         if (ret > 0) {
             used = (uint16_t)(used + ret);
             uint16_t pos = 0u;
-            /* UART 透传数据可能跨多次读取，保留半包并只消费完整 WTK1 包。 */
+            /* 下行数据可能跨多次读取，保留半包并只消费完整 WTK1 包。 */
             while ((pos + APP_INTERCOM_PACKET_HEADER_LEN) <= used) {
                 if (memcmp(&rx[pos], APP_INTERCOM_PACKET_MAGIC, 4u) != 0) {
                     pos++;
@@ -557,18 +533,17 @@ static void app_intercom_ptt_task(void *arg)
                                                                 APP_INTERCOM_PKT_AUDIO,
                                                                 (const uint8_t *)pcm,
                                                                 payload_len);
-                if (packet_len > 0u && s_udp_ready) {
+                if (packet_len > 0u) {
                     int send_ret = service_network_udp_send(packet, packet_len);
                     if (send_ret == 0) {
                         send_ok++;
                     } else {
                         send_fail++;
                         last_send_ret = send_ret;
-                        s_udp_ready = 0;
                     }
                 } else {
                     send_fail++;
-                    last_send_ret = s_udp_ready ? -100 : -1;
+                    last_send_ret = -100;
                 }
             } else {
                 read_fail++;
@@ -611,16 +586,11 @@ int app_intercom_start(void)
         return 0;
     }
 
-    int ret = 0;
-    if (app_network_get_mode() == APP_NETWORK_MODE_4G) {
-        APP_LOGW(TAG, "4G 模式跳过 UDP 对讲通道初始化");
+    int ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
+    if (ret != 0) {
+        APP_LOGW(TAG, "UDP 对讲通道初始化失败, ret=%d", ret);
     } else {
-        ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
-        if (ret != 0) {
-            APP_LOGW(TAG, "UDP 对讲通道初始化失败, ret=%d", ret);
-        } else {
-            s_udp_ready = 1;
-        }
+        s_udp_ready = 1;
     }
 
     ret = osal_task_create("biz_ptt",
@@ -726,7 +696,6 @@ void app_intercom_ptt_stop(void)
 void app_intercom_network_changed(void)
 {
     s_udp_ready = 0;
-    s_4g_udp_skip_logged = 0u;
     if (s_heartbeat_task != NULL) {
         (void)osal_task_notify_give(s_heartbeat_task);
     }

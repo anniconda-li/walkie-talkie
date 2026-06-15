@@ -14,7 +14,6 @@
 #include "d_es7210.h"
 #include "d_init.h"
 #include "d_lcd.h"
-#include "d_ml307c.h"
 #include "d_wifi.h"
 #include "service_audio.h"
 #include "service_battery.h"
@@ -131,40 +130,7 @@ static void service_init_camera_return_frame(void *opaque)
 }
 
 /**
- * @brief 将 ML307C driver 状态转换为通用 service_network_status_t。
- *
- * ML307C 的状态字段来自 AT、SIM、CEREG、ISLINK、CSQ 等蜂窝链路概念。
- * service 层只关心通用字段，因此在装配层完成一次字段映射。
- *
- * @param[out] status 通用网络状态输出。
- * @return 成功返回 0；失败返回负值。
- */
-static int service_init_network_ml307c_get_status(service_network_status_t *status)
-{
-    if (status == NULL) {
-        return -1;
-    }
-
-    d_ml307c_status_t d_status;
-    int ret = d_ml307c_get_status(&d_status);
-    if (ret != 0) {
-        return ret;
-    }
-
-    status->rssi = d_status.rssi;
-    status->reg_state = d_status.reg_state;
-    status->link_state = d_status.link_state;
-    status->sim_ready = d_status.sim_ready;
-    status->at_ready = d_status.at_ready;
-    return 0;
-}
-
-/**
  * @brief 将 WiFi driver 状态转换为通用 service_network_status_t。
- *
- * WiFi 没有 SIM/AT/CEREG 概念，因此将 sim_ready/at_ready 固定映射为 1，
- * link_ready 同时作为 reg_state 和 link_state 使用，保证 UI 和业务层可复用
- * 同一套网络状态判断。
  *
  * @param[out] status 通用网络状态输出。
  * @return 成功返回 0；失败返回负值。
@@ -182,19 +148,11 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
     }
 
     status->rssi = wifi_status.rssi;
-    status->reg_state = wifi_status.link_ready ? 1 : 0;
-    status->link_state = wifi_status.link_ready;
-    status->sim_ready = 1;
-    status->at_ready = 1;
+    status->link_ready = wifi_status.link_ready;
     return 0;
 }
 
-static service_network_backend_t s_network_backend =
-#if SERVICE_INIT_NETWORK == SERVICE_INIT_NETWORK_WIFI
-    SERVICE_NETWORK_BACKEND_WIFI;
-#else
-    SERVICE_NETWORK_BACKEND_4G;
-#endif
+static service_network_backend_t s_network_backend = SERVICE_NETWORK_BACKEND_WIFI;
 
 int service_init_network(void)
 {
@@ -209,29 +167,17 @@ int service_init_network_for(service_network_backend_t backend)
      */
     service_network_ops_t network_ops = {0};
 
-    if (backend == SERVICE_NETWORK_BACKEND_WIFI) {
-        network_ops.is_initialized = d_wifi_is_initialized;
-        network_ops.get_status = service_init_network_wifi_get_status;
-        network_ops.is_ready = d_wifi_is_ready;
-        network_ops.tcp_connect = d_wifi_tcp_connect;
-        network_ops.tcp_send = d_wifi_tcp_send;
-        network_ops.tcp_close = d_wifi_tcp_close;
-        network_ops.udp_connect = d_wifi_udp_connect;
-        network_ops.udp_send = d_wifi_udp_send;
-        network_ops.read_downlink = d_wifi_read_downlink;
-        network_ops.http_post = d_wifi_http_post;
-    } else {
-        network_ops.is_initialized = d_ml307c_is_initialized;
-        network_ops.get_status = service_init_network_ml307c_get_status;
-        network_ops.is_ready = d_ml307c_is_ready;
-        network_ops.tcp_connect = d_ml307c_tcp_connect;
-        network_ops.tcp_send = d_ml307c_tcp_send;
-        network_ops.tcp_close = d_ml307c_tcp_close;
-        network_ops.udp_connect = d_ml307c_udp_connect;
-        network_ops.udp_send = d_ml307c_udp_send;
-        network_ops.read_downlink = d_ml307c_read_downlink;
-        network_ops.http_post = d_ml307c_http_post;
-    }
+    (void)backend;
+    network_ops.is_initialized = d_wifi_is_initialized;
+    network_ops.get_status = service_init_network_wifi_get_status;
+    network_ops.is_ready = d_wifi_is_ready;
+    network_ops.tcp_connect = d_wifi_tcp_connect;
+    network_ops.tcp_send = d_wifi_tcp_send;
+    network_ops.tcp_close = d_wifi_tcp_close;
+    network_ops.udp_connect = d_wifi_udp_connect;
+    network_ops.udp_send = d_wifi_udp_send;
+    network_ops.read_downlink = d_wifi_read_downlink;
+    network_ops.http_post = d_wifi_http_post;
 
     (void)service_network_deinit();
     int ret = service_network_init(&network_ops);
@@ -240,8 +186,8 @@ int service_init_network_for(service_network_backend_t backend)
         return ret;
     }
 
-    s_network_backend = backend;
-    SERVICE_LOGI(TAG, "网络服务已切换, backend=%d", (int)backend);
+    s_network_backend = SERVICE_NETWORK_BACKEND_WIFI;
+    SERVICE_LOGI(TAG, "网络服务已切换到 WiFi");
     return 0;
 }
 

@@ -73,7 +73,6 @@ static osal_mutex_t s_audio_session_mutex = NULL;
 static int s_audio_session_busy = 0;
 static volatile int s_wifi_scan_busy = 0;
 static volatile int s_wifi_connect_busy = 0;
-static volatile int s_4g_select_busy = 0;
 static volatile int s_network_switch_busy = 0;
 
 typedef struct {
@@ -281,8 +280,6 @@ static ui_settings_network_mode_t app_business_get_network_mode(void)
     switch (app_network_get_mode()) {
         case APP_NETWORK_MODE_WIFI:
             return UI_SETTINGS_NETWORK_WLAN;
-        case APP_NETWORK_MODE_4G:
-            return UI_SETTINGS_NETWORK_4G;
         default:
             return UI_SETTINGS_NETWORK_NONE;
     }
@@ -331,22 +328,6 @@ static void app_business_on_wifi_scan(void)
                          NULL) != 0) {
         s_wifi_scan_busy = 0;
         (void)app_ui_settings_show_wlan_scan_result(NULL, 0u, -1);
-    }
-}
-
-static ui_settings_4g_status_t app_business_map_4g_status(app_network_4g_status_t status)
-{
-    switch (status) {
-        case APP_NETWORK_4G_OK:
-            return UI_SETTINGS_4G_OK;
-        case APP_NETWORK_4G_NO_SIM:
-            return UI_SETTINGS_4G_NO_SIM;
-        case APP_NETWORK_4G_NO_AT:
-            return UI_SETTINGS_4G_NO_AT;
-        case APP_NETWORK_4G_NOT_REGISTERED:
-            return UI_SETTINGS_4G_NOT_REGISTERED;
-        default:
-            return UI_SETTINGS_4G_UNAVAILABLE;
     }
 }
 
@@ -434,39 +415,9 @@ static void app_business_on_wifi_select(void)
     }
 }
 
-static void app_business_4g_select_task(void *arg)
-{
-    (void)arg;
-
-    app_network_4g_status_t app_status = APP_NETWORK_4G_UNAVAILABLE;
-    int ret = app_network_select_4g(&app_status);
-    (void)app_ui_settings_show_4g_select_result(app_business_map_4g_status(app_status), ret);
-    s_4g_select_busy = 0;
-    s_network_switch_busy = 0;
-    osal_task_delete_current();
-}
-
 static void app_business_on_4g_select(void)
 {
-    if (app_network_get_mode() == APP_NETWORK_MODE_4G) {
-        return;
-    }
-    if (s_4g_select_busy || s_network_switch_busy) {
-        return;
-    }
-
-    s_4g_select_busy = 1;
-    s_network_switch_busy = 1;
-    if (osal_task_create("net_4g_sel",
-                         app_business_4g_select_task,
-                         NULL,
-                         6144u,
-                         4u,
-                         NULL) != 0) {
-        s_4g_select_busy = 0;
-        s_network_switch_busy = 0;
-        (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
-    }
+    (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
 }
 
 /**
