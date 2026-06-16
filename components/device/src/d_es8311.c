@@ -150,24 +150,14 @@ static int es8311_play(const uint8_t *data,
 /**
  * @brief 将用户百分比音量映射为 ES8311 DAC 数字音量寄存器值。
  *
- * UI 仍使用 0-100 线性滑块，driver 内部用 10% 锚点插值提供更接近听感的曲线：
- * 低段抬高并拉开 10%-20% 差距，避免最低档接近静音；高段压缩，避免每档跳变过大。
+ * 低于原 50% 的 DAC 区间听感过小，非零音量只使用原 50%-100% 区间。
+ * 实际生效值固定吸附到 10% 档位，避免 1% 细分带来的无意义抖动。
  */
 static uint8_t es8311_volume_to_dac_reg(uint8_t volume)
 {
-    static const uint8_t volume_curve[] = {
-        0x00u, /*   0% */
-        0x9Au, /*  10% */
-        0xB0u, /*  20% */
-        0xBEu, /*  30% */
-        0xC8u, /*  40% */
-        0xD0u, /*  50% */
-        0xD8u, /*  60% */
-        0xDEu, /*  70% */
-        0xE4u, /*  80% */
-        0xEAu, /*  90% */
-        0xF0u, /* 100% */
-    };
+    const uint8_t min_reg = 0xD0u;
+    const uint8_t max_reg = 0xF0u;
+    uint8_t snapped_volume = 0u;
 
     if (volume == 0u) {
         return 0x00u;
@@ -176,15 +166,14 @@ static uint8_t es8311_volume_to_dac_reg(uint8_t volume)
         volume = 100u;
     }
 
-    uint8_t index = volume / 10u;
-    uint8_t rem = volume % 10u;
-    if (index >= 10u || rem == 0u) {
-        return volume_curve[index];
+    snapped_volume = (uint8_t)(((volume + 5u) / 10u) * 10u);
+    if (snapped_volume == 0u) {
+        snapped_volume = 10u;
+    } else if (snapped_volume > 100u) {
+        snapped_volume = 100u;
     }
 
-    uint8_t low = volume_curve[index];
-    uint8_t high = volume_curve[index + 1u];
-    return (uint8_t)(low + ((((uint16_t)(high - low) * rem) + 5u) / 10u));
+    return (uint8_t)(min_reg + ((((uint16_t)(max_reg - min_reg) * snapped_volume) + 50u) / 100u));
 }
 
 static int es8311_apply_volume(uint8_t volume)
