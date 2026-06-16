@@ -29,6 +29,8 @@ typedef struct {
  */
 typedef struct {
     int (*is_initialized)(void); /**< 判断下层播放 driver 是否已初始化。 */
+    int (*start_playback)(void); /**< 可选：打开下层播放输出。 */
+    int (*stop_playback)(void);  /**< 可选：关闭下层播放输出。 */
     int (*play_pcm)(const int16_t *pcm,
                     uint32_t samples,
                     uint32_t timeout_ms); /**< 播放单声道 PCM 样本。 */

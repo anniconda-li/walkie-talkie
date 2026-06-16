@@ -103,6 +103,16 @@ int service_audio_init(const service_audio_config_t *cfg)
     if (s_playback_ops.set_volume(volume) != 0) {
         SERVICE_LOGW(TAG, "音频服务初始化: 默认音量设置失败");
     }
+    int stop_ret = 0;
+    if (s_playback_ops.stop_playback != NULL) {
+        stop_ret = s_playback_ops.stop_playback();
+        if (stop_ret != 0) {
+            SERVICE_LOGW(TAG, "音频服务初始化: 默认关闭播放输出失败, ret=%d", stop_ret);
+        }
+    }
+    if (s_playback_ops.stop_playback == NULL || stop_ret != 0) {
+        (void)s_playback_ops.set_mute(1);
+    }
 
     s_audio_inited = 1u;
     SERVICE_LOGI(TAG, "音频服务初始化成功, volume=%u", (unsigned int)volume);
@@ -124,6 +134,23 @@ int service_audio_start_playback(void)
     if (!service_audio_is_inited()) {
         return -1;
     }
+    if (s_playback_started != 0u) {
+        return 0;
+    }
+
+    if (s_playback_ops.start_playback != NULL) {
+        int ret = s_playback_ops.start_playback();
+        if (ret != 0) {
+            SERVICE_LOGE(TAG, "打开播放输出失败, ret=%d", ret);
+            return ret;
+        }
+    } else if (s_playback_ops.set_mute != NULL) {
+        int ret = s_playback_ops.set_mute(0);
+        if (ret != 0) {
+            SERVICE_LOGE(TAG, "取消静音失败, ret=%d", ret);
+            return ret;
+        }
+    }
 
     s_playback_started = 1u;
     return 0;
@@ -134,9 +161,22 @@ int service_audio_stop_playback(void)
     if (!service_audio_is_inited()) {
         return -1;
     }
+    if (s_playback_started == 0u) {
+        return 0;
+    }
+
+    int ret = 0;
+    if (s_playback_ops.stop_playback != NULL) {
+        ret = s_playback_ops.stop_playback();
+    } else if (s_playback_ops.set_mute != NULL) {
+        ret = s_playback_ops.set_mute(1);
+    }
+    if (ret != 0) {
+        SERVICE_LOGW(TAG, "关闭播放输出失败, ret=%d", ret);
+    }
 
     s_playback_started = 0u;
-    return 0;
+    return ret;
 }
 
 int service_audio_read(int16_t *pcm, uint32_t samples, uint32_t timeout_ms)

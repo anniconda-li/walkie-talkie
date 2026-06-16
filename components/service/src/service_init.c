@@ -214,6 +214,8 @@ int service_init_audio(void)
         },
         .playback_ops = {
             .is_initialized = d_es8311_is_initialized,
+            .start_playback = d_es8311_start_playback,
+            .stop_playback = d_es8311_stop_playback,
             .play_pcm = d_es8311_play_pcm,
             .set_volume = d_es8311_set_volume,
             .set_mute = d_es8311_set_mute,

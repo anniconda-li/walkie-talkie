@@ -34,6 +34,9 @@ static const char *TAG = "d_es8311";
 #define ES8311_DAC_REG32         0x32u /**< DAC 数字音量寄存器。 */
 #define ES8311_DAC_REG37         0x37u /**< DAC 输出功放控制寄存器。 */
 
+#define ES8311_DAC_MUTE_MASK     0x60u
+#define ES8311_DAC_REG37_DEFAULT 0x08u
+
 /** @brief ES8311 驱动是否已完成初始化。 */
 static uint8_t s_es8311_inited = 0u;
 
@@ -101,7 +104,7 @@ static int es8311_config_default(void)
         /* 配置 DAC 输出、默认音量和功放输出状态。 */
         {ES8311_DAC_REG31, 0x00},
         {ES8311_DAC_REG32, 0xBF},
-        {ES8311_DAC_REG37, 0x08},
+        {ES8311_DAC_REG37, ES8311_DAC_REG37_DEFAULT},
     };
 
     for (unsigned int i = 0; i < sizeof(init_seq) / sizeof(init_seq[0]); i++) {
@@ -185,9 +188,9 @@ static int es8311_set_mute(int mute)
     }
 
     if (mute) {
-        reg_value |= 0x60u;
+        reg_value |= ES8311_DAC_MUTE_MASK;
     } else {
-        reg_value &= (uint8_t)~0x60u;
+        reg_value &= (uint8_t)~ES8311_DAC_MUTE_MASK;
     }
 
     ret = es8311_write_u8(ES8311_DAC_REG31, reg_value);
@@ -198,6 +201,14 @@ static int es8311_set_mute(int mute)
     }
 
     return ret;
+}
+
+static void es8311_write_silence_tail(void)
+{
+    memset(s_d_stereo_buf, 0, sizeof(s_d_stereo_buf));
+    (void)es8311_play((const uint8_t *)s_d_stereo_buf,
+                      (uint32_t)sizeof(s_d_stereo_buf),
+                      50u);
 }
 
 int d_es8311_init(const d_es8311_wdriver_ops_t *ops)
@@ -239,6 +250,33 @@ int d_es8311_deinit(void)
 int d_es8311_is_initialized(void)
 {
     return s_es8311_inited != 0u ? 1 : 0;
+}
+
+int d_es8311_start_playback(void)
+{
+    if (s_es8311_inited == 0u) {
+        return -1;
+    }
+
+    int ret = es8311_set_mute(0);
+    if (ret == 0) {
+        D_LOGI(TAG, "ES8311 播放输出已打开");
+    }
+    return ret;
+}
+
+int d_es8311_stop_playback(void)
+{
+    if (s_es8311_inited == 0u) {
+        return -1;
+    }
+
+    es8311_write_silence_tail();
+    int ret = es8311_set_mute(1);
+    if (ret == 0) {
+        D_LOGI(TAG, "ES8311 播放输出已关闭");
+    }
+    return ret;
 }
 
 int d_es8311_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms)

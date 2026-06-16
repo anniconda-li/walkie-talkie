@@ -65,6 +65,20 @@ int d_es8311_deinit(void);
 int d_es8311_is_initialized(void);
 
 /**
+ * @brief 打开 ES8311 播放输出并取消 DAC 静音。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_es8311_start_playback(void);
+
+/**
+ * @brief 停止 ES8311 播放输出，静音并关闭输出功放。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int d_es8311_stop_playback(void);
+
+/**
  * @brief 播放单声道 PCM 样本。
  *
  * @param[in] pcm 单声道 PCM 输入缓冲区。

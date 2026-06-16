@@ -61,14 +61,16 @@ static const char *TAG = "app_intercom";
 
 /** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     6144u
-/** @brief UDP 接收解析任务栈大小。 */
-#define APP_INTERCOM_RX_TASK_STACK      4096u
+/** @brief UDP 接收解析任务栈大小，播放启停会调用 codec/I2C，预留更深调用栈。 */
+#define APP_INTERCOM_RX_TASK_STACK      6144u
 /** @brief 心跳和 UDP 重连任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    6144u
 /** @brief PTT 开始采集前等待 UDP 就绪的最长时间。 */
 #define APP_INTERCOM_PTT_WAIT_UDP_MS    15000u
 /** @brief PTT 等待 UDP 就绪时的轮询间隔。 */
 #define APP_INTERCOM_PTT_WAIT_STEP_MS   100u
+/** @brief UDP 接收播放空闲关闭时间，覆盖正常 20ms 包间隔和短抖动。 */
+#define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 240u
 
 /** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
@@ -109,6 +111,16 @@ static osal_task_t s_heartbeat_task = NULL;
 
 /** @brief 对讲模块是否已启动。 */
 static volatile int s_started = 0;
+/** @brief UDP 接收侧是否已打开本地播放输出。 */
+static int s_rx_playback_active = 0;
+/** @brief UDP 接收侧最近一次成功播放音频帧的时间。 */
+static uint32_t s_rx_last_audio_ms = 0u;
+/** @brief UDP 接收侧播放统计日志节流时间。 */
+static uint32_t s_rx_play_log_ms = 0u;
+/** @brief UDP 接收解析缓冲，放在静态区避免挤占 biz_udp_rx 任务栈。 */
+static uint8_t s_rx_buf[APP_INTERCOM_PACKET_MAX_BYTES * 2u];
+/** @brief UDP 接收播放 PCM 缓冲，单任务独占使用。 */
+static int16_t s_rx_pcm[APP_BUSINESS_FRAME_SAMPLES];
 
 /** @brief UDP 通道是否已连接就绪。
  *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
@@ -323,6 +335,43 @@ static int app_intercom_wait_udp_ready(uint32_t timeout_ms)
     return s_udp_ready ? 0 : -1;
 }
 
+static void app_intercom_rx_stop_playback(void)
+{
+    if (!s_rx_playback_active) {
+        return;
+    }
+
+    (void)service_audio_stop_playback();
+    s_rx_playback_active = 0;
+}
+
+static int app_intercom_rx_start_playback(void)
+{
+    if (s_rx_playback_active) {
+        return 0;
+    }
+
+    int ret = service_audio_start_playback();
+    if (ret != 0) {
+        return ret;
+    }
+
+    s_rx_playback_active = 1;
+    return 0;
+}
+
+static void app_intercom_rx_stop_if_idle(void)
+{
+    if (!s_rx_playback_active) {
+        return;
+    }
+
+    uint32_t now = osal_get_tick_ms();
+    if ((uint32_t)(now - s_rx_last_audio_ms) >= APP_INTERCOM_RX_PLAYBACK_IDLE_MS) {
+        app_intercom_rx_stop_playback();
+    }
+}
+
 /* ==========================================================================
  * 心跳任务 —— 保持服务器在线状态 + 断线自动重连
  * ========================================================================== */
@@ -389,13 +438,22 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 
     if (view.type == APP_INTERCOM_PKT_AUDIO &&
         view.payload_len > 0u) {
-        int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];
-        uint16_t copy_len = view.payload_len > sizeof(pcm) ? sizeof(pcm) : view.payload_len;
-        memcpy(pcm, view.payload, copy_len);
-        (void)service_audio_start_playback();
-        int played = service_audio_play(pcm, copy_len / sizeof(int16_t), 30u);
+        uint16_t copy_len = view.payload_len > sizeof(s_rx_pcm) ? sizeof(s_rx_pcm) : view.payload_len;
+        memcpy(s_rx_pcm, view.payload, copy_len);
+        if (app_intercom_rx_start_playback() != 0) {
+            return;
+        }
+        int played = service_audio_play(s_rx_pcm, copy_len / sizeof(int16_t), 30u);
         if (played < 0) {
             APP_LOGW(TAG, "UDP 音频播放失败, seq=%u, ret=%d", (unsigned int)view.seq, played);
+            app_intercom_rx_stop_playback();
+        } else if (played > 0) {
+            s_rx_last_audio_ms = osal_get_tick_ms();
+            if (s_rx_last_audio_ms - s_rx_play_log_ms >= 1000u) {
+                APP_LOGI(TAG, "UDP 音频播放中, seq=%u, samples=%d",
+                         (unsigned int)view.seq, played);
+                s_rx_play_log_ms = s_rx_last_audio_ms;
+            }
         }
     }
 }
@@ -423,23 +481,22 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 static void app_intercom_udp_rx_task(void *arg)
 {
     (void)arg;
-    uint8_t rx[APP_INTERCOM_PACKET_MAX_BYTES * 2u];
     uint16_t used = 0u;
 
     while (1) {
-        int ret = service_network_read_downlink(&rx[used], (uint16_t)(sizeof(rx) - used), 80u);
+        int ret = service_network_read_downlink(&s_rx_buf[used], (uint16_t)(sizeof(s_rx_buf) - used), 80u);
         if (ret > 0) {
             used = (uint16_t)(used + ret);
             uint16_t pos = 0u;
             /* 下行数据可能跨多次读取，保留半包并只消费完整 WTK1 包。 */
             while ((pos + APP_INTERCOM_PACKET_HEADER_LEN) <= used) {
-                if (memcmp(&rx[pos], APP_INTERCOM_PACKET_MAGIC, 4u) != 0) {
+                if (memcmp(&s_rx_buf[pos], APP_INTERCOM_PACKET_MAGIC, 4u) != 0) {
                     pos++;
                     continue;
                 }
 
-                uint8_t header_len = rx[pos + 5u];
-                uint16_t payload_len = (uint16_t)rx[pos + 32u] | ((uint16_t)rx[pos + 33u] << 8);
+                uint8_t header_len = s_rx_buf[pos + 5u];
+                uint16_t payload_len = (uint16_t)s_rx_buf[pos + 32u] | ((uint16_t)s_rx_buf[pos + 33u] << 8);
                 uint16_t packet_len = (uint16_t)(header_len + payload_len);
                 if (header_len != APP_INTERCOM_PACKET_HEADER_LEN || packet_len > APP_INTERCOM_PACKET_MAX_BYTES) {
                     pos++;
@@ -449,20 +506,21 @@ static void app_intercom_udp_rx_task(void *arg)
                     break;
                 }
 
-                app_intercom_handle_udp_packet(&rx[pos], packet_len);
+                app_intercom_handle_udp_packet(&s_rx_buf[pos], packet_len);
                 pos = (uint16_t)(pos + packet_len);
             }
 
             if (pos > 0u) {
-                memmove(rx, &rx[pos], used - pos);
+                memmove(s_rx_buf, &s_rx_buf[pos], used - pos);
                 used = (uint16_t)(used - pos);
             }
-            if (used >= sizeof(rx)) {
+            if (used >= sizeof(s_rx_buf)) {
                 used = 0u;
             }
         } else {
             osal_delay_ms(10u);
         }
+        app_intercom_rx_stop_if_idle();
     }
 }
 
