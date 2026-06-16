@@ -5,6 +5,7 @@
 #include "ui_app_intercom.h"
 #include "ui_app_settings.h"
 #include "ui_assets.h"
+#include "ui_event.h"
 #include "ui_font.h"
 #include "ui_i18n.h"
 #include "ui_theme.h"
@@ -74,6 +75,7 @@ static lv_obj_t *g_menu_toggle;
 static lv_obj_t *g_menu_bar;
 static lv_obj_t *g_menu_clip;
 static lv_obj_t *g_menu_toggle_arrow;
+static lv_obj_t *g_power_dialog;
 static menu_icon_t g_menu_icons[UI_APP_ID_COUNT];
 
 static ui_app_id_t g_current_app = UI_APP_ID_INTERCOM;
@@ -96,6 +98,8 @@ static const ui_app_id_t g_menu_apps[MENU_APP_COUNT] = {
 
 static void anim_set_x(void *obj, int32_t x);
 static void update_menu_icons(void);
+static void power_dialog_close_event_cb(lv_event_t *e);
+static void power_dialog_confirm_event_cb(lv_event_t *e);
 
 static const lv_image_dsc_t *get_app_icon_src(ui_app_id_t app)
 {
@@ -119,6 +123,33 @@ static void refresh_menu_toggle_arrow(void)
 
     lv_label_set_text(g_menu_toggle_arrow, g_menu_expanded ? ">" : "<");
     lv_obj_center(g_menu_toggle_arrow);
+}
+
+static void close_power_dialog(void)
+{
+    if(g_power_dialog == NULL) {
+        return;
+    }
+
+    lv_obj_delete(g_power_dialog);
+    g_power_dialog = NULL;
+}
+
+static void power_dialog_close_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        close_power_dialog();
+    }
+}
+
+static void power_dialog_confirm_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    close_power_dialog();
+    ui_event_notify_power_shutdown_confirmed();
 }
 
 static void apply_menu_icon_visual(lv_obj_t *target_box,
@@ -706,4 +737,56 @@ void ui_shell_set_signal_levels(uint8_t wifi_level, uint8_t cellular_level)
     g_wifi_signal_level = wifi_level;
     g_cellular_signal_level = cellular_level;
     refresh_signal_level();
+}
+
+void ui_shell_show_power_dialog(void)
+{
+    if(g_bg == NULL) {
+        return;
+    }
+
+    if(g_power_dialog != NULL) {
+        lv_obj_move_foreground(g_power_dialog);
+        return;
+    }
+
+    g_power_dialog = lv_obj_create(g_bg);
+    lv_obj_remove_flag(g_power_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_power_dialog, 124, 112);
+    lv_obj_align(g_power_dialog, LV_ALIGN_CENTER, 0, -8);
+    lv_obj_set_style_radius(g_power_dialog, 18, 0);
+    lv_obj_set_style_bg_color(g_power_dialog, lv_color_make(0x18, 0x18, 0x18), 0);
+    lv_obj_set_style_bg_opa(g_power_dialog, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(g_power_dialog, lv_color_make(0x58, 0x58, 0x58), 0);
+    lv_obj_set_style_border_width(g_power_dialog, 1, 0);
+    lv_obj_set_style_pad_all(g_power_dialog, 0, 0);
+
+    lv_obj_t *close_btn = lv_button_create(g_power_dialog);
+    lv_obj_set_size(close_btn, 28, 28);
+    lv_obj_set_pos(close_btn, 88, 8);
+    lv_obj_set_style_radius(close_btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_make(0x32, 0x32, 0x32), 0);
+    lv_obj_set_style_shadow_width(close_btn, 0, 0);
+    lv_obj_add_event_cb(close_btn, power_dialog_close_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *close_label = lv_label_create(close_btn);
+    lv_label_set_text(close_label, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(close_label, lv_color_white(), 0);
+    lv_obj_center(close_label);
+
+    lv_obj_t *power_btn = lv_button_create(g_power_dialog);
+    lv_obj_set_size(power_btn, 64, 64);
+    lv_obj_align(power_btn, LV_ALIGN_CENTER, 0, 7);
+    lv_obj_set_style_radius(power_btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(power_btn, lv_color_make(0xE8, 0xE8, 0xE8), 0);
+    lv_obj_set_style_shadow_width(power_btn, 0, 0);
+    lv_obj_add_event_cb(power_btn, power_dialog_confirm_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *power_label = lv_label_create(power_btn);
+    lv_label_set_text(power_label, LV_SYMBOL_POWER);
+    lv_obj_set_style_text_color(power_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(power_label, ui_font_normal(), 0);
+    lv_obj_center(power_label);
+
+    lv_obj_move_foreground(g_power_dialog);
 }

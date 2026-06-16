@@ -9,6 +9,7 @@
 #include "ui.h"
 #include "ui_event.h"
 #include "ui_shell.h"
+#include "lvgl.h"
 
 #include <stdint.h>
 
@@ -37,6 +38,7 @@ int app_ui_create(void)
     }
 
     ui_init();
+    lv_refr_now(NULL);
 
     int ret = service_screen_display_on(1);
     if (ret != 0) {
@@ -102,6 +104,47 @@ int app_ui_set_battery_level(int percent)
     }
 
     ui_shell_set_battery_level((uint8_t)percent);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_show_power_dialog(void)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "关机确认弹窗显示失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_shell_show_power_dialog();
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_prepare_shutdown_blackout(void)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(500) != 0) {
+        APP_LOGE(TAG, "关机黑屏刷新失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    lv_obj_t *screen = lv_screen_active();
+    if (screen != NULL) {
+        lv_obj_clean(screen);
+        lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(screen, 0, 0);
+        lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        lv_refr_now(NULL);
+    }
+
     service_screen_unlock();
     return 0;
 }

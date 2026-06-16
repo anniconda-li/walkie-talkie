@@ -244,6 +244,9 @@ int d_lcd_display_init(void)
         ret = d_lcd_err_to_int(esp_lcd_panel_set_gap(s_lcd_panel, 0, 0));
     }
     if (ret == 0) {
+        ret = d_lcd_fill_screen(0x0000u);
+    }
+    if (ret == 0) {
         ret = d_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, true));
     }
     if (ret != 0) {

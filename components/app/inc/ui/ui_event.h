@@ -67,6 +67,7 @@ typedef struct {
                                             const char *password); /**< WLAN 连接请求。 */
     void (*settings_4g_select_requested)(void);                    /**< 4G 切换请求。 */
     int (*settings_wifi_ssid_get)(char *ssid, size_t size);        /**< 查询当前 WLAN SSID。 */
+    void (*power_shutdown_confirmed)(void);                        /**< 用户确认关机回调。 */
 } ui_event_callbacks_t;
 
 /**
@@ -145,6 +146,8 @@ typedef struct {
  * @param[in] callbacks 回调集合；传入 NULL 时清空回调。
  */
 void ui_event_set_callbacks(const ui_event_callbacks_t *callbacks);
+
+void ui_event_notify_power_shutdown_confirmed(void);
 
 /**
  * @brief 注册对讲页面视图对象。

@@ -622,7 +622,8 @@ static void settings_refresh_wlan_ssid(ui_settings_view_t *view)
 
     ssid[0] = '\0';
     current_text = lv_label_get_text(view->wlan_ssid_label);
-    if(g_callbacks.settings_wifi_ssid_get != NULL &&
+    if(view->selected_network == UI_SETTINGS_NETWORK_WLAN &&
+       g_callbacks.settings_wifi_ssid_get != NULL &&
        g_callbacks.settings_wifi_ssid_get(ssid, sizeof(ssid)) == 0 &&
        ssid[0] != '\0') {
         if(current_text == NULL || strcmp(current_text, ssid) != 0) {
@@ -957,6 +958,13 @@ void ui_event_set_callbacks(const ui_event_callbacks_t *callbacks)
     }
 
     g_callbacks = *callbacks;
+}
+
+void ui_event_notify_power_shutdown_confirmed(void)
+{
+    if(g_callbacks.power_shutdown_confirmed != NULL) {
+        g_callbacks.power_shutdown_confirmed();
+    }
 }
 
 /**

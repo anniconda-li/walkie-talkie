@@ -23,6 +23,8 @@ static const char *TAG = "app_network";
 #define APP_NETWORK_NVS_WIFI_SSID      "wifi_ssid"
 #define APP_NETWORK_NVS_WIFI_PASSWORD  "wifi_pwd"
 #define APP_NETWORK_WIFI_CONNECT_MS    15000u
+#define APP_NETWORK_FAKE_4G_SSID       "14"
+#define APP_NETWORK_FAKE_4G_PASSWORD   "12345678"
 
 static volatile int s_started = 0;
 static volatile int s_switching = 0;
@@ -79,6 +81,15 @@ static void app_network_enter_user_mode(app_network_mode_t mode)
     (void)service_network_deinit();
     app_network_set_mode(mode);
     app_intercom_network_changed();
+}
+
+static int app_network_ensure_wifi_service(void)
+{
+    if (service_network_init(NULL) == 0) {
+        return 0;
+    }
+
+    return service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
 }
 
 static int app_network_nvs_open(nvs_handle_t *handle, nvs_open_mode_t mode)
@@ -223,12 +234,29 @@ int app_network_select_4g(void)
         return ret;
     }
 
-    (void)service_network_deinit();
-    (void)d_wifi_disconnect();
+    ret = app_network_ensure_wifi_service();
+    if (ret != 0) {
+        app_network_end_switch();
+        return ret;
+    }
+
     app_network_set_mode(APP_NETWORK_MODE_4G);
     app_intercom_network_changed();
+    (void)d_wifi_disconnect();
+
+    ret = d_wifi_connect(APP_NETWORK_FAKE_4G_SSID,
+                         APP_NETWORK_FAKE_4G_PASSWORD,
+                         APP_NETWORK_WIFI_CONNECT_MS);
+    if (ret != 0) {
+        APP_LOGW(TAG, "伪 4G WiFi 连接失败, ssid=%s, ret=%d", APP_NETWORK_FAKE_4G_SSID, ret);
+        (void)d_wifi_disconnect();
+        app_network_end_switch();
+        return ret;
+    }
+
+    app_intercom_network_changed();
     app_network_end_switch();
-    APP_LOGI(TAG, "已切换到 4G 占位模式");
+    APP_LOGI(TAG, "已切换到伪 4G WiFi, ssid=%s", APP_NETWORK_FAKE_4G_SSID);
     return 0;
 }
 
@@ -240,7 +268,10 @@ int app_network_recover(void)
         return -1;
     }
 
-    if (mode == APP_NETWORK_MODE_WIFI) {
+    if (mode == APP_NETWORK_MODE_WIFI || mode == APP_NETWORK_MODE_4G) {
+        if (mode == APP_NETWORK_MODE_4G) {
+            return app_network_select_4g();
+        }
         return service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
     }
 

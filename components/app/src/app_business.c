@@ -35,6 +35,7 @@
 #include "app_network.h"
 #include "app_status_monitor.h"
 #include "app_ui.h"
+#include "d_power_control.h"
 #include "osal_mutex.h"
 #include "osal_task.h"
 #include "service_audio.h"
@@ -74,6 +75,7 @@ static int s_audio_session_busy = 0;
 static volatile int s_wifi_scan_busy = 0;
 static volatile int s_wifi_connect_busy = 0;
 static volatile int s_network_switch_busy = 0;
+static volatile int s_fake_4g_connect_busy = 0;
 
 typedef struct {
     char ssid[33];
@@ -394,11 +396,31 @@ static void app_business_wifi_select_task(void *arg)
     osal_task_delete_current();
 }
 
+static void app_business_4g_select_task(void *arg)
+{
+    (void)arg;
+
+    int ret = -1;
+    while (s_fake_4g_connect_busy) {
+        ret = app_network_select_4g();
+        if (ret == 0) {
+            break;
+        }
+        osal_delay_ms(1000u);
+    }
+
+    (void)app_ui_settings_show_4g_select_result(ret == 0 ? UI_SETTINGS_4G_OK : UI_SETTINGS_4G_UNAVAILABLE, ret);
+    s_fake_4g_connect_busy = 0;
+    s_network_switch_busy = 0;
+    osal_task_delete_current();
+}
+
 static void app_business_on_wifi_select(void)
 {
     if (app_network_get_mode() == APP_NETWORK_MODE_WIFI) {
         return;
     }
+    s_fake_4g_connect_busy = 0;
     if (s_wifi_connect_busy || s_network_switch_busy) {
         return;
     }
@@ -419,8 +441,35 @@ static void app_business_on_wifi_select(void)
 
 static void app_business_on_4g_select(void)
 {
-    int ret = app_network_select_4g();
-    (void)app_ui_settings_show_4g_select_result(ret == 0 ? UI_SETTINGS_4G_OK : UI_SETTINGS_4G_UNAVAILABLE, ret);
+    if (app_network_get_mode() == APP_NETWORK_MODE_4G || s_network_switch_busy || s_fake_4g_connect_busy) {
+        return;
+    }
+
+    s_fake_4g_connect_busy = 1;
+    s_network_switch_busy = 1;
+    if (osal_task_create("fake_4g",
+                         app_business_4g_select_task,
+                         NULL,
+                         6144u,
+                         4u,
+                         NULL) != 0) {
+        s_fake_4g_connect_busy = 0;
+        s_network_switch_busy = 0;
+        (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
+    }
+}
+
+static void app_business_on_power_key_long_press(void *user_data)
+{
+    (void)user_data;
+    (void)app_ui_show_power_dialog();
+}
+
+static void app_business_on_power_shutdown_confirmed(void)
+{
+    (void)app_ui_prepare_shutdown_blackout();
+    osal_delay_ms(120u);
+    (void)d_power_control_shutdown();
 }
 
 /**
@@ -452,9 +501,11 @@ static void app_business_register_ui_callbacks(void)
         .settings_wifi_connect_requested = app_business_on_wifi_connect,
         .settings_4g_select_requested = app_business_on_4g_select,
         .settings_wifi_ssid_get = app_business_get_wifi_ssid,
+        .power_shutdown_confirmed = app_business_on_power_shutdown_confirmed,
     };
 
     ui_event_set_callbacks(&callbacks);
+    d_power_control_set_long_press_callback(app_business_on_power_key_long_press, NULL);
 }
 
 /* ==========================================================================

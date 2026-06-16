@@ -75,6 +75,10 @@ int app_ui_set_ai_answer_text(const char *text);
 
 int app_ui_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
 
+int app_ui_show_power_dialog(void);
+
+int app_ui_prepare_shutdown_blackout(void);
+
 int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
                                           uint16_t count,
                                           int ret);

@@ -109,12 +109,13 @@ static void app_status_monitor_network_task(void *arg)
         app_network_mode_t mode = app_network_get_mode();
         service_network_status_t status;
 
-        if (mode == APP_NETWORK_MODE_4G) {
-            (void)app_ui_set_network_status(0, 4);
-            s_network_ready = 0;
-        } else if (service_network_get_status(&status) == 0) {
+        if (service_network_get_status(&status) == 0) {
             int bars = app_status_monitor_network_to_bars(&status);
-            (void)app_ui_set_network_status(bars, 0);
+            if (mode == APP_NETWORK_MODE_4G) {
+                (void)app_ui_set_network_status(0, bars);
+            } else {
+                (void)app_ui_set_network_status(bars, 0);
+            }
             s_network_ready = bars > 0 ? 1 : 0;
         } else {
             (void)app_ui_set_network_status(0, 0);

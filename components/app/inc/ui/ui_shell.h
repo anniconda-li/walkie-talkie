@@ -67,4 +67,6 @@ void ui_shell_set_signal_level(uint8_t level);
 
 void ui_shell_set_signal_levels(uint8_t wifi_level, uint8_t cellular_level);
 
+void ui_shell_show_power_dialog(void);
+
 #endif /* UI_SHELL_H */
