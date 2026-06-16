@@ -37,8 +37,10 @@
 #include "app_ui.h"
 #include "d_power_control.h"
 #include "osal_mutex.h"
+#include "osal_queue.h"
 #include "osal_task.h"
 #include "service_audio.h"
+#include "service_buttons.h"
 #include "ui_event.h"
 
 #include <stdint.h>
@@ -47,6 +49,9 @@
 #include <string.h>
 
 static const char *TAG = "app_business";
+
+#define APP_BUSINESS_VOLUME_TASK_STACK 3072u
+#define APP_BUSINESS_VOLUME_QUEUE_LEN  8u
 
 /* ==========================================================================
  * 全局状态变量
@@ -76,6 +81,9 @@ static volatile int s_wifi_scan_busy = 0;
 static volatile int s_wifi_connect_busy = 0;
 static volatile int s_network_switch_busy = 0;
 static volatile int s_fake_4g_connect_busy = 0;
+static int32_t s_volume = 80;
+static osal_queue_t s_volume_step_queue = NULL;
+static osal_task_t s_volume_task = NULL;
 
 typedef struct {
     char ssid[33];
@@ -265,16 +273,73 @@ static void app_business_on_camera_retake(void)
     app_camera_retake();
 }
 
-/** @brief 音量滑块变化 → 设置硬件音量（0-100）。 */
-static void app_business_on_volume_changed(int32_t value)
+static void app_business_set_volume(int32_t value, int sync_ui)
 {
     if (value < 0) {
         value = 0;
     } else if (value > 100) {
         value = 100;
     }
+    value = ((value + 5) / 10) * 10;
 
+    if (value == s_volume) {
+        if (sync_ui) {
+            (void)app_ui_set_settings_volume(value);
+        }
+        return;
+    }
+
+    s_volume = value;
     (void)service_audio_set_volume((uint8_t)value);
+    if (sync_ui) {
+        (void)app_ui_set_settings_volume(value);
+    }
+    APP_LOGI(TAG, "音量已设置, volume=%ld", (long)value);
+}
+
+/** @brief 音量滑块变化 → 设置硬件音量（0-100）。 */
+static void app_business_on_volume_changed(int32_t value)
+{
+    app_business_set_volume(value, 0);
+}
+
+static void app_business_on_volume_button_step(int step)
+{
+    if (s_volume_step_queue != NULL) {
+        (void)osal_queue_send(s_volume_step_queue, &step, OSAL_WAIT_NONE);
+    }
+}
+
+static void app_business_volume_task(void *arg)
+{
+    (void)arg;
+    int step = 0;
+
+    while (1) {
+        if (osal_queue_recv(s_volume_step_queue, &step, OSAL_WAIT_FOREVER) == 0) {
+            app_business_set_volume(s_volume + step, 1);
+        }
+    }
+}
+
+static int app_business_start_volume_task(void)
+{
+    if (s_volume_step_queue == NULL) {
+        s_volume_step_queue = osal_queue_create(APP_BUSINESS_VOLUME_QUEUE_LEN, sizeof(int));
+        if (s_volume_step_queue == NULL) {
+            return -1;
+        }
+    }
+    if (s_volume_task != NULL) {
+        return 0;
+    }
+
+    return osal_task_create("biz_volume",
+                            app_business_volume_task,
+                            NULL,
+                            APP_BUSINESS_VOLUME_TASK_STACK,
+                            3u,
+                            &s_volume_task);
 }
 
 static ui_settings_network_mode_t app_business_get_network_mode(void)
@@ -542,6 +607,7 @@ int app_business_start(void)
 
     /* 先注册 UI 回调，再启动后台业务，确保开机后用户操作能被接收。 */
     app_business_register_ui_callbacks();
+    app_business_set_volume(s_volume, 0);
 
     ret = app_network_start();
     if (ret != 0) {
@@ -551,6 +617,21 @@ int app_business_start(void)
 
     ret = app_status_monitor_start();
     if (ret != 0) {
+        return ret;
+    }
+
+    ret = app_business_start_volume_task();
+    if (ret != 0) {
+        APP_LOGE(TAG, "音量任务启动失败, ret=%d", ret);
+        return ret;
+    }
+
+    service_buttons_callbacks_t button_callbacks = {
+        .volume_step = app_business_on_volume_button_step,
+    };
+    ret = service_buttons_start(&button_callbacks);
+    if (ret != 0) {
+        APP_LOGE(TAG, "实体按键服务启动失败, ret=%d", ret);
         return ret;
     }
 

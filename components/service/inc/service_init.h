@@ -47,6 +47,13 @@ int service_init_audio(void);
 int service_init_battery(void);
 
 /**
+ * @brief 仅完成实体按键 service 能力绑定并初始化按键 service。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_init_buttons(void);
+
+/**
  * @brief 仅完成网络 service 能力绑定并初始化网络 service。
  *
  * @return 成功返回 0；失败返回负值。

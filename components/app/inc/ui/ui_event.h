@@ -115,10 +115,8 @@ typedef struct {
  * @brief 设置页面视图对象集合。
  */
 typedef struct {
-    lv_obj_t *volume_label;           /**< 音量标签。 */
     lv_obj_t *firmware_label;         /**< 固件版本标题标签。 */
     lv_obj_t *version_label;          /**< 固件版本号标签。 */
-    lv_obj_t *volume_slider;          /**< 音量滑块。 */
     lv_obj_t *wlan_button;            /**< WLAN 模式选择框。 */
     lv_obj_t *cellular_button;        /**< 4G 模式选择框。 */
     lv_obj_t *wlan_ssid_label;        /**< WLAN 当前热点标签。 */
@@ -204,6 +202,8 @@ void ui_event_set_ai_message(ui_text_id_t text_id);
 void ui_event_set_ai_answer_text(const char *text);
 
 void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
+
+void ui_event_set_settings_volume(int32_t volume);
 
 /**
  * @brief 注册设置页面视图对象。

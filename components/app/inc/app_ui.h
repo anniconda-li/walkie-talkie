@@ -10,6 +10,8 @@
 #include "ui_i18n.h"
 #include "ui_event.h"
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -74,6 +76,8 @@ int app_ui_set_ai_message(ui_text_id_t text_id);
 int app_ui_set_ai_answer_text(const char *text);
 
 int app_ui_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
+
+int app_ui_set_settings_volume(int32_t volume);
 
 int app_ui_show_power_dialog(void);
 

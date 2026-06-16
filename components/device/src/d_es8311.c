@@ -46,6 +46,12 @@ static d_es8311_wdriver_ops_t s_d_ops;
 /** @brief ES8311 单声道转双声道播放缓存。 */
 static int16_t s_d_stereo_buf[D_ES8311_MAX_FRAMES * 2u];
 
+/** @brief 用户设置的播放音量百分比，0 表示用户主动静音。 */
+static uint8_t s_es8311_volume = 80u;
+
+/** @brief 播放会话是否因 stop_playback 临时静音。 */
+static uint8_t s_es8311_playback_muted = 1u;
+
 /**
  * @brief 向 ES8311 写入一个 8 位寄存器值。
  */
@@ -142,9 +148,46 @@ static int es8311_play(const uint8_t *data,
 }
 
 /**
- * @brief 将百分比音量转换为 ES8311 DAC 音量寄存器值。
+ * @brief 将用户百分比音量映射为 ES8311 DAC 数字音量寄存器值。
+ *
+ * UI 仍使用 0-100 线性滑块，driver 内部用 10% 锚点插值提供更接近听感的曲线：
+ * 低段抬高并拉开 10%-20% 差距，避免最低档接近静音；高段压缩，避免每档跳变过大。
  */
-static int es8311_set_volume(uint8_t volume)
+static uint8_t es8311_volume_to_dac_reg(uint8_t volume)
+{
+    static const uint8_t volume_curve[] = {
+        0x00u, /*   0% */
+        0x9Au, /*  10% */
+        0xB0u, /*  20% */
+        0xBEu, /*  30% */
+        0xC8u, /*  40% */
+        0xD0u, /*  50% */
+        0xD8u, /*  60% */
+        0xDEu, /*  70% */
+        0xE4u, /*  80% */
+        0xEAu, /*  90% */
+        0xF0u, /* 100% */
+    };
+
+    if (volume == 0u) {
+        return 0x00u;
+    }
+    if (volume > 100u) {
+        volume = 100u;
+    }
+
+    uint8_t index = volume / 10u;
+    uint8_t rem = volume % 10u;
+    if (index >= 10u || rem == 0u) {
+        return volume_curve[index];
+    }
+
+    uint8_t low = volume_curve[index];
+    uint8_t high = volume_curve[index + 1u];
+    return (uint8_t)(low + ((((uint16_t)(high - low) * rem) + 5u) / 10u));
+}
+
+static int es8311_apply_volume(uint8_t volume)
 {
     if (s_es8311_inited == 0u) {
         D_LOGE(TAG, "ES8311 设置音量失败: 未初始化");
@@ -155,11 +198,9 @@ static int es8311_set_volume(uint8_t volume)
         volume = 100u;
     }
 
-    uint8_t reg_value = (volume == 0u) ? 0u : (uint8_t)(((uint32_t)volume * 256u / 100u) - 1u);
+    uint8_t reg_value = es8311_volume_to_dac_reg(volume);
     int ret = es8311_write_u8(ES8311_DAC_REG32, reg_value);
-    if (ret == 0) {
-        D_LOGI(TAG, "ES8311 音量设置成功, volume=%u", (unsigned int)volume);
-    } else {
+    if (ret != 0) {
         D_LOGE(TAG, "ES8311 音量设置失败, ret=%d", ret);
     }
 
@@ -258,7 +299,8 @@ int d_es8311_start_playback(void)
         return -1;
     }
 
-    int ret = es8311_set_mute(0);
+    s_es8311_playback_muted = 0u;
+    int ret = es8311_set_mute(s_es8311_volume == 0u);
     if (ret == 0) {
         D_LOGI(TAG, "ES8311 播放输出已打开");
     }
@@ -271,8 +313,9 @@ int d_es8311_stop_playback(void)
         return -1;
     }
 
-    es8311_write_silence_tail();
+    s_es8311_playback_muted = 1u;
     int ret = es8311_set_mute(1);
+    es8311_write_silence_tail();
     if (ret == 0) {
         D_LOGI(TAG, "ES8311 播放输出已关闭");
     }
@@ -317,10 +360,31 @@ int d_es8311_play_pcm(const int16_t *pcm, uint32_t samples, uint32_t timeout_ms)
 
 int d_es8311_set_volume(uint8_t volume)
 {
-    return s_es8311_inited != 0u ? es8311_set_volume(volume) : -1;
+    if (s_es8311_inited == 0u) {
+        return -1;
+    }
+    if (volume > 100u) {
+        volume = 100u;
+    }
+
+    int ret = es8311_apply_volume(volume);
+    if (ret != 0) {
+        return ret;
+    }
+
+    s_es8311_volume = volume;
+    if (s_es8311_playback_muted == 0u) {
+        ret = es8311_set_mute(volume == 0u);
+    }
+    return ret;
 }
 
 int d_es8311_set_mute(int mute)
 {
-    return s_es8311_inited != 0u ? es8311_set_mute(mute) : -1;
+    if (s_es8311_inited == 0u) {
+        return -1;
+    }
+
+    s_es8311_playback_muted = mute ? 1u : 0u;
+    return es8311_set_mute(mute || s_es8311_volume == 0u);
 }

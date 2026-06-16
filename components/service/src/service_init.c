@@ -14,9 +14,11 @@
 #include "d_es7210.h"
 #include "d_init.h"
 #include "d_lcd.h"
+#include "d_pca9557.h"
 #include "d_wifi.h"
 #include "service_audio.h"
 #include "service_battery.h"
+#include "service_buttons.h"
 #include "service_camera.h"
 #include "service_network.h"
 #include "service_screen.h"
@@ -154,6 +156,35 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
 
 static service_network_backend_t s_network_backend = SERVICE_NETWORK_BACKEND_WIFI;
 
+static int service_init_buttons_read_pca_pin(pca9557_pin_t pin,
+                                             service_buttons_level_t *level)
+{
+    if (level == NULL) {
+        return -1;
+    }
+
+    pca9557_level_t pca_level = PCA9557_LEVEL_HIGH;
+    int ret = d_pca9557_get_pin_level(pin, &pca_level);
+    if (ret != 0) {
+        return ret;
+    }
+
+    *level = (pca_level == PCA9557_LEVEL_HIGH) ?
+             SERVICE_BUTTONS_LEVEL_HIGH :
+             SERVICE_BUTTONS_LEVEL_LOW;
+    return 0;
+}
+
+static int service_init_buttons_read_volume_up(service_buttons_level_t *level)
+{
+    return service_init_buttons_read_pca_pin(PCA9557_PIN_1, level);
+}
+
+static int service_init_buttons_read_volume_down(service_buttons_level_t *level)
+{
+    return service_init_buttons_read_pca_pin(PCA9557_PIN_2, level);
+}
+
 int service_init_network(void)
 {
     return service_init_network_for(s_network_backend);
@@ -288,6 +319,22 @@ int service_init_battery(void)
     return ret;
 }
 
+int service_init_buttons(void)
+{
+    service_buttons_config_t buttons_cfg = {
+        .read_volume_up = service_init_buttons_read_volume_up,
+        .read_volume_down = service_init_buttons_read_volume_down,
+        .active_level = SERVICE_BUTTONS_LEVEL_LOW,
+    };
+
+    int ret = service_buttons_init(&buttons_cfg);
+    if (ret != 0) {
+        SERVICE_LOGE(TAG, "实体按键服务初始化失败, ret=%d", ret);
+    }
+
+    return ret;
+}
+
 int service_init(void)
 {
     /*
@@ -301,6 +348,11 @@ int service_init(void)
     }
 
     ret = service_init_battery();
+    if (ret != 0) {
+        return ret;
+    }
+
+    ret = service_init_buttons();
     if (ret != 0) {
         return ret;
     }

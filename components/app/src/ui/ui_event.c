@@ -33,6 +33,7 @@
 #define PTT_RING_BASE_SIZE 48
 #define PTT_RING_MAX_SIZE 132
 #define AI_BAR_BASE_H 12
+#define VOLUME_OVERLAY_HIDE_MS 1200u
 
 /**
  * @brief 全局 UI 事件回调集合。
@@ -50,6 +51,11 @@ static uint8_t g_ai_wait_dot_count = 0u;
 static ui_text_id_t g_ai_message_id = UI_TEXT_AI_IDLE;
 static ui_ai_audio_btn_state_t g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
 static lv_obj_t *g_ai_cancel_label = NULL;
+static int32_t g_settings_volume = 80;
+static uint8_t g_settings_volume_syncing = 0u;
+static lv_obj_t *g_volume_overlay = NULL;
+static lv_obj_t *g_volume_slider = NULL;
+static lv_timer_t *g_volume_hide_timer = NULL;
 
 /* ==========================================================================
  * 通用 UI 工具函数
@@ -559,27 +565,101 @@ static void ai_apply_audio_button_state(ui_ai_view_t *view, ui_ai_audio_btn_stat
                                 0);
 }
 
-/* ==========================================================================
- * 设置页面事件处理
- * ========================================================================== */
-
-/**
- * @brief 音量滑块事件。
- */
-static void settings_slider_event_cb(lv_event_t *e)
+static int32_t normalize_volume_step(int32_t volume)
 {
-    lv_obj_t *slider = lv_event_get_target(e);
-    int32_t value;
+    if(volume < 0) {
+        return 0;
+    }
+    if(volume > 100) {
+        return 100;
+    }
 
-    if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || slider == NULL) {
+    return ((volume + 5) / 10) * 10;
+}
+
+static void volume_overlay_hide_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if(g_volume_overlay != NULL) {
+        lv_obj_add_flag(g_volume_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(g_volume_hide_timer != NULL) {
+        lv_timer_pause(g_volume_hide_timer);
+    }
+}
+
+static void volume_overlay_refresh_hide_timer(void)
+{
+    if(g_volume_hide_timer == NULL) {
+        g_volume_hide_timer = lv_timer_create(volume_overlay_hide_timer_cb, VOLUME_OVERLAY_HIDE_MS, NULL);
+    }
+    lv_timer_reset(g_volume_hide_timer);
+    lv_timer_resume(g_volume_hide_timer);
+}
+
+static void volume_overlay_slider_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || g_volume_slider == NULL) {
+        return;
+    }
+    if(g_settings_volume_syncing != 0u) {
         return;
     }
 
-    value = lv_slider_get_value(slider);
+    int32_t volume = lv_slider_get_value(g_volume_slider) * 10;
+    g_settings_volume = volume;
+    volume_overlay_refresh_hide_timer();
     if(g_callbacks.settings_volume_changed != NULL) {
-        g_callbacks.settings_volume_changed(value);
+        g_callbacks.settings_volume_changed(volume);
     }
 }
+
+static void volume_overlay_create(void)
+{
+    if(g_volume_overlay != NULL) {
+        return;
+    }
+
+    lv_obj_t *screen = lv_screen_active();
+    if(screen == NULL) {
+        return;
+    }
+
+    g_volume_overlay = lv_obj_create(screen);
+    lv_obj_remove_flag(g_volume_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_volume_overlay, 34, 170);
+    lv_obj_align(g_volume_overlay, LV_ALIGN_RIGHT_MID, -6, 2);
+    lv_obj_set_style_radius(g_volume_overlay, 6, 0);
+    lv_obj_set_style_bg_color(g_volume_overlay, lv_color_make(0x16, 0x16, 0x16), 0);
+    lv_obj_set_style_bg_opa(g_volume_overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(g_volume_overlay, 1, 0);
+    lv_obj_set_style_border_color(g_volume_overlay, lv_color_make(0x58, 0x58, 0x58), 0);
+    lv_obj_set_style_pad_all(g_volume_overlay, 0, 0);
+
+    lv_obj_t *icon = lv_label_create(g_volume_overlay);
+    lv_label_set_text(icon, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+    lv_obj_set_style_text_font(icon, ui_font_small(), 0);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 8);
+
+    g_volume_slider = lv_slider_create(g_volume_overlay);
+    lv_slider_set_range(g_volume_slider, 0, 10);
+    lv_obj_set_size(g_volume_slider, 14, 120);
+    lv_obj_align(g_volume_slider, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_color(g_volume_slider, lv_color_make(0x78, 0x78, 0x78), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_volume_slider, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(g_volume_slider, 7, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_volume_slider, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(g_volume_slider, 7, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(g_volume_slider, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_border_width(g_volume_slider, 0, LV_PART_KNOB);
+    lv_obj_add_event_cb(g_volume_slider, volume_overlay_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_flag(g_volume_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ==========================================================================
+ * 设置页面事件处理
+ * ========================================================================== */
 
 static void settings_set_network_selected(ui_settings_view_t *view, ui_settings_network_mode_t mode)
 {
@@ -1105,15 +1185,30 @@ void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state)
     ai_apply_audio_button_state(g_ai_view, state);
 }
 
+void ui_event_set_settings_volume(int32_t volume)
+{
+    volume = normalize_volume_step(volume);
+
+    g_settings_volume = volume;
+    volume_overlay_create();
+    if(g_volume_overlay == NULL || g_volume_slider == NULL) {
+        return;
+    }
+
+    g_settings_volume_syncing = 1u;
+    lv_slider_set_value(g_volume_slider, volume / 10, LV_ANIM_OFF);
+    g_settings_volume_syncing = 0u;
+    lv_obj_remove_flag(g_volume_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_volume_overlay);
+    volume_overlay_refresh_hide_timer();
+}
+
 void ui_event_register_settings(ui_settings_view_t *view)
 {
     if(view == NULL) {
         return;
     }
 
-    if(view->volume_slider != NULL) {
-        lv_obj_add_event_cb(view->volume_slider, settings_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    }
     g_settings_view = view;
     if(view->wlan_button != NULL) {
         lv_obj_add_event_cb(view->wlan_button, settings_wlan_select_event_cb, LV_EVENT_ALL, view);

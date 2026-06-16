@@ -69,8 +69,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_PTT_WAIT_UDP_MS    15000u
 /** @brief PTT 等待 UDP 就绪时的轮询间隔。 */
 #define APP_INTERCOM_PTT_WAIT_STEP_MS   100u
-/** @brief UDP 接收播放空闲关闭时间，覆盖正常 20ms 包间隔和短抖动。 */
-#define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 240u
+/** @brief UDP 接收播放空闲关闭时间，覆盖正常 20ms 包间隔和少量网络抖动。 */
+#define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 60u
 
 /** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
@@ -430,6 +430,7 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
     if (app_intercom_parse_packet(packet, len, &view) != 0) {
         return;
     }
+
     /* 服务器会原样转发音频包，本机自己的包和非当前频道包都直接忽略。 */
     if (view.channel != (uint16_t)s_current_channel ||
         app_intercom_packet_is_own(packet)) {

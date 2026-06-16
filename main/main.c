@@ -76,6 +76,9 @@ void app_main(void)
     ret = d_screen_init();
     if (ret == 0) {
         ret = service_init_screen();
+        if (ret == 0) {
+            ret = service_init_buttons();
+        }
     }
     if (main_finish_stage(APP_BOOT_STAGE_SCREEN, ret, 1) != 0) {
         main_fatal("屏幕初始化", ret);

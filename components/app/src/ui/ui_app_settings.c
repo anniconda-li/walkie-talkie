@@ -1,6 +1,6 @@
 /**
  * @file ui_app_settings.c
- * @brief 设置页面 UI——音量、固件版本信息。
+ * @brief 设置页面 UI——网络、固件版本信息。
  *
  * ## 页面布局（240×280 屏幕）
  * ```
@@ -8,8 +8,7 @@
  * │    状态栏（shell 管理）    │  y=0..30
  * ├──────────────────────────┤
  * │  ┌────────────────────┐  │
- * │  │ 音量大小            │  │
- * │  │ [══════●═══════] 56%│  │
+ * │  │ WLAN   移动数据     │  │
  * │  │                    │  │
  * │  │ 固件版本            │  │
  * │  │ v1.0.0              │  │
@@ -18,7 +17,7 @@
  * ```
  *
  * ## 交互
- * - 音量滑块：LV_EVENT_VALUE_CHANGED → 回调到 app_business
+ * - 网络按钮：LV_EVENT_CLICKED → 回调到 app_business
  *
  * ## 动画说明
  * - 入场：面板整体短距离滑入
@@ -119,29 +118,6 @@ static lv_obj_t *create_setting_box(lv_obj_t *parent, int32_t x, int32_t y, int3
     lv_obj_set_style_border_width(box, 0, 0);
     lv_obj_set_style_pad_all(box, 0, 0);
     return box;
-}
-
-/**
- * @brief 创建范围滑块（0-100）。
- *
- * 主轨道深灰(#454545)，已选部分橙色(#FF6600)，滑块白色。
- *
- * @param parent 父容器。
- * @param y      垂直位置。
- * @param value  初始值。
- * @return 滑块 LVGL 对象。
- */
-static lv_obj_t *create_slider(lv_obj_t *parent, int32_t y, int32_t value)
-{
-    lv_obj_t *slider = lv_slider_create(parent);
-    lv_obj_set_pos(slider, 12, y);
-    lv_obj_set_size(slider, 164, 10);
-    lv_slider_set_range(slider, 0, 100);
-    lv_slider_set_value(slider, value, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(slider, lv_color_make(0x45, 0x45, 0x45), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(slider, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
-    return slider;
 }
 
 static lv_obj_t *create_network_button(lv_obj_t *parent,
@@ -331,17 +307,12 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
                                                         &g_settings_view.wlan_ssid_label);
 
     g_settings_view.cellular_button = create_network_button(g_settings_panel,
-                                                            "4G",
+                                                            "移动数据",
                                                             100,
                                                             2,
                                                             &g_settings_view.cellular_label);
 
-    lv_obj_t *volume_box = create_setting_box(g_settings_panel, 2, 70, 188, 62);
-    lv_obj_t *firmware_box = create_setting_box(g_settings_panel, 2, 142, 188, 58);
-
-    /* 音量行 */
-    g_settings_view.volume_label = create_caption(volume_box, ui_i18n_text(UI_TEXT_SETTINGS_VOLUME), 9);
-    g_settings_view.volume_slider = create_slider(volume_box, 39, 56);
+    lv_obj_t *firmware_box = create_setting_box(g_settings_panel, 2, 70, 188, 58);
 
     /* 固件版本信息行（只读标签） */
     g_settings_view.firmware_label = create_caption(firmware_box, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 8);

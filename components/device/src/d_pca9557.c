@@ -126,10 +126,7 @@ static int pca9557_read_reg(uint8_t reg, uint8_t *value)
     }
 
     int ret = s_board_pca9557.itf.read_reg(reg, value, sizeof(*value));
-    if (ret == 0) {
-        D_LOGI(TAG, "PCA9557 读寄存器成功, reg=0x%02X, value=0x%02X",
-                 (unsigned int)reg, (unsigned int)*value);
-    } else {
+    if (ret != 0) {
         D_LOGE(TAG, "PCA9557 读寄存器失败, reg=0x%02X, ret=%d",
                  (unsigned int)reg, ret);
     }
@@ -310,7 +307,6 @@ static int pca9557_get_pin_level(pca9557_pin_t pin,
     }
 
     *level = (input & (uint8_t)(1u << pin)) ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW;
-    D_LOGI(TAG, "PCA9557 引脚电平读取成功, pin=%d, level=%d", pin, *level);
     return 0;
 }
 

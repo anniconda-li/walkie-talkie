@@ -235,6 +235,28 @@ int app_ui_set_ai_audio_button_state(ui_ai_audio_btn_state_t state)
     return 0;
 }
 
+int app_ui_set_settings_volume(int32_t volume)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (volume < 0) {
+        volume = 0;
+    } else if (volume > 100) {
+        volume = 100;
+    }
+
+    if (service_screen_lock(100) != 0) {
+        APP_LOGE(TAG, "UI 音量更新失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    ui_event_set_settings_volume(volume);
+    service_screen_unlock();
+    return 0;
+}
+
 int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
                                           uint16_t count,
                                           int ret)
