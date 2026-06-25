@@ -18,6 +18,8 @@
 
 static const char *TAG = "main";
 
+#define BOOT_SPLASH_MIN_MS 2000u
+
 static void main_fatal(const char *stage, int ret)
 {
     OSAL_LOGE(TAG, "%s失败, ret=%d", stage, ret);
@@ -55,6 +57,7 @@ void app_main(void)
     OSAL_LOGI(TAG, "业务固件启动开始");
 
     int ret = d_power_control_init();
+    uint32_t splash_started_ms = 0u;
     if (ret != 0) {
         main_fatal("电源保持初始化", ret);
     }
@@ -83,6 +86,13 @@ void app_main(void)
     if (main_finish_stage(APP_BOOT_STAGE_SCREEN, ret, 1) != 0) {
         main_fatal("屏幕初始化", ret);
     }
+
+    (void)main_set_stage_running(APP_BOOT_STAGE_UI);
+    ret = app_ui_create();
+    if (main_finish_stage(APP_BOOT_STAGE_UI, ret, 1) != 0) {
+        main_fatal("应用 UI 创建", ret);
+    }
+    splash_started_ms = osal_get_tick_ms();
 
     (void)main_set_stage_running(APP_BOOT_STAGE_AUDIO);
     ret = d_audio_init();
@@ -117,16 +127,15 @@ void app_main(void)
     (void)main_finish_stage(APP_BOOT_STAGE_CAMERA, -1, 0);
 #endif
 
-    (void)main_set_stage_running(APP_BOOT_STAGE_UI);
-    ret = app_ui_create();
-    if (main_finish_stage(APP_BOOT_STAGE_UI, ret, 1) != 0) {
-        main_fatal("应用 UI 创建", ret);
-    }
-
     (void)main_set_stage_running(APP_BOOT_STAGE_RUNTIME);
     ret = app_business_start();
     if (main_finish_stage(APP_BOOT_STAGE_RUNTIME, ret, 1) != 0) {
         main_fatal("业务任务启动", ret);
+    }
+
+    uint32_t splash_elapsed_ms = osal_get_tick_ms() - splash_started_ms;
+    if (splash_elapsed_ms < BOOT_SPLASH_MIN_MS) {
+        osal_delay_ms(BOOT_SPLASH_MIN_MS - splash_elapsed_ms);
     }
 
     if (service_screen_lock(1000u) == 0) {

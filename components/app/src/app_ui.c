@@ -38,7 +38,6 @@ int app_ui_create(void)
     }
 
     ui_init();
-    lv_refr_now(NULL);
 
     int ret = service_screen_display_on(1);
     if (ret != 0) {

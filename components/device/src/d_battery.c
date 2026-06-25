@@ -5,6 +5,7 @@
 #include "d_battery.h"
 
 #include "d_config.h"
+#include "d_pca9557.h"
 #include "driver/gpio.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -34,29 +35,18 @@ static int d_battery_err_to_int(int ret)
 }
 
 /**
- * @brief 初始化电池采样使能 GPIO 和 ADC 输入 GPIO。
+ * @brief 初始化电池采样使能扩展 IO 和 ADC 输入 GPIO。
  */
 static int d_battery_gpio_init(void)
 {
-    gpio_config_t en_cfg = {
-        .pin_bit_mask = 1ULL << d_battery_ADC_EN_IO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-
-    int ret = d_battery_err_to_int(gpio_config(&en_cfg));
-    if (ret != 0) {
-        D_LOGE(TAG, "电池检测使能脚配置失败, io=%d, ret=%d",
-                 d_battery_ADC_EN_IO, ret);
-        return ret;
+    if (d_pca9557_is_initialized() == 0) {
+        D_LOGE(TAG, "电池检测初始化失败: PCA9557 未初始化");
+        return -1;
     }
 
-    ret = d_battery_err_to_int(gpio_set_level(d_battery_ADC_EN_IO, 1));
+    int ret = d_pca9557_set_battery_measurement_enabled(0);
     if (ret != 0) {
-        D_LOGE(TAG, "电池检测使能脚关闭失败, io=%d, ret=%d",
-                 d_battery_ADC_EN_IO, ret);
+        D_LOGE(TAG, "电池检测关闭失败, ret=%d", ret);
         return ret;
     }
 
@@ -140,8 +130,8 @@ int d_battery_init(void)
     }
 
     d_battery_cali_init();
-    D_LOGI(TAG, "电池检测初始化完成, adc_io=%d, en_io=%d",
-             d_battery_ADC_IO, d_battery_ADC_EN_IO);
+    D_LOGI(TAG, "电池检测初始化完成, adc_io=%d, en=PCA9557_IO4",
+             d_battery_ADC_IO);
     return 0;
 }
 
@@ -149,7 +139,9 @@ int d_battery_deinit(void)
 {
     int ret = 0;
 
-    (void)gpio_set_level(d_battery_ADC_EN_IO, 1);
+    if (d_pca9557_is_initialized() != 0) {
+        (void)d_pca9557_set_battery_measurement_enabled(0);
+    }
 
     if (s_adc_cali_handle != NULL) {
         int cali_ret = d_battery_err_to_int(adc_cali_delete_scheme_curve_fitting(s_adc_cali_handle));
@@ -187,7 +179,7 @@ int d_battery_read_voltage_mv(int *voltage_mv)
         return ret;
     }
 
-    ret = d_battery_err_to_int(gpio_set_level(d_battery_ADC_EN_IO, 0));
+    ret = d_pca9557_set_battery_measurement_enabled(1);
     if (ret != 0) {
         D_LOGE(TAG, "电池检测使能失败, ret=%d", ret);
         return ret;
@@ -209,7 +201,7 @@ int d_battery_read_voltage_mv(int *voltage_mv)
                                                       d_battery_ADC_CHANNEL,
                                                       &raw));
         if (ret != 0) {
-            (void)gpio_set_level(d_battery_ADC_EN_IO, 1);
+            (void)d_pca9557_set_battery_measurement_enabled(0);
             D_LOGE(TAG, "电池 ADC 读取失败, ret=%d", ret);
             return ret;
         }
@@ -236,7 +228,11 @@ int d_battery_read_voltage_mv(int *voltage_mv)
         }
     }
 
-    (void)gpio_set_level(d_battery_ADC_EN_IO, 1);
+    ret = d_pca9557_set_battery_measurement_enabled(0);
+    if (ret != 0) {
+        D_LOGE(TAG, "电池检测关闭失败, ret=%d", ret);
+        return ret;
+    }
 
     int discard_sum = 0;
     for (uint32_t i = 0; i < d_battery_DISCARD_COUNT; i++) {

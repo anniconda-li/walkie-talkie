@@ -47,6 +47,7 @@ extern "C" {
 #define d_lcd_DC_IO WDRIVER_LCD_DC_IO
 #define d_lcd_CS_IO WDRIVER_LCD_CS_IO
 #define d_lcd_RST_IO WDRIVER_LCD_RST_IO
+#define d_lcd_BL_IO WDRIVER_LCD_BL_IO
 #define d_lcd_TOUCH_RST_IO WDRIVER_LCD_TOUCH_RST_IO
 #define d_lcd_TOUCH_INT_IO WDRIVER_LCD_TOUCH_INT_IO
 

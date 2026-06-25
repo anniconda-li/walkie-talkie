@@ -6,8 +6,8 @@
 
 #include "d_config.h"
 #include "wdriver_i2c.h"
-#include "d_pca9557.h"
 #include "wdriver_spi.h"
+#include "driver/gpio.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
@@ -99,6 +99,7 @@ static uint8_t s_lcd_direct_ramwr_available = 1u;
 #endif
 
 static int d_lcd_err_to_int(int ret);
+static int d_lcd_set_backlight(int on);
 static int d_lcd_draw_bitmap_bounced(int x_start,
                                           int y_start,
                                           int x_end,
@@ -161,6 +162,20 @@ static int d_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
+/** @brief 通过 ESP GPIO17 控制 LCD 背光，高电平点亮。 */
+static int d_lcd_set_backlight(int on)
+{
+    int ret = d_lcd_err_to_int(gpio_set_level(d_lcd_BL_IO, on != 0));
+    if (ret != 0) {
+        D_LOGE(TAG, "LCD 背光控制失败, io=%d, ret=%d", d_lcd_BL_IO, ret);
+    } else {
+        D_LOGI(TAG, "LCD 背光%s, io=%d",
+                 on != 0 ? "打开" : "关闭",
+                 d_lcd_BL_IO);
+    }
+    return ret;
+}
+
 static void d_lcd_copy_rgb565_for_panel(uint8_t *dst, const uint8_t *src, size_t bytes)
 {
 #if D_LCD_PREVIEW_SWAP_RGB565_BYTES
@@ -180,12 +195,17 @@ int d_lcd_display_init(void)
         return 0;
     }
 
-    if (d_pca9557_is_initialized() == 0) {
-        D_LOGE(TAG, "LCD 显示初始化失败: PCA9557 未初始化");
-        return -1;
+    gpio_config_t bl_cfg = {
+        .pin_bit_mask = 1ULL << d_lcd_BL_IO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    int ret = d_lcd_err_to_int(gpio_config(&bl_cfg));
+    if (ret == 0) {
+        ret = d_lcd_set_backlight(0);
     }
-
-    int ret = d_pca9557_set_lcd_backlight(0);
     if (ret != 0) {
         D_LOGE(TAG, "LCD 显示初始化失败: 背光关闭失败, ret=%d", ret);
         return ret;
@@ -242,9 +262,6 @@ int d_lcd_display_init(void)
     }
     if (ret == 0) {
         ret = d_lcd_err_to_int(esp_lcd_panel_set_gap(s_lcd_panel, 0, 0));
-    }
-    if (ret == 0) {
-        ret = d_lcd_fill_screen(0x0000u);
     }
     if (ret == 0) {
         ret = d_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, true));
@@ -394,13 +411,11 @@ int d_lcd_deinit(void)
         D_LOGI(TAG, "LCD DMA 中转缓冲已释放");
     }
 
-    if (d_pca9557_is_initialized() != 0) {
-        int bl_ret = d_pca9557_set_lcd_backlight(0);
-        if (ret == 0) {
-            ret = bl_ret;
-        }
-        D_LOGI(TAG, "LCD 背光已关闭, ret=%d", bl_ret);
+    int bl_ret = d_lcd_set_backlight(0);
+    if (ret == 0) {
+        ret = bl_ret;
     }
+    D_LOGI(TAG, "LCD 背光已关闭, io=%d, ret=%d", d_lcd_BL_IO, bl_ret);
 
     return ret;
 }
@@ -412,14 +427,9 @@ int d_lcd_display_on(int on)
         return -1;
     }
 
-    if (d_pca9557_is_initialized() == 0) {
-        D_LOGE(TAG, "LCD 显示开关失败: PCA9557 未初始化");
-        return -2;
-    }
-
     int ret = 0;
     if (on != 0) {
-        ret = d_pca9557_set_lcd_backlight(1);
+        ret = d_lcd_set_backlight(1);
     }
 
     if (ret == 0) {
@@ -427,7 +437,7 @@ int d_lcd_display_on(int on)
     }
 
     if (ret == 0 && on == 0) {
-        ret = d_pca9557_set_lcd_backlight(0);
+        ret = d_lcd_set_backlight(0);
     }
 
     if (ret == 0) {

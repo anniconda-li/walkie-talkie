@@ -15,7 +15,7 @@ extern "C" {
 /**
  * @brief 开机初始化阶段枚举。
  *
- * 阶段顺序与 main.c 中正式业务启动顺序一致，UI 启动页也按该顺序展示状态。
+ * 枚举值作为状态表索引使用；实际执行顺序由 main.c 的启动编排决定。
  */
 typedef enum {
     APP_BOOT_STAGE_WDRIVER = 0, /**< wdriver 基础资源初始化阶段。 */

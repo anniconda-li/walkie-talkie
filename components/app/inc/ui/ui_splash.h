@@ -8,14 +8,16 @@
 #define UI_SPLASH_H
 
 /**
- * @brief 显示启动画面动画。
+ * @brief 显示启动画面。
  *
- * 启动画面会显示当前开机阶段状态，由启动编排持续刷新。
+ * 启动画面会全屏显示品牌 logo，直到启动编排完成后切入主界面。
  */
 void splash_screen(void);
 
 /**
- * @brief 从 app_boot_status 刷新启动状态列表。
+ * @brief 刷新启动状态。
+ *
+ * 当前品牌启动页不展示内部初始化阶段，本接口保留给启动编排调用。
  */
 void ui_splash_refresh_status(void);
 

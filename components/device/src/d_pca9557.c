@@ -16,7 +16,7 @@ static const char *TAG = "d_pca9557";
 
 #define D_PCA9557_I2C_ADDR        0x19u
 #define D_PCA9557_I2C_SPEED_HZ    100000u
-#define D_PCA9557_LCD_BL_PIN      PCA9557_PIN_4
+#define D_PCA9557_BATTERY_EN_PIN  PCA9557_PIN_4
 #define D_PCA9557_CAMERA_PWDN_PIN PCA9557_PIN_3
 
 /**
@@ -150,10 +150,7 @@ static int pca9557_write_reg(uint8_t reg, uint8_t value)
     }
 
     int ret = s_board_pca9557.itf.write_reg(reg, &value, sizeof(value));
-    if (ret == 0) {
-        D_LOGI(TAG, "PCA9557 写寄存器成功, reg=0x%02X, value=0x%02X",
-                 (unsigned int)reg, (unsigned int)value);
-    } else {
+    if (ret != 0) {
         D_LOGE(TAG, "PCA9557 写寄存器失败, reg=0x%02X, value=0x%02X, ret=%d",
                  (unsigned int)reg, (unsigned int)value, ret);
     }
@@ -230,7 +227,6 @@ static int pca9557_write_output(uint8_t value)
     int ret = pca9557_write_reg(PCA9557_REG_OUTPUT, value);
     if (ret == 0) {
         s_board_pca9557.output_cache = value;
-        D_LOGI(TAG, "PCA9557 输出寄存器更新成功, value=0x%02X", (unsigned int)value);
     }
 
     return ret;
@@ -265,8 +261,6 @@ static int pca9557_set_direction(uint8_t direction)
     int ret = pca9557_write_reg(PCA9557_REG_CONFIG, direction);
     if (ret == 0) {
         s_board_pca9557.direction_cache = direction;
-        D_LOGI(TAG, "PCA9557 方向寄存器更新成功, direction=0x%02X",
-                 (unsigned int)direction);
     }
 
     return ret;
@@ -333,10 +327,11 @@ int d_pca9557_init(const d_pca9557_wdriver_ops_t *ops)
     s_board_ops = *ops;
 
     pca9557_config_t config = {
-        .output_init = 0x00u,
+        /* BAT_ADC_EN 低有效，上电初始化时保持关闭，避免持续消耗电池。 */
+        .output_init = (uint8_t)(1u << D_PCA9557_BATTERY_EN_PIN),
         .polarity_init = 0x00u,
         .direction_init = (uint8_t)~((1u << D_PCA9557_CAMERA_PWDN_PIN) |
-                                     (1u << D_PCA9557_LCD_BL_PIN)),
+                                     (1u << D_PCA9557_BATTERY_EN_PIN)),
     };
 
     if (pca9557_init(&config, &s_board_pca9557_itf) != 0) {
@@ -395,14 +390,12 @@ int d_pca9557_get_pin_level(pca9557_pin_t pin, pca9557_level_t *level)
     return pca9557_get_pin_level(pin, level);
 }
 
-int d_pca9557_set_lcd_backlight(int on)
+int d_pca9557_set_battery_measurement_enabled(int enabled)
 {
-    int ret = d_pca9557_set_pin_level(D_PCA9557_LCD_BL_PIN,
-                                           on != 0 ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW);
-    if (ret == 0) {
-        D_LOGI(TAG, "LCD 背光%s", on != 0 ? "打开" : "关闭");
-    } else {
-        D_LOGE(TAG, "LCD 背光控制失败, ret=%d", ret);
+    int ret = d_pca9557_set_pin_level(D_PCA9557_BATTERY_EN_PIN,
+                                     enabled != 0 ? PCA9557_LEVEL_LOW : PCA9557_LEVEL_HIGH);
+    if (ret != 0) {
+        D_LOGE(TAG, "电池采样使能控制失败, ret=%d", ret);
     }
 
     return ret;

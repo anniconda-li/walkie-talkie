@@ -81,6 +81,12 @@ static uint8_t s_pending_count = 0u;
 /** @brief 当前绑定的电池采样 driver 能力函数表。 */
 static service_battery_sample_ops_t s_battery_ops;
 
+/** @brief 连续读取失败的错误码，用于避免每秒刷屏。 */
+static int s_last_read_error = 0;
+
+/** @brief 同一错误码连续出现次数。 */
+static uint32_t s_read_error_count = 0u;
+
 /**
  * @brief 对 ADC 电压做一阶低通滤波。
  *
@@ -277,6 +283,8 @@ int service_battery_deinit(void)
     s_pending_percent = 0;
     s_pending_count = 0u;
     s_battery_ops = (service_battery_sample_ops_t){0};
+    s_last_read_error = 0;
+    s_read_error_count = 0u;
     return 0;
 }
 
@@ -313,9 +321,18 @@ int service_battery_get(int *level)
     int adc_mv = 0;
     int ret = service_battery_read_adc_voltage_mv(&adc_mv);
     if (ret != 0) {
-        SERVICE_LOGE(TAG, "电池电压读取失败, ret=%d", ret);
+        if (ret != s_last_read_error || s_read_error_count == 0u ||
+            (s_read_error_count % 30u) == 0u) {
+            SERVICE_LOGE(TAG, "电池电压读取失败, ret=%d, repeat=%u",
+                         ret,
+                         (unsigned int)s_read_error_count);
+        }
+        s_last_read_error = ret;
+        s_read_error_count++;
         return ret;
     }
+    s_last_read_error = 0;
+    s_read_error_count = 0u;
 
     int filtered_mv = service_battery_filter_voltage(adc_mv);
     int raw_percent = service_battery_voltage_to_percent(filtered_mv);

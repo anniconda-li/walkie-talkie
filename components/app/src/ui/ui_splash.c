@@ -10,13 +10,8 @@
 #include "ui_shell.h"
 #include "lvgl.h"
 
-#define SPLASH_LOGO_Y       70
-#define SPLASH_SPINNER_Y    205
-#define SPLASH_SPINNER_SIZE 34
-
 static lv_obj_t *s_root = NULL;
 static lv_obj_t *s_logo = NULL;
-static lv_obj_t *s_spinner = NULL;
 static lv_obj_t *s_error = NULL;
 
 static void ui_splash_cleanup(void)
@@ -27,7 +22,6 @@ static void ui_splash_cleanup(void)
 
     s_root = NULL;
     s_logo = NULL;
-    s_spinner = NULL;
     s_error = NULL;
 }
 
@@ -50,17 +44,7 @@ void splash_screen(void)
 
     s_logo = lv_image_create(s_root);
     lv_image_set_src(s_logo, &logo);
-    lv_obj_set_pos(s_logo, (UI_SCREEN_WIDTH - 96) / 2, SPLASH_LOGO_Y);
-
-    s_spinner = lv_spinner_create(s_root);
-    lv_obj_set_size(s_spinner, SPLASH_SPINNER_SIZE, SPLASH_SPINNER_SIZE);
-    lv_obj_set_pos(s_spinner,
-                   (UI_SCREEN_WIDTH - SPLASH_SPINNER_SIZE) / 2,
-                   SPLASH_SPINNER_Y);
-    lv_obj_set_style_arc_color(s_spinner, lv_color_hex(0x333333), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(s_spinner, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_width(s_spinner, 3, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_spinner, 3, LV_PART_INDICATOR);
+    lv_obj_set_pos(s_logo, 0, 0);
 
     s_error = lv_label_create(s_root);
     lv_label_set_text(s_error, "启动失败，请重启");
@@ -86,9 +70,6 @@ void ui_splash_show_error(const char *stage, int code)
         return;
     }
 
-    if (s_spinner != NULL) {
-        lv_obj_add_flag(s_spinner, LV_OBJ_FLAG_HIDDEN);
-    }
     lv_obj_remove_flag(s_error, LV_OBJ_FLAG_HIDDEN);
 }
 
