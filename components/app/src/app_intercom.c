@@ -77,14 +77,18 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS 4u
 /** @brief UDP 对讲固定音频帧时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      20u
-/** @brief jitter buffer 容量，16 帧约 320ms。 */
-#define APP_INTERCOM_JITTER_FRAME_COUNT  16u
-/** @brief 起播缓存帧数，5 帧约 100ms，用于吸收公网抖动。 */
+/** @brief jitter buffer 容量，24 帧约 480ms。 */
+#define APP_INTERCOM_JITTER_FRAME_COUNT  24u
+/** @brief 正常网络下的起播缓存帧数，5 帧约 100ms。 */
 #define APP_INTERCOM_JITTER_START_FRAMES 5u
+/** @brief 抖动网络下的最大起播缓存帧数，10 帧约 200ms。 */
+#define APP_INTERCOM_JITTER_MAX_START_FRAMES 10u
+/** @brief 稳定播放这么多帧后，逐步降低自适应起播水位。 */
+#define APP_INTERCOM_JITTER_RECOVER_FRAMES 100u
 /** @brief jitter buffer 低水位，低于此值时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
-#define APP_INTERCOM_JITTER_HIGH_WATER   12u
+#define APP_INTERCOM_JITTER_HIGH_WATER   18u
 /** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放。 */
 #define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
 /** @brief 连续缺帧补偿上限，超过后认为本次语音流中断。 */
@@ -167,6 +171,10 @@ static uint8_t s_rx_jitter_ready = 0u;
 static uint8_t s_rx_jitter_playing = 0u;
 /** @brief 连续缺帧计数。 */
 static uint8_t s_rx_jitter_missing = 0u;
+/** @brief 当前自适应起播水位，网络差时临时提高以减少卡顿。 */
+static uint8_t s_rx_jitter_target_start = APP_INTERCOM_JITTER_START_FRAMES;
+/** @brief 连续稳定播放帧数，用于恢复低延迟水位。 */
+static uint16_t s_rx_jitter_stable_frames = 0u;
 
 /** @brief UDP 通道是否已连接就绪。
  *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
@@ -463,6 +471,56 @@ static app_intercom_jitter_frame_t *app_intercom_jitter_find(uint32_t seq)
     return NULL;
 }
 
+static uint8_t app_intercom_jitter_start_frames(void)
+{
+    if (s_rx_jitter_target_start < APP_INTERCOM_JITTER_START_FRAMES) {
+        return APP_INTERCOM_JITTER_START_FRAMES;
+    }
+    if (s_rx_jitter_target_start > APP_INTERCOM_JITTER_MAX_START_FRAMES) {
+        return APP_INTERCOM_JITTER_MAX_START_FRAMES;
+    }
+    return s_rx_jitter_target_start;
+}
+
+static uint8_t app_intercom_jitter_low_water(void)
+{
+    uint8_t target_start = app_intercom_jitter_start_frames();
+    if (target_start <= 3u) {
+        return APP_INTERCOM_JITTER_LOW_WATER;
+    }
+
+    uint8_t adaptive_low = (uint8_t)(target_start - 3u);
+    return adaptive_low > APP_INTERCOM_JITTER_LOW_WATER ?
+           adaptive_low :
+           APP_INTERCOM_JITTER_LOW_WATER;
+}
+
+static void app_intercom_jitter_bump_target(void)
+{
+    s_rx_jitter_stable_frames = 0u;
+    if (s_rx_jitter_target_start < APP_INTERCOM_JITTER_MAX_START_FRAMES) {
+        s_rx_jitter_target_start++;
+        APP_LOGW(TAG, "UDP 音频 jitter 提高缓存水位, target=%u",
+                 (unsigned int)s_rx_jitter_target_start);
+    }
+}
+
+static void app_intercom_jitter_recover_target(void)
+{
+    if (s_rx_jitter_target_start <= APP_INTERCOM_JITTER_START_FRAMES) {
+        s_rx_jitter_stable_frames = 0u;
+        return;
+    }
+
+    s_rx_jitter_stable_frames++;
+    if (s_rx_jitter_stable_frames >= APP_INTERCOM_JITTER_RECOVER_FRAMES) {
+        s_rx_jitter_target_start--;
+        s_rx_jitter_stable_frames = 0u;
+        APP_LOGI(TAG, "UDP 音频 jitter 降低缓存水位, target=%u",
+                 (unsigned int)s_rx_jitter_target_start);
+    }
+}
+
 static int app_intercom_jitter_find_next_seq(uint32_t from_seq, uint32_t *next_seq)
 {
     uint32_t best = 0u;
@@ -580,7 +638,8 @@ static void app_intercom_jitter_play_tick(void)
     }
 
     if (s_rx_jitter_playing == 0u) {
-        if (app_intercom_jitter_count_ready() < APP_INTERCOM_JITTER_START_FRAMES) {
+        uint8_t start_frames = app_intercom_jitter_start_frames();
+        if (app_intercom_jitter_count_ready() < start_frames) {
             if (s_rx_jitter_last_enqueue_ms != 0u &&
                 (uint32_t)(now - s_rx_jitter_last_enqueue_ms) >= APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS) {
                 app_intercom_jitter_clear();
@@ -594,9 +653,10 @@ static void app_intercom_jitter_play_tick(void)
         s_rx_jitter_playing = 1u;
         s_rx_jitter_next_play_ms = now;
         s_rx_jitter_missing = 0u;
-        APP_LOGI(TAG, "UDP 音频 jitter 起播, device=%s, seq=%u",
+        APP_LOGI(TAG, "UDP 音频 jitter 起播, device=%s, seq=%u, target=%u",
                  s_rx_jitter_device,
-                 (unsigned int)s_rx_jitter_expected_seq);
+                 (unsigned int)s_rx_jitter_expected_seq,
+                 (unsigned int)start_frames);
     }
 
     if (app_intercom_seq_before(now, s_rx_jitter_next_play_ms)) {
@@ -608,14 +668,17 @@ static void app_intercom_jitter_play_tick(void)
 
     app_intercom_jitter_frame_t *frame = app_intercom_jitter_find(s_rx_jitter_expected_seq);
     uint16_t samples = APP_BUSINESS_FRAME_SAMPLES;
+    uint8_t played_real_frame = 0u;
     if (frame != NULL) {
         memcpy(s_rx_pcm, frame->pcm, sizeof(s_rx_pcm));
         memcpy(s_rx_last_pcm, frame->pcm, sizeof(s_rx_last_pcm));
         samples = frame->samples;
         frame->valid = 0u;
         s_rx_jitter_missing = 0u;
+        played_real_frame = 1u;
     } else {
         s_rx_jitter_missing++;
+        app_intercom_jitter_bump_target();
         if (s_rx_jitter_missing >= APP_INTERCOM_JITTER_RESYNC_MISSING) {
             uint32_t next_seq = 0u;
             if (app_intercom_jitter_find_next_seq(s_rx_jitter_expected_seq, &next_seq) != 0 &&
@@ -635,6 +698,7 @@ static void app_intercom_jitter_play_tick(void)
                     memcpy(s_rx_last_pcm, frame->pcm, sizeof(s_rx_last_pcm));
                     samples = frame->samples;
                     frame->valid = 0u;
+                    played_real_frame = 1u;
                 } else {
                     app_intercom_jitter_make_plc_frame(s_rx_pcm);
                 }
@@ -666,13 +730,17 @@ static void app_intercom_jitter_play_tick(void)
 
     if (played > 0) {
         s_rx_last_audio_ms = now;
+        if (played_real_frame != 0u) {
+            app_intercom_jitter_recover_target();
+        }
         if (s_rx_last_audio_ms - s_rx_play_log_ms >= 1000u) {
-            APP_LOGI(TAG, "UDP 音频播放中, device=%s, seq=%u, samples=%d, buffered=%u, missing=%u",
+            APP_LOGI(TAG, "UDP 音频播放中, device=%s, seq=%u, samples=%d, buffered=%u, missing=%u, target=%u",
                      s_rx_jitter_device,
                      (unsigned int)s_rx_jitter_expected_seq,
                      played,
                      (unsigned int)app_intercom_jitter_count_ready(),
-                     (unsigned int)s_rx_jitter_missing);
+                     (unsigned int)s_rx_jitter_missing,
+                     (unsigned int)app_intercom_jitter_start_frames());
             s_rx_play_log_ms = s_rx_last_audio_ms;
         }
     }
@@ -681,7 +749,7 @@ static void app_intercom_jitter_play_tick(void)
     uint8_t buffered_after = app_intercom_jitter_count_ready();
     if (buffered_after >= APP_INTERCOM_JITTER_HIGH_WATER) {
         s_rx_jitter_next_play_ms += (APP_INTERCOM_AUDIO_FRAME_MS / 2u);
-    } else if (buffered_after > 0u && buffered_after <= APP_INTERCOM_JITTER_LOW_WATER) {
+    } else if (buffered_after > 0u && buffered_after <= app_intercom_jitter_low_water()) {
         s_rx_jitter_next_play_ms += (APP_INTERCOM_AUDIO_FRAME_MS + (APP_INTERCOM_AUDIO_FRAME_MS / 2u));
     } else {
         s_rx_jitter_next_play_ms += APP_INTERCOM_AUDIO_FRAME_MS;
