@@ -37,7 +37,7 @@ extern "C" {
 #endif
 
 /** @brief 本机注册到服务器的设备名。 */
-#define APP_BUSINESS_DEVICE_NAME        "walkie-01"
+#define APP_BUSINESS_DEVICE_NAME        "walkie-02"
 /** @brief UDP 对讲服务器地址。 */
 #define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
 /** @brief UDP 对讲服务器端口。 */

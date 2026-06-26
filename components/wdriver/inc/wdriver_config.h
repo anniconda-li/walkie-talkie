@@ -65,7 +65,7 @@
 #define WDRIVER_LCD_DC_IO    GPIO_NUM_13 /**< 数据/命令选择。 */
 #define WDRIVER_LCD_CS_IO    GPIO_NUM_12 /**< SPI 片选。 */
 #define WDRIVER_LCD_RST_IO   GPIO_NUM_NC /**< 复位脚未接。 */
-#define WDRIVER_LCD_BL_IO    GPIO_NUM_17 /**< 背光控制。 */
+#define WDRIVER_LCD_BL_IO    GPIO_NUM_NC /**< 背光控制。PCA拓展io4 */
 
 /**
  * @brief FT6336/FT5x06 触摸引脚定义。
@@ -77,7 +77,7 @@
  * @brief 电池电量检测引脚定义。
  */
 #define WDRIVER_BATTERY_ADC_IO    GPIO_NUM_5  /**< 电池分压采样 ADC 输入。 */
-#define WDRIVER_BATTERY_ADC_EN_IO GPIO_NUM_NC /**< 电池采样使能不接主控 GPIO，低有效，接 PCA9557 IO4。 */
+#define WDRIVER_BATTERY_ADC_EN_IO GPIO_NUM_17 /**< 电池采样使能 */
 
 /**
  * @brief 整板电源保持与电源按键引脚定义。

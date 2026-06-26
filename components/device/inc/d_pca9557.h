@@ -112,14 +112,14 @@ int d_pca9557_deinit(void);
 int d_pca9557_is_initialized(void);
 
 /**
- * @brief 设置电池采样使能。
+ * @brief 设置 LCD 背光。
  *
- * PCA9557 IO4 低电平使能电池分压采样，高电平关闭采样。
+ * PCA9557 IO4 高电平打开背光，低电平关闭背光。
  *
- * @param[in] enabled 0 关闭采样，非 0 使能采样。
+ * @param[in] on 0 关闭背光，非 0 打开背光。
  * @return 成功返回 0；失败返回负值。
  */
-int d_pca9557_set_battery_measurement_enabled(int enabled);
+int d_pca9557_set_lcd_backlight(int on);
 
 /**
  * @brief 设置 Camera PWDN 引脚电平。

@@ -5,6 +5,7 @@
 #include "d_lcd.h"
 
 #include "d_config.h"
+#include "d_pca9557.h"
 #include "wdriver_i2c.h"
 #include "wdriver_spi.h"
 #include "driver/gpio.h"
@@ -162,10 +163,20 @@ static int d_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-/** @brief 通过 ESP GPIO17 控制 LCD 背光，高电平点亮。 */
+/** @brief 控制 LCD 背光，高电平点亮；GPIO_NUM_NC 表示背光接在 PCA9557 IO4。 */
 static int d_lcd_set_backlight(int on)
 {
-    int ret = d_lcd_err_to_int(gpio_set_level(d_lcd_BL_IO, on != 0));
+    int ret = 0;
+
+    if (d_lcd_BL_IO == GPIO_NUM_NC) {
+        ret = d_pca9557_set_lcd_backlight(on);
+        if (ret != 0) {
+            D_LOGE(TAG, "LCD 背光控制失败, pca_io=4, ret=%d", ret);
+        }
+        return ret;
+    }
+
+    ret = d_lcd_err_to_int(gpio_set_level(d_lcd_BL_IO, on != 0));
     if (ret != 0) {
         D_LOGE(TAG, "LCD 背光控制失败, io=%d, ret=%d", d_lcd_BL_IO, ret);
     } else {
@@ -195,14 +206,17 @@ int d_lcd_display_init(void)
         return 0;
     }
 
-    gpio_config_t bl_cfg = {
-        .pin_bit_mask = 1ULL << d_lcd_BL_IO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    int ret = d_lcd_err_to_int(gpio_config(&bl_cfg));
+    int ret = 0;
+    if (d_lcd_BL_IO != GPIO_NUM_NC) {
+        gpio_config_t bl_cfg = {
+            .pin_bit_mask = 1ULL << d_lcd_BL_IO,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ret = d_lcd_err_to_int(gpio_config(&bl_cfg));
+    }
     if (ret == 0) {
         ret = d_lcd_set_backlight(0);
     }
