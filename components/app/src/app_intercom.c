@@ -175,6 +175,26 @@ static uint8_t s_rx_jitter_missing = 0u;
 static uint8_t s_rx_jitter_target_start = APP_INTERCOM_JITTER_START_FRAMES;
 /** @brief 连续稳定播放帧数，用于恢复低延迟水位。 */
 static uint16_t s_rx_jitter_stable_frames = 0u;
+/** @brief UDP RX 统计日志节流时间。 */
+static uint32_t s_rx_stat_log_ms = 0u;
+/** @brief UDP RX 最近收到的音频序列号。 */
+static uint32_t s_rx_stat_last_seq = 0u;
+/** @brief UDP RX 是否已有上一帧序列号。 */
+static uint8_t s_rx_stat_has_last_seq = 0u;
+/** @brief UDP RX 本统计窗口收到的音频包数。 */
+static uint32_t s_rx_stat_audio = 0u;
+/** @brief UDP RX 本统计窗口发生的序列缺口次数。 */
+static uint32_t s_rx_stat_gap_events = 0u;
+/** @brief UDP RX 本统计窗口累计缺失的序列帧数。 */
+static uint32_t s_rx_stat_gap_frames = 0u;
+/** @brief UDP RX 本统计窗口收到但已晚于播放位置的包数。 */
+static uint32_t s_rx_stat_late = 0u;
+/** @brief UDP RX 本统计窗口重复包数。 */
+static uint32_t s_rx_stat_duplicate = 0u;
+/** @brief UDP RX 本统计窗口覆盖 jitter 槽位的次数。 */
+static uint32_t s_rx_stat_overwrite = 0u;
+/** @brief UDP RX 本统计窗口太超前导致播放指针前移的次数。 */
+static uint32_t s_rx_stat_far_ahead = 0u;
 
 /** @brief UDP 通道是否已连接就绪。
  *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
@@ -433,6 +453,80 @@ static int app_intercom_seq_before(uint32_t a, uint32_t b)
     return ((int32_t)(a - b)) < 0;
 }
 
+static uint8_t app_intercom_jitter_count_ready(void);
+
+static void app_intercom_rx_stats_reset(uint32_t first_seq)
+{
+    s_rx_stat_log_ms = osal_get_tick_ms();
+    s_rx_stat_last_seq = first_seq;
+    s_rx_stat_has_last_seq = 0u;
+    s_rx_stat_audio = 0u;
+    s_rx_stat_gap_events = 0u;
+    s_rx_stat_gap_frames = 0u;
+    s_rx_stat_late = 0u;
+    s_rx_stat_duplicate = 0u;
+    s_rx_stat_overwrite = 0u;
+    s_rx_stat_far_ahead = 0u;
+}
+
+static void app_intercom_rx_stats_note_audio(uint32_t seq)
+{
+    s_rx_stat_audio++;
+    if (s_rx_stat_has_last_seq == 0u) {
+        s_rx_stat_last_seq = seq;
+        s_rx_stat_has_last_seq = 1u;
+        return;
+    }
+
+    if (seq == s_rx_stat_last_seq) {
+        s_rx_stat_duplicate++;
+        return;
+    }
+
+    if (app_intercom_seq_before(seq, s_rx_stat_last_seq)) {
+        s_rx_stat_late++;
+        return;
+    }
+
+    uint32_t expected_seq = s_rx_stat_last_seq + 1u;
+    if (seq != expected_seq) {
+        s_rx_stat_gap_events++;
+        s_rx_stat_gap_frames += seq - expected_seq;
+    }
+    s_rx_stat_last_seq = seq;
+}
+
+static void app_intercom_rx_stats_log(uint32_t now)
+{
+    if (s_rx_stat_audio == 0u ||
+        (uint32_t)(now - s_rx_stat_log_ms) < 1000u) {
+        return;
+    }
+
+    APP_LOGI(TAG,
+             "UDP RX统计: device=%s, rx=%u, gap=%u/%u, late=%u, dup=%u, overwrite=%u, far=%u, expected=%u, last_rx=%u, buffered=%u",
+             s_rx_jitter_device,
+             (unsigned int)s_rx_stat_audio,
+             (unsigned int)s_rx_stat_gap_events,
+             (unsigned int)s_rx_stat_gap_frames,
+             (unsigned int)s_rx_stat_late,
+             (unsigned int)s_rx_stat_duplicate,
+             (unsigned int)s_rx_stat_overwrite,
+             (unsigned int)s_rx_stat_far_ahead,
+             (unsigned int)s_rx_jitter_expected_seq,
+             (unsigned int)s_rx_stat_last_seq,
+             (unsigned int)app_intercom_jitter_count_ready());
+
+    s_rx_stat_log_ms = now;
+    s_rx_stat_audio = 0u;
+    s_rx_stat_gap_events = 0u;
+    s_rx_stat_gap_frames = 0u;
+    s_rx_stat_late = 0u;
+    s_rx_stat_duplicate = 0u;
+    s_rx_stat_overwrite = 0u;
+    s_rx_stat_far_ahead = 0u;
+}
+
 static void app_intercom_jitter_clear(void)
 {
     memset(s_rx_jitter, 0, sizeof(s_rx_jitter));
@@ -563,6 +657,7 @@ static void app_intercom_jitter_reset_for_source(const char *device, uint32_t se
     }
     s_rx_jitter_expected_seq = seq;
     s_rx_jitter_ready = 1u;
+    app_intercom_rx_stats_reset(seq);
 }
 
 static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
@@ -576,12 +671,18 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
         app_intercom_jitter_reset_for_source(view->device, view->seq);
     }
 
+    uint32_t now = osal_get_tick_ms();
+    app_intercom_rx_stats_note_audio(view->seq);
+
     if (s_rx_jitter_playing && app_intercom_seq_before(view->seq, s_rx_jitter_expected_seq)) {
+        s_rx_stat_late++;
+        app_intercom_rx_stats_log(now);
         return;
     }
 
     uint32_t ahead = view->seq - s_rx_jitter_expected_seq;
     if (ahead >= APP_INTERCOM_JITTER_FRAME_COUNT) {
+        s_rx_stat_far_ahead++;
         s_rx_jitter_expected_seq = view->seq - (APP_INTERCOM_JITTER_FRAME_COUNT - 1u);
         app_intercom_jitter_drop_before(s_rx_jitter_expected_seq);
     }
@@ -589,7 +690,12 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
     uint32_t slot_index = view->seq % APP_INTERCOM_JITTER_FRAME_COUNT;
     app_intercom_jitter_frame_t *frame = &s_rx_jitter[slot_index];
     if (frame->valid && frame->seq == view->seq) {
+        s_rx_stat_duplicate++;
+        app_intercom_rx_stats_log(now);
         return;
+    }
+    if (frame->valid && frame->seq != view->seq) {
+        s_rx_stat_overwrite++;
     }
 
     uint16_t samples = (uint16_t)(view->payload_len / sizeof(int16_t));
@@ -602,7 +708,8 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
     frame->samples = samples;
     frame->seq = view->seq;
     frame->valid = 1u;
-    s_rx_jitter_last_enqueue_ms = osal_get_tick_ms();
+    s_rx_jitter_last_enqueue_ms = now;
+    app_intercom_rx_stats_log(now);
 }
 
 static void app_intercom_jitter_make_plc_frame(int16_t *out)
