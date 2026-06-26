@@ -77,22 +77,22 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS 4u
 /** @brief UDP 对讲固定音频帧时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      20u
-/** @brief jitter buffer 容量，24 帧约 480ms。 */
-#define APP_INTERCOM_JITTER_FRAME_COUNT  24u
-/** @brief 正常网络下的起播缓存帧数，5 帧约 100ms。 */
-#define APP_INTERCOM_JITTER_START_FRAMES 5u
-/** @brief 抖动网络下的最大起播缓存帧数，10 帧约 200ms。 */
-#define APP_INTERCOM_JITTER_MAX_START_FRAMES 10u
+/** @brief jitter buffer 容量，32 帧约 640ms。 */
+#define APP_INTERCOM_JITTER_FRAME_COUNT  32u
+/** @brief 正常网络下的起播缓存帧数，10 帧约 200ms。 */
+#define APP_INTERCOM_JITTER_START_FRAMES 10u
+/** @brief 抖动网络下的最大起播缓存帧数，16 帧约 320ms。 */
+#define APP_INTERCOM_JITTER_MAX_START_FRAMES 16u
 /** @brief 稳定播放这么多帧后，逐步降低自适应起播水位。 */
-#define APP_INTERCOM_JITTER_RECOVER_FRAMES 100u
+#define APP_INTERCOM_JITTER_RECOVER_FRAMES 400u
 /** @brief jitter buffer 低水位，低于此值时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
-#define APP_INTERCOM_JITTER_HIGH_WATER   18u
+#define APP_INTERCOM_JITTER_HIGH_WATER   24u
 /** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放。 */
 #define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
 /** @brief 连续缺帧补偿上限，超过后认为本次语音流中断。 */
-#define APP_INTERCOM_JITTER_MAX_MISSING  12u
+#define APP_INTERCOM_JITTER_MAX_MISSING  25u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 300u
 
