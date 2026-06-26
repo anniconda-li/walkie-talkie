@@ -18,7 +18,7 @@
  * 2. 按 WTK1 魔数定位完整包 → 解析 → 若为音频包且非本机 → 播放
  *
  * ### 心跳（biz_heartbeat 任务，优先级 4）
- * 1. 每 10 秒发一次 HEARTBEAT 包
+ * 1. 空闲时每 3 秒发一次 HEARTBEAT 包
  * 2. 检测到网络断开后自动重建 UDP 通道
  *
  * ## 自定义应用层协议（基于 WTK1 魔数）
@@ -69,6 +69,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_PTT_WAIT_UDP_MS    15000u
 /** @brief PTT 等待 UDP 就绪时的轮询间隔。 */
 #define APP_INTERCOM_PTT_WAIT_STEP_MS   100u
+/** @brief 空闲 UDP 心跳间隔，用于保持接收端 NAT/UDP 映射活跃。 */
+#define APP_INTERCOM_HEARTBEAT_IDLE_MS  3000u
+/** @brief 音频忙时不发心跳，只用该间隔继续检查状态。 */
+#define APP_INTERCOM_HEARTBEAT_BUSY_MS  500u
 /** @brief UDP 接收播放空闲关闭时间，避免短抖动导致功放反复开关。 */
 #define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 240u
 /** @brief UDP 接收空闲轮询超时。 */
@@ -103,7 +107,7 @@ typedef enum {
     APP_INTERCOM_PKT_PTT_START = 3, /**< PTT 开始（对讲键按下） */
     APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（20ms PCM） */
     APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
-    APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（10s 间隔） */
+    APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（空闲 3s 间隔） */
 } app_intercom_packet_type_t;
 
 /**
@@ -446,6 +450,13 @@ static void app_intercom_rx_stop_if_idle(void)
     if ((uint32_t)(now - s_rx_last_audio_ms) >= APP_INTERCOM_RX_PLAYBACK_IDLE_MS) {
         app_intercom_rx_stop_playback();
     }
+}
+
+static int app_intercom_audio_busy(void)
+{
+    return (s_ptt_active != 0 ||
+            s_rx_jitter_playing != 0u ||
+            s_rx_playback_active != 0) ? 1 : 0;
 }
 
 static int app_intercom_seq_before(uint32_t a, uint32_t b)
@@ -872,13 +883,14 @@ static void app_intercom_jitter_play_tick(void)
  *
  * ## 功能
  * 1. 启动时发送 REGISTER + CHANNEL 包（注册设备到服务器）
- * 2. 每 10 秒发送 HEARTBEAT 保活
+ * 2. 空闲时每 3 秒发送 HEARTBEAT 保活
  * 3. 检测网络后端 ready 后自动重连 UDP
  * 4. 重连后重新发送 REGISTER + CHANNEL，恢复在线状态
  *
  * ## 重连机制
  * - 网络切换或 PTT 按下时通过 notify 立即唤醒心跳任务
- * - 心跳任务每 10s 兜底检查 service_network_is_ready() 和 s_udp_ready
+ * - 心跳任务空闲时每 3s 兜底检查 service_network_is_ready() 和 s_udp_ready
+ * - 正在发送或播放音频时不发 heartbeat，避免和音频包抢链路
  * - 若网络已恢复但 UDP 通道未建立 → 调用 service_network_udp_connect() 重建
  *
  * @param arg 未使用。
@@ -892,8 +904,12 @@ static void app_intercom_heartbeat_task(void *arg)
     while (1) {
         /* 网络恢复后在后台重建 UDP 通道，并重新上报设备和频道。 */
         app_intercom_reconnect_udp_if_ready();
-        (void)app_intercom_send_control(APP_INTERCOM_PKT_HEARTBEAT);
-        (void)osal_task_notify_take(10000u);
+        if (app_intercom_audio_busy() == 0) {
+            (void)app_intercom_send_control(APP_INTERCOM_PKT_HEARTBEAT);
+            (void)osal_task_notify_take(APP_INTERCOM_HEARTBEAT_IDLE_MS);
+        } else {
+            (void)osal_task_notify_take(APP_INTERCOM_HEARTBEAT_BUSY_MS);
+        }
     }
 }
 
