@@ -43,6 +43,8 @@ void app_ai_voice_record_stop(void);
 
 void app_ai_voice_request_reply_play(void);
 
+void app_ai_voice_request_reply_stop(void);
+
 /**
  * @brief 中止当前 AI 问答任务。
  *

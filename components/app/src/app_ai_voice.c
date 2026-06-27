@@ -79,6 +79,7 @@ static char s_reply_session[64];
 static uint32_t s_reply_wav_size = 0u;
 static volatile int s_reply_audio_ready = 0;
 static volatile int s_reply_play_busy = 0;
+static volatile int s_reply_stop_requested = 0;
 
 typedef enum {
     APP_AI_STATE_IDLE = 0,
@@ -100,6 +101,7 @@ static volatile app_ai_voice_state_t s_ai_state = APP_AI_STATE_IDLE;
 static char s_ai_current_session[64];
 
 #define APP_AI_CANCELED_RET                 (-900)
+#define APP_AI_PLAY_STOPPED_RET             (-901)
 #define APP_AI_BACKEND_CANCEL_ON_DEVICE     0
 
 #if APP_AI_BACKEND_CANCEL_ON_DEVICE
@@ -111,6 +113,11 @@ static char s_ai_cancel_task_session[64];
 static int app_ai_voice_is_cancel_requested(void)
 {
     return s_ai_cancel_requested != 0;
+}
+
+static int app_ai_voice_is_playback_interrupted(void)
+{
+    return s_ai_cancel_requested != 0 || s_reply_stop_requested != 0;
 }
 
 static void app_ai_voice_set_state(app_ai_voice_state_t state)
@@ -367,8 +374,8 @@ static int app_ai_voice_reply_send_pcm_block(app_ai_voice_wav_stream_t *stream)
     app_ai_voice_reply_playback_ctx_t *ctx = stream->playback_ctx;
     uint16_t block_index = 0u;
     while (osal_queue_recv(ctx->free_queue, &block_index, 100u) != 0) {
-        if (app_ai_voice_is_cancel_requested()) {
-            return APP_AI_CANCELED_RET;
+        if (app_ai_voice_is_playback_interrupted()) {
+            return app_ai_voice_is_cancel_requested() ? APP_AI_CANCELED_RET : APP_AI_PLAY_STOPPED_RET;
         }
     }
     if (block_index >= APP_AI_REPLY_PCM_BLOCK_COUNT) {
@@ -385,9 +392,9 @@ static int app_ai_voice_reply_send_pcm_block(app_ai_voice_wav_stream_t *stream)
         .samples = (uint16_t)stream->emit_samples,
     };
     while (osal_queue_send(ctx->filled_queue, &msg, 100u) != 0) {
-        if (app_ai_voice_is_cancel_requested()) {
+        if (app_ai_voice_is_playback_interrupted()) {
             (void)osal_queue_send(ctx->free_queue, &block_index, OSAL_WAIT_NONE);
-            return APP_AI_CANCELED_RET;
+            return app_ai_voice_is_cancel_requested() ? APP_AI_CANCELED_RET : APP_AI_PLAY_STOPPED_RET;
         }
     }
 
@@ -778,6 +785,7 @@ static void app_ai_voice_clear_reply_state(void)
     s_reply_session[0] = '\0';
     s_reply_wav_size = 0u;
     s_reply_audio_ready = 0;
+    s_reply_stop_requested = 0;
     (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
 }
 
@@ -935,6 +943,70 @@ static void app_ai_voice_request_backend_cancel_async(const char *session)
     }
 }
 #endif
+
+typedef struct {
+    char session[64];
+} app_ai_voice_stop_audio_req_t;
+
+static int app_ai_voice_send_backend_stop_audio(const char *session)
+{
+    char query[128];
+    char url[256];
+    uint32_t resp_len = 0u;
+
+    if (session == NULL || session[0] == '\0') {
+        return -1;
+    }
+
+    snprintf(query, sizeof(query), "session=%s", session);
+    if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_STOP_AUDIO, query) != 0) {
+        return -2;
+    }
+
+    int ret = app_ai_voice_post_json(url, &resp_len);
+    if (ret == 0) {
+        APP_LOGI("AI-UI", "backend stop-audio request sent, session=%s", session);
+    } else {
+        APP_LOGW("AI-UI", "backend stop-audio failed but local playback stopped, session=%s, ret=%d", session, ret);
+    }
+    return ret;
+}
+
+static void app_ai_voice_stop_audio_task(void *arg)
+{
+    app_ai_voice_stop_audio_req_t *req = (app_ai_voice_stop_audio_req_t *)arg;
+    if (req != NULL) {
+        (void)app_ai_voice_send_backend_stop_audio(req->session);
+        osal_heap_free(req);
+    }
+    osal_task_delete_current();
+}
+
+static void app_ai_voice_request_backend_stop_audio_async(const char *session)
+{
+    if (session == NULL || session[0] == '\0') {
+        return;
+    }
+
+    app_ai_voice_stop_audio_req_t *req =
+        (app_ai_voice_stop_audio_req_t *)osal_heap_alloc_external(sizeof(app_ai_voice_stop_audio_req_t));
+    if (req == NULL) {
+        APP_LOGW("AI-UI", "stop-audio request alloc failed");
+        return;
+    }
+
+    strncpy(req->session, session, sizeof(req->session) - 1u);
+    req->session[sizeof(req->session) - 1u] = '\0';
+    if (osal_task_create("ai_stop_audio",
+                         app_ai_voice_stop_audio_task,
+                         req,
+                         3072u,
+                         5u,
+                         NULL) != 0) {
+        APP_LOGW("AI-UI", "stop-audio task create failed");
+        osal_heap_free(req);
+    }
+}
 
 /** @brief 请求服务器创建一次 AI 会话。 */
 static int app_ai_voice_start_session(char *session, size_t session_size)
@@ -1192,9 +1264,9 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
 
     uint32_t offset = 0u;
     while (offset < ctx->total) {
-        if (app_ai_voice_is_cancel_requested()) {
-            APP_LOGI(CANCEL_TAG, "cancel during reply download");
-            return APP_AI_CANCELED_RET;
+        if (app_ai_voice_is_playback_interrupted()) {
+            APP_LOGI(CANCEL_TAG, "reply download interrupted");
+            return app_ai_voice_is_cancel_requested() ? APP_AI_CANCELED_RET : APP_AI_PLAY_STOPPED_RET;
         }
         if (!app_ai_voice_is_active_session(ctx->session)) {
             APP_LOGW(CANCEL_TAG, "old session response ignored, session=%s", ctx->session);
@@ -1228,9 +1300,9 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
                                             chunk_len,
                                             &resp_len,
                                             APP_AI_HTTP_CHUNK_TIMEOUT_MS);
-        if (app_ai_voice_is_cancel_requested()) {
-            APP_LOGI(CANCEL_TAG, "cancel during reply download");
-            return APP_AI_CANCELED_RET;
+        if (app_ai_voice_is_playback_interrupted()) {
+            APP_LOGI(CANCEL_TAG, "reply download interrupted");
+            return app_ai_voice_is_cancel_requested() ? APP_AI_CANCELED_RET : APP_AI_PLAY_STOPPED_RET;
         }
         if (!app_ai_voice_is_active_session(ctx->session)) {
             APP_LOGW(CANCEL_TAG, "old session response ignored, session=%s", ctx->session);
@@ -1282,9 +1354,9 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
     uint32_t underrun_log_ms = 0u;
 
     while (1) {
-        if (app_ai_voice_is_cancel_requested() && final_ret == 0) {
-            APP_LOGI(CANCEL_TAG, "cancel during playback");
-            final_ret = APP_AI_CANCELED_RET;
+        if (app_ai_voice_is_playback_interrupted() && final_ret == 0) {
+            APP_LOGI(CANCEL_TAG, "reply playback interrupted");
+            final_ret = app_ai_voice_is_cancel_requested() ? APP_AI_CANCELED_RET : APP_AI_PLAY_STOPPED_RET;
         }
 
         if (!playback_started && final_ret == 0) {
@@ -1348,9 +1420,9 @@ static int app_ai_voice_play_reply_queue(app_ai_voice_reply_playback_ctx_t *ctx)
         int16_t *pcm = &ctx->pcm_blocks[(uint32_t)msg.block_index * APP_AI_REPLY_PCM_BLOCK_SAMPLES];
         uint32_t played = 0u;
         while (played < msg.samples) {
-            if (app_ai_voice_is_cancel_requested()) {
-                APP_LOGI(CANCEL_TAG, "cancel during playback");
-                final_ret = APP_AI_CANCELED_RET;
+            if (app_ai_voice_is_playback_interrupted()) {
+                APP_LOGI(CANCEL_TAG, "reply playback interrupted");
+                final_ret = app_ai_voice_is_cancel_requested() ? APP_AI_CANCELED_RET : APP_AI_PLAY_STOPPED_RET;
                 break;
             }
             uint32_t remain = (uint32_t)msg.samples - played;
@@ -1448,6 +1520,7 @@ static void app_ai_voice_play_request_task(void *arg)
 
     if (!s_reply_audio_ready || s_reply_session[0] == '\0' || s_reply_wav_size == 0u) {
         APP_LOGW("AI-UI", "play button disabled, audio not ready");
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
         s_reply_play_busy = 0;
         osal_task_delete_current();
         return;
@@ -1478,9 +1551,14 @@ static void app_ai_voice_play_request_task(void *arg)
         APP_LOGI("AI-UI", "play done");
         (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
         app_ai_voice_set_state(APP_AI_STATE_AUDIO_READY);
+    } else if (ret == APP_AI_PLAY_STOPPED_RET) {
+        APP_LOGI("AI-UI", "play stopped");
+        s_reply_stop_requested = 0;
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+        app_ai_voice_set_state(APP_AI_STATE_AUDIO_READY);
     } else if (ret == APP_AI_CANCELED_RET) {
         (void)app_ui_set_ai_waiting(0);
-        (void)app_ui_set_ai_answer_text("本次问答已取消");
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
         app_ai_voice_clear_reply_state();
         app_ai_voice_set_current_session(NULL);
         app_ai_voice_set_state(APP_AI_STATE_CANCELED);
@@ -1582,7 +1660,7 @@ static void app_ai_voice_task(void *arg)
         uint32_t samples_total = app_ai_voice_record_to_wav_buffer();
         if (app_ai_voice_is_cancel_requested()) {
             (void)app_ui_set_ai_waiting(0);
-            (void)app_ui_set_ai_answer_text("本次问答已取消");
+            (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
             app_ai_voice_clear_reply_state();
             app_ai_voice_set_current_session(NULL);
             app_ai_voice_set_state(APP_AI_STATE_CANCELED);
@@ -1628,7 +1706,7 @@ static void app_ai_voice_task(void *arg)
             if (ret != 0) {
                 if (ret == APP_AI_CANCELED_RET) {
                     (void)app_ui_set_ai_waiting(0);
-                    (void)app_ui_set_ai_answer_text("本次问答已取消");
+                    (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
                     app_ai_voice_clear_reply_state();
                     app_ai_voice_set_state(APP_AI_STATE_CANCELED);
                 } else {
@@ -1643,7 +1721,7 @@ static void app_ai_voice_task(void *arg)
                 ret = app_ai_voice_wait_result_info(session, &reply_len);
                 if (ret == APP_AI_CANCELED_RET) {
                     (void)app_ui_set_ai_waiting(0);
-                    (void)app_ui_set_ai_answer_text("本次问答已取消");
+                    (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
                     app_ai_voice_clear_reply_state();
                     app_ai_voice_set_state(APP_AI_STATE_CANCELED);
                 } else if (ret != 0 && ret != -4 && ret != -5) {
@@ -1670,9 +1748,14 @@ static void app_ai_voice_task(void *arg)
                     if (ret == 0) {
                         APP_LOGI("AI-UI", "play done");
                         (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+                    } else if (ret == APP_AI_PLAY_STOPPED_RET) {
+                        APP_LOGI("AI-UI", "play stopped");
+                        s_reply_stop_requested = 0;
+                        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+                        app_ai_voice_set_state(APP_AI_STATE_AUDIO_READY);
                     } else if (ret == APP_AI_CANCELED_RET) {
                         (void)app_ui_set_ai_waiting(0);
-                        (void)app_ui_set_ai_answer_text("本次问答已取消");
+                        (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
                         app_ai_voice_clear_reply_state();
                         app_ai_voice_set_state(APP_AI_STATE_CANCELED);
                     } else {
@@ -1845,6 +1928,7 @@ void app_ai_voice_request_reply_play(void)
         return;
     }
 
+    s_reply_stop_requested = 0;
     s_reply_play_busy = 1;
     if (osal_task_create("ai_reply_play",
                          app_ai_voice_play_request_task,
@@ -1856,6 +1940,24 @@ void app_ai_voice_request_reply_play(void)
         APP_LOGW("AI-UI", "play task create failed");
         (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
     }
+}
+
+void app_ai_voice_request_reply_stop(void)
+{
+    char session[64];
+
+    if (!s_started || !s_reply_play_busy) {
+        return;
+    }
+
+    APP_LOGI("AI-UI", "stop playback requested");
+    s_reply_stop_requested = 1;
+    strncpy(session, s_reply_session, sizeof(session) - 1u);
+    session[sizeof(session) - 1u] = '\0';
+    if (session[0] != '\0') {
+        app_ai_voice_request_backend_stop_audio_async(session);
+    }
+    (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
 }
 
 esp_err_t app_ai_voice_cancel_current(void)
@@ -1892,7 +1994,7 @@ esp_err_t app_ai_voice_cancel_current(void)
 
     app_ai_voice_clear_reply_state();
     (void)app_ui_set_ai_waiting(0);
-    (void)app_ui_set_ai_answer_text("本次问答已取消");
+    (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
 
     if (old_state == APP_AI_STATE_AUDIO_READY) {
         app_ai_voice_set_current_session(NULL);

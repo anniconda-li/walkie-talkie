@@ -238,6 +238,11 @@ static void app_business_on_ai_reply_play_requested(void)
     app_ai_voice_request_reply_play();
 }
 
+static void app_business_on_ai_reply_stop_requested(void)
+{
+    app_ai_voice_request_reply_stop();
+}
+
 static void app_business_on_ai_cancel_requested(void)
 {
     (void)app_ai_voice_cancel_current();
@@ -558,6 +563,7 @@ static void app_business_register_ui_callbacks(void)
         .ai_question_started = app_business_on_ai_started,
         .ai_question_stopped = app_business_on_ai_stopped,
         .ai_reply_play_requested = app_business_on_ai_reply_play_requested,
+        .ai_reply_stop_requested = app_business_on_ai_reply_stop_requested,
         .ai_cancel_requested = app_business_on_ai_cancel_requested,
         .settings_volume_changed = app_business_on_volume_changed,
         .settings_network_mode_get = app_business_get_network_mode,

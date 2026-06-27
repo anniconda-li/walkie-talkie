@@ -336,19 +336,32 @@ static bool ai_cancel_entry_active(void)
     return g_ai_waiting != 0u;
 }
 
+static void ai_reset_transient_state(void)
+{
+    if(g_ai_wait_timer != NULL) {
+        lv_timer_delete(g_ai_wait_timer);
+        g_ai_wait_timer = NULL;
+    }
+    g_ai_waiting = 0u;
+    g_ai_wait_dot_count = 0u;
+    g_ai_message_id = UI_TEXT_AI_IDLE;
+    g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
+    g_ai_cancel_label = NULL;
+}
+
 static void ai_apply_cancel_entry(ui_ai_view_t *view)
 {
-    if(view == NULL || view->camera_button == NULL) {
+    if(view == NULL || view->ask_button == NULL) {
         return;
     }
 
     bool active = ai_cancel_entry_active();
     if(active) {
-        if(view->camera_icon != NULL) {
-            lv_obj_add_flag(view->camera_icon, LV_OBJ_FLAG_HIDDEN);
+        if(view->ask_icon != NULL) {
+            lv_obj_add_flag(view->ask_icon, LV_OBJ_FLAG_HIDDEN);
         }
         if(g_ai_cancel_label == NULL) {
-            g_ai_cancel_label = lv_label_create(view->camera_button);
+            g_ai_cancel_label = lv_label_create(view->ask_button);
             lv_obj_set_style_text_font(g_ai_cancel_label, ui_font_normal(), 0);
             lv_obj_remove_flag(g_ai_cancel_label, LV_OBJ_FLAG_CLICKABLE);
         }
@@ -356,16 +369,20 @@ static void ai_apply_cancel_entry(ui_ai_view_t *view)
         lv_obj_set_style_text_color(g_ai_cancel_label, lv_color_white(), 0);
         lv_obj_center(g_ai_cancel_label);
         lv_obj_remove_flag(g_ai_cancel_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_border_color(view->camera_button, UI_COLOR_AI, 0);
+        lv_obj_set_style_border_color(view->ask_button, UI_COLOR_AI, 0);
+        lv_obj_set_style_bg_color(view->ask_button, lv_color_make(0x1C, 0x4A, 0x54), 0);
     }
     else {
         if(g_ai_cancel_label != NULL) {
             lv_obj_add_flag(g_ai_cancel_label, LV_OBJ_FLAG_HIDDEN);
         }
-        if(view->camera_icon != NULL) {
-            lv_obj_remove_flag(view->camera_icon, LV_OBJ_FLAG_HIDDEN);
+        if(view->ask_icon != NULL) {
+            lv_obj_remove_flag(view->ask_icon, LV_OBJ_FLAG_HIDDEN);
         }
-        lv_obj_set_style_border_color(view->camera_button, lv_color_make(0x88, 0x88, 0x88), 0);
+        lv_obj_set_style_border_color(view->ask_button, lv_color_make(0x88, 0x88, 0x88), 0);
+        lv_obj_set_style_bg_color(view->ask_button,
+                                  view->speaking ? lv_color_make(0x1C, 0x4A, 0x54) : lv_color_make(0x36, 0x36, 0x36),
+                                  0);
     }
 }
 
@@ -501,12 +518,6 @@ static void ai_ask_event_cb(lv_event_t *e)
 static void ai_camera_event_cb(lv_event_t *e)
 {
     if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
-        if(ai_cancel_entry_active()) {
-            if(g_callbacks.ai_cancel_requested != NULL) {
-                g_callbacks.ai_cancel_requested();
-            }
-            return;
-        }
         ui_shell_switch_to(UI_APP_ID_CAMERA);
     }
 }
@@ -517,7 +528,14 @@ static void ai_audio_play_event_cb(lv_event_t *e)
         return;
     }
 
-    APP_LOGI("AI-UI", "play button clicked");
+    APP_LOGI("AI-UI", "audio button clicked");
+    if(g_ai_audio_btn_state == UI_AI_AUDIO_BTN_PLAYING) {
+        if(g_callbacks.ai_reply_stop_requested != NULL) {
+            g_callbacks.ai_reply_stop_requested();
+        }
+        return;
+    }
+
     if(g_ai_audio_btn_state != UI_AI_AUDIO_BTN_READY) {
         APP_LOGW("AI-UI", "play button disabled, audio not ready");
         return;
@@ -536,7 +554,7 @@ static void ai_apply_audio_button_state(ui_ai_view_t *view, ui_ai_audio_btn_stat
 
     g_ai_audio_btn_state = state;
     ai_apply_cancel_entry(view);
-    lv_label_set_text(view->audio_label, LV_SYMBOL_AUDIO);
+    lv_label_set_text(view->audio_label, state == UI_AI_AUDIO_BTN_PLAYING ? LV_SYMBOL_STOP : LV_SYMBOL_AUDIO);
     lv_obj_set_style_text_font(view->audio_label, ui_font_normal(), 0);
 
     if(state == UI_AI_AUDIO_BTN_HIDDEN) {
@@ -555,14 +573,18 @@ static void ai_apply_audio_button_state(ui_ai_view_t *view, ui_ai_audio_btn_stat
         return;
     }
 
+    if(state == UI_AI_AUDIO_BTN_PLAYING) {
+        lv_obj_remove_state(view->audio_button, LV_STATE_DISABLED);
+        lv_obj_set_style_bg_color(view->audio_button, lv_color_make(0x54, 0x1C, 0x1C), 0);
+        lv_obj_set_style_border_color(view->audio_button, lv_color_make(0xE8, 0x68, 0x68), 0);
+        lv_obj_set_style_text_color(view->audio_label, lv_color_white(), 0);
+        return;
+    }
+
     lv_obj_add_state(view->audio_button, LV_STATE_DISABLED);
     lv_obj_set_style_bg_color(view->audio_button, lv_color_make(0x3A, 0x3A, 0x3A), 0);
     lv_obj_set_style_border_color(view->audio_button, lv_color_make(0x66, 0x66, 0x66), 0);
-    lv_obj_set_style_text_color(view->audio_label,
-                                state == UI_AI_AUDIO_BTN_PLAYING
-                                    ? lv_color_make(0xD8, 0xD8, 0xD8)
-                                    : lv_color_make(0x9A, 0x9A, 0x9A),
-                                0);
+    lv_obj_set_style_text_color(view->audio_label, lv_color_make(0x9A, 0x9A, 0x9A), 0);
 }
 
 static int32_t normalize_volume_step(int32_t volume)
@@ -1104,6 +1126,7 @@ void ui_event_register_ai(ui_ai_view_t *view)
         return;
     }
 
+    ai_reset_transient_state();
     g_ai_view = view;
     ai_set_speaking(view, false);
     if(view->camera_button != NULL) {
@@ -1113,9 +1136,10 @@ void ui_event_register_ai(ui_ai_view_t *view)
         lv_obj_add_event_cb(view->audio_button, ai_audio_play_event_cb, LV_EVENT_CLICKED, view);
     }
     lv_obj_add_event_cb(view->ask_button, ai_ask_event_cb, LV_EVENT_ALL, view);
-    ai_apply_audio_button_state(view, g_ai_audio_btn_state);
-    if(g_ai_waiting != 0u) {
-        ui_event_set_ai_waiting(true);
+    ai_apply_audio_button_state(view, UI_AI_AUDIO_BTN_HIDDEN);
+    if(view->answer_label != NULL) {
+        lv_label_set_text(view->answer_label, ui_i18n_text(UI_TEXT_AI_IDLE));
+        lv_obj_set_style_text_font(view->answer_label, ui_font_normal(), 0);
     }
 }
 
@@ -1125,12 +1149,8 @@ void ui_event_unregister_ai(ui_ai_view_t *view)
         return;
     }
 
-    if(g_ai_wait_timer != NULL) {
-        lv_timer_delete(g_ai_wait_timer);
-        g_ai_wait_timer = NULL;
-    }
+    ai_reset_transient_state();
     g_ai_view = NULL;
-    g_ai_cancel_label = NULL;
 }
 
 void ui_event_set_ai_waiting(bool waiting)
