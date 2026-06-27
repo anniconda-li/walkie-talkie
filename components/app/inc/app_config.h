@@ -62,6 +62,10 @@ extern "C" {
 #define APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD   "/camera/upload"
 /** @brief 相机 JPEG 上传和同步图像分析 HTTP 超时时间，单位 ms。 */
 #define APP_CAMERA_UPLOAD_TIMEOUT_MS    90000u
+/** @brief 相机 JPEG 上传连接失败后的重试次数。 */
+#define APP_CAMERA_UPLOAD_RETRY_COUNT   2u
+/** @brief 相机 JPEG 上传重试间隔，单位 ms。 */
+#define APP_CAMERA_UPLOAD_RETRY_DELAY_MS 800u
 /** @brief 相机 JPEG 上传响应临时缓冲大小。 */
 #define APP_CAMERA_UPLOAD_RESP_BYTES    1024u
 /** @brief 相机预览区域 X 坐标。 */

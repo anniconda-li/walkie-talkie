@@ -498,9 +498,6 @@ static void app_camera_do_upload(void)
 {
     int ret = 0;
 
-    (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOADING);
-    (void)app_ui_set_ai_waiting(1);
-
     if (s_jpeg_buf == NULL || s_jpeg_len == 0u) {
         APP_LOGW(TAG, "相机上传失败: 没有可上传的 JPEG");
         (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
@@ -526,14 +523,30 @@ static void app_camera_do_upload(void)
         return;
     }
 
-    ret = service_network_http_post(url,
-                                    "image/jpeg",
-                                    s_jpeg_buf,
-                                    s_jpeg_len,
-                                    s_upload_resp,
-                                    sizeof(s_upload_resp) - 1u,
-                                    &resp_len,
-                                    APP_CAMERA_UPLOAD_TIMEOUT_MS);
+    for (uint32_t attempt = 0u; attempt <= APP_CAMERA_UPLOAD_RETRY_COUNT; attempt++) {
+        resp_len = 0u;
+        ret = service_network_http_post(url,
+                                        "image/jpeg",
+                                        s_jpeg_buf,
+                                        s_jpeg_len,
+                                        s_upload_resp,
+                                        sizeof(s_upload_resp) - 1u,
+                                        &resp_len,
+                                        APP_CAMERA_UPLOAD_TIMEOUT_MS);
+        if (ret == 0) {
+            break;
+        }
+        APP_LOGW(TAG,
+                 "相机 JPEG 上传失败, attempt=%u/%u, ret=%d, len=%u",
+                 (unsigned int)(attempt + 1u),
+                 (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
+                 ret,
+                 (unsigned int)s_jpeg_len);
+        if (attempt < APP_CAMERA_UPLOAD_RETRY_COUNT) {
+            osal_delay_ms(APP_CAMERA_UPLOAD_RETRY_DELAY_MS);
+        }
+    }
+
     if (ret == 0) {
         s_upload_resp[resp_len < sizeof(s_upload_resp) ? resp_len : (sizeof(s_upload_resp) - 1u)] = '\0';
         APP_LOGI(TAG, "相机 JPEG 上传成功, len=%u, resp_len=%u",
