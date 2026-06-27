@@ -217,7 +217,7 @@ static void app_camera_handle_upload_response(const uint8_t *json, uint32_t len)
     }
 
     APP_LOGI(TAG, "相机图像分析完成，可以提问");
-    (void)app_ui_set_ai_answer_text("已完成图像分析，可以提问了。");
+    (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_READY);
 }
 
 /**
@@ -497,6 +497,9 @@ static void app_camera_do_capture(void)
 static void app_camera_do_upload(void)
 {
     int ret = 0;
+
+    (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOADING);
+    (void)app_ui_set_ai_waiting(1);
 
     if (s_jpeg_buf == NULL || s_jpeg_len == 0u) {
         APP_LOGW(TAG, "相机上传失败: 没有可上传的 JPEG");
