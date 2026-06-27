@@ -60,8 +60,8 @@ extern "C" {
 #define APP_BUSINESS_HTTP_ROUTE_AI_STOP_AUDIO   "/ai/stop_audio"
 /** @brief 相机 JPEG 上传路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD   "/camera/upload"
-/** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
-#define APP_CAMERA_UPLOAD_TIMEOUT_MS    30000u
+/** @brief 相机 JPEG 上传和同步图像分析 HTTP 超时时间，单位 ms。 */
+#define APP_CAMERA_UPLOAD_TIMEOUT_MS    90000u
 /** @brief 相机 JPEG 上传响应临时缓冲大小。 */
 #define APP_CAMERA_UPLOAD_RESP_BYTES    1024u
 /** @brief 相机预览区域 X 坐标。 */
