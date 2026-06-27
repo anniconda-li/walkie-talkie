@@ -56,6 +56,8 @@ extern "C" {
 #define APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK "/ai/result_chunk"
 /** @brief AI 问答取消路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_CANCEL       "/ai/cancel"
+/** @brief AI 回复语音停止播放路由。 */
+#define APP_BUSINESS_HTTP_ROUTE_AI_STOP_AUDIO   "/ai/stop_audio"
 /** @brief 相机 JPEG 上传路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD   "/camera/upload"
 /** @brief 相机 JPEG 上传 HTTP 超时时间，单位 ms。 */
