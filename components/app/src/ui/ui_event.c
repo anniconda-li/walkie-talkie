@@ -314,6 +314,7 @@ static void camera_upload_event_cb(lv_event_t *e)
         if(g_callbacks.camera_upload_requested != NULL) {
             g_callbacks.camera_upload_requested();
         }
+        ui_event_set_ai_message(UI_TEXT_AI_IMAGE_UPLOADING);
         ui_event_set_ai_waiting(true);
         ui_shell_switch_to(UI_APP_ID_AI);
     }
@@ -336,17 +337,27 @@ static bool ai_cancel_entry_active(void)
     return g_ai_waiting != 0u;
 }
 
-static void ai_reset_transient_state(void)
+static const char *ai_waiting_text(void)
 {
-    if(g_ai_wait_timer != NULL) {
-        lv_timer_delete(g_ai_wait_timer);
-        g_ai_wait_timer = NULL;
+    if(g_ai_message_id == UI_TEXT_AI_IMAGE_UPLOADING) {
+        switch(g_ai_wait_dot_count) {
+            case 1:
+                return "图片上传中，正在等待服务器处理.";
+            case 2:
+                return "图片上传中，正在等待服务器处理..";
+            default:
+                return ui_i18n_text(UI_TEXT_AI_IMAGE_UPLOADING);
+        }
     }
-    g_ai_waiting = 0u;
-    g_ai_wait_dot_count = 0u;
-    g_ai_message_id = UI_TEXT_AI_IDLE;
-    g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
-    g_ai_cancel_label = NULL;
+
+    switch(g_ai_wait_dot_count) {
+        case 1:
+            return "正在识别和思考.";
+        case 2:
+            return "正在识别和思考..";
+        default:
+            return "正在识别和思考...";
+    }
 }
 
 static void ai_apply_cancel_entry(ui_ai_view_t *view)
@@ -468,17 +479,7 @@ static void ai_wait_timer_cb(lv_timer_t *timer)
     }
 
     g_ai_wait_dot_count = (uint8_t)((g_ai_wait_dot_count % 3u) + 1u);
-    switch(g_ai_wait_dot_count) {
-        case 1:
-            lv_label_set_text(g_ai_view->answer_label, "正在识别和思考.");
-            break;
-        case 2:
-            lv_label_set_text(g_ai_view->answer_label, "正在识别和思考..");
-            break;
-        default:
-            lv_label_set_text(g_ai_view->answer_label, "正在识别和思考...");
-            break;
-    }
+    lv_label_set_text(g_ai_view->answer_label, ai_waiting_text());
 }
 
 /**
@@ -1126,7 +1127,6 @@ void ui_event_register_ai(ui_ai_view_t *view)
         return;
     }
 
-    ai_reset_transient_state();
     g_ai_view = view;
     ai_set_speaking(view, false);
     if(view->camera_button != NULL) {
@@ -1136,10 +1136,13 @@ void ui_event_register_ai(ui_ai_view_t *view)
         lv_obj_add_event_cb(view->audio_button, ai_audio_play_event_cb, LV_EVENT_CLICKED, view);
     }
     lv_obj_add_event_cb(view->ask_button, ai_ask_event_cb, LV_EVENT_ALL, view);
-    ai_apply_audio_button_state(view, UI_AI_AUDIO_BTN_HIDDEN);
+    ai_apply_audio_button_state(view, g_ai_audio_btn_state);
     if(view->answer_label != NULL) {
-        lv_label_set_text(view->answer_label, ui_i18n_text(UI_TEXT_AI_IDLE));
+        lv_label_set_text(view->answer_label, ui_i18n_text(g_ai_message_id));
         lv_obj_set_style_text_font(view->answer_label, ui_font_normal(), 0);
+    }
+    if(g_ai_waiting != 0u) {
+        ui_event_set_ai_waiting(true);
     }
 }
 
@@ -1149,8 +1152,12 @@ void ui_event_unregister_ai(ui_ai_view_t *view)
         return;
     }
 
-    ai_reset_transient_state();
+    if(g_ai_wait_timer != NULL) {
+        lv_timer_delete(g_ai_wait_timer);
+        g_ai_wait_timer = NULL;
+    }
     g_ai_view = NULL;
+    g_ai_cancel_label = NULL;
 }
 
 void ui_event_set_ai_waiting(bool waiting)
@@ -1172,7 +1179,7 @@ void ui_event_set_ai_waiting(bool waiting)
 
     g_ai_wait_dot_count = 0u;
     if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
-        lv_label_set_text(g_ai_view->answer_label, "正在识别和思考...");
+        lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(g_ai_message_id));
         lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
     }
     if(g_ai_wait_timer == NULL) {
