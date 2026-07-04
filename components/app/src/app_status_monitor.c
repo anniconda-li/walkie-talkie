@@ -120,8 +120,9 @@ static void app_status_monitor_network_task(void *arg)
         } else {
             (void)app_ui_set_network_status(0, 0);
             s_network_ready = 0;
-            /* 初始化失败或掉线后交给 app_network 按当前用户选择恢复。 */
-            (void)app_network_recover();
+            if (mode == APP_NETWORK_MODE_4G) {
+                (void)app_network_recover();
+            }
         }
 
         osal_delay_ms(3000u);

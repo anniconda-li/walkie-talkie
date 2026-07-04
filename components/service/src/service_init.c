@@ -265,6 +265,8 @@ int service_init_camera(void)
 {
     service_camera_config_t camera_cfg = {
         .ops = {
+            .init = d_camera_init,
+            .deinit = d_camera_deinit,
             .is_initialized = d_camera_is_initialized,
             .set_rgb565_mode = d_camera_set_rgb565_mode,
             .set_jpeg_mode = d_camera_set_jpeg_mode,
@@ -276,6 +278,9 @@ int service_init_camera(void)
     int ret = service_camera_init(&camera_cfg);
     if (ret != 0) {
         SERVICE_LOGW(TAG, "摄像头服务初始化失败或未启用, ret=%d", ret);
+    } else {
+        (void)service_camera_power_off();
+        SERVICE_LOGI(TAG, "摄像头服务已绑定，空闲时保持下电");
     }
 
     return ret;

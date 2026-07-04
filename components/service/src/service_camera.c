@@ -34,6 +34,8 @@ static uint8_t s_camera_ops_ready = 0u;
 static int service_camera_ops_is_valid(const service_camera_ops_t *ops)
 {
     if (ops == NULL ||
+        ops->init == NULL ||
+        ops->deinit == NULL ||
         ops->is_initialized == NULL ||
         ops->set_rgb565_mode == NULL ||
         ops->set_jpeg_mode == NULL ||
@@ -56,11 +58,6 @@ int service_camera_init(const service_camera_config_t *cfg)
         SERVICE_LOGE(TAG, "摄像头服务初始化失败: ops 无效");
         return -1;
     }
-    if (cfg->ops.is_initialized() != 1) {
-        SERVICE_LOGE(TAG, "摄像头服务初始化失败: 下层摄像头 driver 未初始化");
-        return -2;
-    }
-
     s_camera_ops = cfg->ops;
     s_camera_ops_ready = 1u;
     SERVICE_LOGI(TAG, "摄像头服务初始化成功");
@@ -69,6 +66,13 @@ int service_camera_init(const service_camera_config_t *cfg)
 
 int service_camera_deinit(void)
 {
+    if (s_camera_ops_ready != 0u &&
+        s_camera_ops.is_initialized != NULL &&
+        s_camera_ops.deinit != NULL &&
+        s_camera_ops.is_initialized() == 1) {
+        (void)s_camera_ops.deinit();
+    }
+
     s_camera_ops = (service_camera_ops_t){0};
     s_camera_ops_ready = 0u;
     SERVICE_LOGI(TAG, "摄像头服务已释放");
@@ -80,13 +84,46 @@ int service_camera_is_initialized(void)
     return s_camera_ops_ready != 0u ? 1 : 0;
 }
 
+int service_camera_is_powered(void)
+{
+    if (s_camera_ops_ready == 0u || s_camera_ops.is_initialized == NULL) {
+        return 0;
+    }
+
+    return s_camera_ops.is_initialized();
+}
+
+int service_camera_power_on(void)
+{
+    if (s_camera_ops_ready == 0u) {
+        return -1;
+    }
+    if (s_camera_ops.is_initialized() == 1) {
+        return 0;
+    }
+
+    return s_camera_ops.init();
+}
+
+int service_camera_power_off(void)
+{
+    if (s_camera_ops_ready == 0u) {
+        return -1;
+    }
+    if (s_camera_ops.is_initialized() != 1) {
+        return 0;
+    }
+
+    return s_camera_ops.deinit();
+}
+
 int service_camera_set_rgb565_mode(void)
 {
     /*
      * RGB565 模式只表示摄像头输出连续预览帧。是否显示、显示到哪里，由
      * app_camera 组合 service_screen 来决定，避免 camera service 越界。
      */
-    if (s_camera_ops_ready == 0u) {
+    if (s_camera_ops_ready == 0u || s_camera_ops.is_initialized() != 1) {
         return -1;
     }
 
@@ -99,7 +136,7 @@ int service_camera_set_jpeg_mode(void)
      * JPEG 模式用于拍照上传。service 不保存 JPEG，也不分配业务缓存；
      * 调用方应在取到 JPEG frame 后拷贝到自己的缓冲区并立即归还。
      */
-    if (s_camera_ops_ready == 0u) {
+    if (s_camera_ops_ready == 0u || s_camera_ops.is_initialized() != 1) {
         return -1;
     }
 
@@ -108,7 +145,7 @@ int service_camera_set_jpeg_mode(void)
 
 int service_camera_get_frame(service_camera_frame_t *frame)
 {
-    if (s_camera_ops_ready == 0u || frame == NULL) {
+    if (s_camera_ops_ready == 0u || s_camera_ops.is_initialized() != 1 || frame == NULL) {
         return -1;
     }
 

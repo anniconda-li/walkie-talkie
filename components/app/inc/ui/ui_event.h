@@ -63,7 +63,7 @@ typedef struct {
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
     void (*settings_brightness_changed)(int32_t value); /**< 屏幕亮度变化回调。 */
     ui_settings_network_mode_t (*settings_network_mode_get)(void); /**< 查询当前网络选择。 */
-    void (*settings_wifi_select_requested)(void);                  /**< 切回已保存 WLAN 请求。 */
+    int (*settings_wifi_select_requested)(void);                   /**< 进入 WLAN 扫描模式请求。 */
     void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */
     void (*settings_wifi_connect_requested)(const char *ssid,
                                             const char *password); /**< WLAN 连接请求。 */
