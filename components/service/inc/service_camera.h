@@ -47,6 +47,8 @@ typedef struct {
  * @brief 摄像头服务依赖的下层采集能力。
  */
 typedef struct {
+    int (*init)(void);                            /**< 初始化/上电下层摄像头 driver。 */
+    int (*deinit)(void);                          /**< 释放/下电下层摄像头 driver。 */
     int (*is_initialized)(void);                  /**< 判断下层摄像头 driver 是否已初始化。 */
     int (*set_rgb565_mode)(void);                 /**< 切换到 RGB565 连续取帧模式。 */
     int (*set_jpeg_mode)(void);                   /**< 切换到 JPEG 拍照模式。 */
@@ -87,6 +89,27 @@ int service_camera_deinit(void);
  * @return 已初始化返回 1；未初始化返回 0。
  */
 int service_camera_is_initialized(void);
+
+/**
+ * @brief 判断下层摄像头硬件是否处于上电初始化状态。
+ *
+ * @return 已上电初始化返回 1；未上电返回 0。
+ */
+int service_camera_is_powered(void);
+
+/**
+ * @brief 上电并初始化下层摄像头 driver。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_camera_power_on(void);
+
+/**
+ * @brief 释放并下电下层摄像头 driver。
+ *
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_camera_power_off(void);
 
 /**
  * @brief 切换到 RGB565 连续取帧模式。

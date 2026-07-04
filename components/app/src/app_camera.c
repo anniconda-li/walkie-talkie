@@ -37,7 +37,7 @@ static const char *TAG = "app_camera";
 /** @brief 模式切换后丢弃帧数，用于等待 sensor 输出稳定。 */
 #define APP_CAMERA_MODE_DISCARD_FRAMES 5u
 /** @brief RGB565 预览恢复后额外暖机帧数，避免首批异常帧直刷到 LCD。 */
-#define APP_CAMERA_RGB565_WARMUP_FRAMES 4u
+#define APP_CAMERA_RGB565_WARMUP_FRAMES 20u
 /** @brief JPEG 模式切换后最多尝试取帧次数。 */
 #define APP_CAMERA_JPEG_CAPTURE_TRIES 10u
 /** @brief 连续检测到异常预览帧后的相机模式重建阈值。 */
@@ -48,6 +48,8 @@ static const char *TAG = "app_camera";
 #define APP_CAMERA_STRIPE_SAMPLE_X_STEP 16u
 /** @brief 横纹检测相邻行亮度差阈值。 */
 #define APP_CAMERA_STRIPE_ROW_DELTA 42
+/** @brief 预览黑屏填充一次绘制的行数，避免相机任务栈上出现大缓冲。 */
+#define APP_CAMERA_BLACK_CHUNK_LINES 8u
 
 typedef struct {
     uint8_t *jpeg_buf;
@@ -81,6 +83,8 @@ static volatile int s_upload_cancel_requested = 0;
 static volatile int s_upload_task_running = 0;
 /** @brief 重拍请求标志，由 UI 回调置位，后台任务消费。 */
 static volatile int s_retake_req = 0;
+/** @brief 下电请求标志，由页面退出或拍照完成后置位，后台任务消费。 */
+static volatile int s_poweroff_req = 0;
 /** @brief JPEG 暂存缓冲，分配在外部大容量内存。 */
 static uint8_t *s_jpeg_buf = NULL;
 /** @brief JPEG 暂存缓冲容量。 */
@@ -97,6 +101,8 @@ static uint32_t s_upload_queued_at_ms = 0u;
 static uint8_t s_preview_warmup_frames = 0u;
 /** @brief 连续拒绝的疑似异常预览帧数量。 */
 static uint8_t s_bad_preview_reject_count = 0u;
+/** @brief 预览暖机黑屏分块缓冲，保存在 PSRAM。 */
+static uint16_t *s_preview_black_buf = NULL;
 #if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
 /** @brief 固定色块测试缓冲，保存在 PSRAM，避免占用内部 SRAM。 */
 static uint16_t *s_color_test_buf = NULL;
@@ -385,10 +391,80 @@ static int app_camera_discard_frames(uint8_t count)
     return 0;
 }
 
+static void app_camera_draw_black_preview(void);
+
 static void app_camera_mark_rgb565_warmup(void)
 {
     s_preview_warmup_frames = APP_CAMERA_RGB565_WARMUP_FRAMES;
     s_bad_preview_reject_count = 0u;
+    app_camera_draw_black_preview();
+}
+
+static int app_camera_ensure_black_buffer(void)
+{
+    const size_t bytes = (size_t)APP_CAMERA_PREVIEW_W *
+                         (size_t)APP_CAMERA_BLACK_CHUNK_LINES *
+                         sizeof(uint16_t);
+
+    if (s_preview_black_buf != NULL) {
+        return 0;
+    }
+
+    s_preview_black_buf = (uint16_t *)osal_heap_alloc_external(bytes);
+    if (s_preview_black_buf == NULL) {
+        APP_LOGW(TAG,
+                 "相机黑屏缓冲分配失败, bytes=%u, external_free=%u",
+                 (unsigned int)bytes,
+                 (unsigned int)osal_heap_get_external_free_size());
+        return -1;
+    }
+
+    memset(s_preview_black_buf, 0, bytes);
+    return 0;
+}
+
+static void app_camera_draw_black_preview(void)
+{
+    if (app_camera_ensure_black_buffer() != 0) {
+        return;
+    }
+
+    for (uint32_t y = 0u; y < APP_CAMERA_PREVIEW_H; y += APP_CAMERA_BLACK_CHUNK_LINES) {
+        uint32_t lines = APP_CAMERA_PREVIEW_H - y;
+        if (lines > APP_CAMERA_BLACK_CHUNK_LINES) {
+            lines = APP_CAMERA_BLACK_CHUNK_LINES;
+        }
+        (void)service_screen_draw_rgb565(APP_CAMERA_PREVIEW_X,
+                                         APP_CAMERA_PREVIEW_Y + (int)y,
+                                         APP_CAMERA_PREVIEW_W,
+                                         (int)lines,
+                                         s_preview_black_buf);
+    }
+}
+
+static int app_camera_power_on_for_preview(void)
+{
+    int ret = service_camera_power_on();
+    if (ret != 0) {
+        APP_LOGW(TAG, "相机上电失败, ret=%d", ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+static void app_camera_power_off_idle(void)
+{
+    s_preview_active = 0;
+    s_preview_warmup_frames = 0u;
+    s_bad_preview_reject_count = 0u;
+
+    int ret = service_camera_power_off();
+    if (ret == 0) {
+        APP_LOGI(TAG, "相机空闲下电完成");
+    } else {
+        APP_LOGW(TAG, "相机空闲下电失败, ret=%d", ret);
+    }
 }
 
 static int app_camera_frame_is_valid_rgb565_preview(const service_camera_frame_t *frame)
@@ -551,18 +627,30 @@ static void app_camera_recover_rgb565_preview(void)
     APP_LOGW(TAG, "相机预览连续检测到异常帧，重建 RGB565 模式");
     s_preview_active = 0;
     s_frozen = 0;
+    if (s_page_active == 0) {
+        app_camera_power_off_idle();
+        return;
+    }
+    app_camera_draw_black_preview();
+
+    if (app_camera_power_on_for_preview() != 0) {
+        return;
+    }
 
     (void)service_camera_set_jpeg_mode();
     (void)app_camera_discard_frames(2u);
 
     if (service_camera_set_rgb565_mode() == 0) {
         (void)app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
-        app_camera_mark_rgb565_warmup();
         if (s_page_active != 0) {
+            app_camera_mark_rgb565_warmup();
             s_preview_active = 1;
+        } else {
+            app_camera_power_off_idle();
         }
     } else {
         APP_LOGW(TAG, "相机 RGB565 模式重建失败");
+        app_camera_power_off_idle();
     }
 }
 
@@ -701,7 +789,7 @@ static void app_camera_preview_once(void)
  */
 static void app_camera_do_capture(void)
 {
-    if (service_camera_is_initialized() != 1) {
+    if (service_camera_is_initialized() != 1 || app_camera_power_on_for_preview() != 0) {
         return;
     }
 
@@ -714,6 +802,7 @@ static void app_camera_do_capture(void)
     }
     if (ret != 0) {
         APP_LOGW(TAG, "相机切换 JPEG 模式失败, ret=%d", ret);
+        app_camera_power_off_idle();
         return;
     }
 
@@ -722,6 +811,7 @@ static void app_camera_do_capture(void)
         ret = service_camera_get_frame(&frame);
         if (ret != 0) {
             APP_LOGW(TAG, "相机 JPEG 取帧失败, try=%u, ret=%d", (unsigned int)i, ret);
+            app_camera_power_off_idle();
             return;
         }
 
@@ -759,11 +849,13 @@ static void app_camera_do_capture(void)
         }
 
         service_camera_return_frame(&frame);
+        app_camera_power_off_idle();
         return;
     }
 
     APP_LOGW(TAG, "相机 JPEG 取帧失败: 连续 %u 帧都不是合法 JPEG",
              (unsigned int)APP_CAMERA_JPEG_CAPTURE_TRIES);
+    app_camera_power_off_idle();
 }
 
 /**
@@ -970,10 +1062,25 @@ static void app_camera_do_retake(void)
     s_color_test_drawn = 0u;
 #endif
     s_frozen = 0;
-    if (s_page_active != 0 && service_camera_set_rgb565_mode() == 0) {
-        (void)app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
+    if (s_page_active == 0) {
+        return;
+    }
+    app_camera_draw_black_preview();
+    if (app_camera_power_on_for_preview() != 0) {
+        return;
+    }
+    if (service_camera_set_rgb565_mode() != 0) {
+        APP_LOGW(TAG, "相机切换 RGB565 预览模式失败");
+        app_camera_power_off_idle();
+        return;
+    }
+
+    (void)app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
+    if (s_page_active != 0) {
         app_camera_mark_rgb565_warmup();
         s_preview_active = 1;
+    } else {
+        app_camera_power_off_idle();
     }
 }
 
@@ -982,11 +1089,12 @@ static void app_camera_do_retake(void)
  *
  * 返回前把标志从全局状态中取出并清零，保证一次 UI 操作只处理一次。
  */
-static void app_camera_take_requests(int *capture, int *upload, int *retake)
+static void app_camera_take_requests(int *capture, int *upload, int *retake, int *poweroff)
 {
     *capture = 0;
     *upload = 0;
     *retake = 0;
+    *poweroff = 0;
 
     if (app_camera_lock() != 0) {
         return;
@@ -994,9 +1102,11 @@ static void app_camera_take_requests(int *capture, int *upload, int *retake)
     *capture = s_capture_req;
     *upload = s_upload_req;
     *retake = s_retake_req;
+    *poweroff = s_poweroff_req;
     s_capture_req = 0;
     s_upload_req = 0;
     s_retake_req = 0;
+    s_poweroff_req = 0;
     app_camera_unlock();
 }
 
@@ -1014,7 +1124,8 @@ static void app_camera_task(void *arg)
         int capture = 0;
         int upload = 0;
         int retake = 0;
-        app_camera_take_requests(&capture, &upload, &retake);
+        int poweroff = 0;
+        app_camera_take_requests(&capture, &upload, &retake, &poweroff);
 
         if (retake) {
             app_camera_do_retake();
@@ -1024,6 +1135,9 @@ static void app_camera_task(void *arg)
         }
         if (upload) {
             app_camera_start_upload_task();
+        }
+        if (poweroff) {
+            app_camera_power_off_idle();
         }
 
         if (s_preview_active != 0 && s_frozen == 0 && s_page_active != 0) {
@@ -1082,6 +1196,7 @@ void app_camera_enter(void)
      */
     if (app_camera_lock() == 0) {
         s_retake_req = 1;
+        s_poweroff_req = 0;
         app_camera_unlock();
     }
     app_camera_notify_task();
@@ -1097,14 +1212,9 @@ void app_camera_exit(void)
     s_preview_active = 0;
     s_frozen = 0;
     if (app_camera_lock() == 0) {
-        /*
-         * 如果用户点击上传后立即跳到 AI 页面，保留 upload 请求和 JPEG 缓冲，
-         * 让后台任务继续完成上传；普通退出则清理暂存图像。
-         */
-        if (s_upload_req == 0 && s_upload_in_progress == 0) {
-            s_capture_req = 0;
-            s_retake_req = 1;
-        }
+        s_capture_req = 0;
+        s_retake_req = 0;
+        s_poweroff_req = 1;
         app_camera_unlock();
     }
     app_camera_notify_task();
@@ -1201,6 +1311,7 @@ void app_camera_retake(void)
 
     if (app_camera_lock() == 0) {
         s_retake_req = 1;
+        s_poweroff_req = 0;
         app_camera_unlock();
     }
     app_camera_notify_task();

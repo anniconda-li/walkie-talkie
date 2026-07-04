@@ -459,17 +459,6 @@ static void app_business_on_wifi_connect(const char *ssid, const char *password)
     }
 }
 
-static void app_business_wifi_select_task(void *arg)
-{
-    (void)arg;
-
-    int ret = app_network_select_saved_wifi();
-    (void)app_ui_settings_show_wifi_connect_result(ret);
-    s_wifi_connect_busy = 0;
-    s_network_switch_busy = 0;
-    osal_task_delete_current();
-}
-
 static void app_business_4g_select_task(void *arg)
 {
     (void)arg;
@@ -489,28 +478,17 @@ static void app_business_4g_select_task(void *arg)
     osal_task_delete_current();
 }
 
-static void app_business_on_wifi_select(void)
+static int app_business_on_wifi_select(void)
 {
-    if (app_network_get_mode() == APP_NETWORK_MODE_WIFI) {
-        return;
-    }
     s_fake_4g_connect_busy = 0;
     if (s_wifi_connect_busy || s_network_switch_busy) {
-        return;
+        return -1;
     }
 
-    s_wifi_connect_busy = 1;
     s_network_switch_busy = 1;
-    if (osal_task_create("wifi_sel",
-                         app_business_wifi_select_task,
-                         NULL,
-                         6144u,
-                         4u,
-                         NULL) != 0) {
-        s_wifi_connect_busy = 0;
-        s_network_switch_busy = 0;
-        (void)app_ui_settings_show_wifi_connect_result(-1);
-    }
+    int ret = app_network_enter_wifi_scan_mode();
+    s_network_switch_busy = 0;
+    return ret;
 }
 
 static int app_business_on_4g_select(void)

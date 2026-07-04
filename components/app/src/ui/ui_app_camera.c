@@ -53,11 +53,6 @@ lv_obj_t * ui_app_camera_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(root, 0, 0);
     lv_obj_set_style_radius(root, 0, 0);
 
-    /*
-     * 预览区域不创建任何 LVGL 对象。摄像头画面由 app_camera 直接绘制到
-     * LCD 的固定区域，底部按钮仍由 LVGL 管理。这样可以排除预览区对象被
-     * LVGL flush 覆盖导致的花屏。
-     */
     g_camera_view.upload_button = create_button(root, CAMERA_BTN_LEFT_X, CAMERA_BTN_Y, CAMERA_BTN_W, CAMERA_BTN_H,
                                                 &icon_camera_upload,
                                                 &g_camera_view.upload_icon);
@@ -77,11 +72,11 @@ void ui_app_camera_enter(lv_obj_t * root)
 {
     (void)root;
 
-    ui_event_notify_camera_entered();
-
     lv_obj_set_y(g_camera_view.capture_button, CAMERA_BTN_Y);
     lv_obj_set_y(g_camera_view.upload_button, CAMERA_BTN_Y);
     lv_obj_set_y(g_camera_view.retake_button, CAMERA_BTN_Y);
+
+    ui_event_notify_camera_entered();
 }
 
 void ui_app_camera_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)

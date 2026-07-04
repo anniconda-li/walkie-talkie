@@ -30,11 +30,11 @@ static framesize_t s_camera_framesize = D_CAMERA_PREVIEW_FRAME_SIZE;
 static uint8_t s_camera_rebuild_rgb565_pending = 0u;
 
 /*
- * OV2640 寄存器级色彩增强默认关闭。稳定性优先，预览只使用 esp-camera
- * 公开 sensor API 调参；需要重新调色时再单独打开这个开关验证。
+ * OV2640 寄存器级色彩增强默认开启，用于改善预览灰白、饱和度不足的问题。
+ * 随机异常优先通过空闲下电和模式重建处理，不再牺牲正常预览色彩。
  */
 #ifndef D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST
-#define D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST 0
+#define D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST 1
 #endif
 
 /** @brief OV2640 DSP register bank id, matching esp32-camera ov2640_regs.h. */
@@ -440,11 +440,23 @@ static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize, int
 
 int d_camera_init(void)
 {
+    if (s_camera_inited != 0u) {
+        return 0;
+    }
+
     return d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE, 0);
 }
 
 int d_camera_deinit(void)
 {
+    if (s_camera_inited == 0u) {
+        (void)d_camera_set_pwdn_level(1);
+        s_camera_pixformat = PIXFORMAT_RGB565;
+        s_camera_framesize = D_CAMERA_PREVIEW_FRAME_SIZE;
+        s_camera_rebuild_rgb565_pending = 0u;
+        return 0;
+    }
+
     int ret = d_camera_err_to_int(esp_camera_deinit());
     if (ret == 0) {
         (void)d_camera_set_pwdn_level(1);

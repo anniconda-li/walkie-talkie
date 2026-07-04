@@ -1089,25 +1089,22 @@ static void settings_wlan_select_event_cb(lv_event_t *e)
     }
 
     if(code == LV_EVENT_CLICKED) {
-        if(view->selected_network == UI_SETTINGS_NETWORK_WLAN) {
-            return;
-        }
-        if(g_settings_pending_network == UI_SETTINGS_NETWORK_WLAN) {
-            settings_refresh_network_selected(view);
-            return;
-        }
-        if(view->network_status_label != NULL) {
-            lv_obj_remove_flag(view->network_status_label, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(view->network_status_label, "正在切换WLAN...");
-        }
+        int ret = 0;
         if(g_callbacks.settings_wifi_select_requested != NULL) {
-            g_settings_pending_network = UI_SETTINGS_NETWORK_WLAN;
-            settings_refresh_network_selected(view);
-            g_callbacks.settings_wifi_select_requested();
-        } else {
-            lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
-            settings_wifi_scan(view);
+            ret = g_callbacks.settings_wifi_select_requested();
         }
+        if(ret != 0) {
+            if(view->network_status_label != NULL) {
+                lv_obj_remove_flag(view->network_status_label, LV_OBJ_FLAG_HIDDEN);
+                lv_label_set_text(view->network_status_label, "WLAN暂不可用");
+            }
+            settings_refresh_network_selected(view);
+            return;
+        }
+        g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
+        settings_refresh_network_selected(view);
+        lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
+        settings_wifi_scan(view);
     } else if(code == LV_EVENT_LONG_PRESSED) {
         lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
         settings_wifi_scan(view);

@@ -24,7 +24,7 @@ static const char *TAG = "app_network";
 #define APP_NETWORK_NVS_WIFI_PASSWORD  "wifi_pwd"
 #define APP_NETWORK_WIFI_CONNECT_MS    15000u
 #define APP_NETWORK_FAKE_4G_CONNECT_MS 22000u
-#define APP_NETWORK_WIFI_RETRY_COUNT   2u
+#define APP_NETWORK_WIFI_RETRY_COUNT   3u
 #define APP_NETWORK_FAKE_4G_RETRY_COUNT 5u
 #define APP_NETWORK_RETRY_DELAY_MS     1200u
 #define APP_NETWORK_MONITOR_MS         10000u
@@ -262,22 +262,25 @@ int app_network_connect_wifi(const char *ssid, const char *password)
     return 0;
 }
 
-int app_network_select_saved_wifi(void)
+int app_network_enter_wifi_scan_mode(void)
 {
-    char ssid[33];
-    char password[65];
-
-    if (app_network_load_wifi(ssid, sizeof(ssid), password, sizeof(password)) != 0) {
-        APP_LOGW(TAG, "未找到已保存 WLAN 配置");
-        if (app_network_begin_switch() == 0) {
-            app_network_enter_user_mode(APP_NETWORK_MODE_WIFI);
-            (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
-            app_network_end_switch();
-        }
-        return -1;
+    int ret = app_network_begin_switch();
+    if (ret != 0) {
+        return ret;
     }
 
-    return app_network_connect_wifi(ssid, password);
+    (void)d_wifi_disconnect();
+    ret = service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+    if (ret == 0) {
+        app_network_set_mode(APP_NETWORK_MODE_WIFI);
+        app_intercom_network_changed();
+        APP_LOGI(TAG, "已切换到 WLAN 扫描模式");
+    } else {
+        APP_LOGW(TAG, "WLAN 扫描模式切换失败, ret=%d", ret);
+    }
+
+    app_network_end_switch();
+    return ret;
 }
 
 int app_network_select_4g(void)
@@ -329,11 +332,8 @@ int app_network_recover(void)
         return -1;
     }
 
-    if (mode == APP_NETWORK_MODE_WIFI || mode == APP_NETWORK_MODE_4G) {
-        if (mode == APP_NETWORK_MODE_4G) {
-            return app_network_select_4g();
-        }
-        return app_network_select_saved_wifi();
+    if (mode == APP_NETWORK_MODE_4G) {
+        return app_network_select_4g();
     }
 
     return -1;
@@ -404,9 +404,14 @@ static void app_network_task(void *arg)
 
     char ssid[33];
     char password[65];
-    if (app_network_load_wifi(ssid, sizeof(ssid), password, sizeof(password)) == 0 &&
-        app_network_connect_wifi(ssid, password) != 0) {
-        APP_LOGW(TAG, "开机自动连接 WLAN 失败");
+    int load_ret = app_network_load_wifi(ssid, sizeof(ssid), password, sizeof(password));
+    if (load_ret == 0) {
+        int ret = app_network_connect_wifi(ssid, password);
+        if (ret != 0) {
+            APP_LOGW(TAG, "开机自动连接上次 WLAN 失败, ssid=%s, ret=%d", ssid, ret);
+        }
+    } else {
+        APP_LOGI(TAG, "开机未找到已保存 WLAN，等待用户扫描选择");
     }
 
     while (1) {
@@ -416,8 +421,7 @@ static void app_network_task(void *arg)
         }
 
         app_network_mode_t mode = app_network_get_mode();
-        if ((mode == APP_NETWORK_MODE_WIFI || mode == APP_NETWORK_MODE_4G) &&
-            service_network_is_ready() != 1) {
+        if (mode == APP_NETWORK_MODE_4G && service_network_is_ready() != 1) {
             APP_LOGW(TAG, "网络未就绪，按当前模式恢复, mode=%d", (int)mode);
             (void)app_network_recover();
         }
