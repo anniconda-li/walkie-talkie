@@ -53,9 +53,12 @@ static ui_ai_audio_btn_state_t g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
 static lv_obj_t *g_ai_cancel_label = NULL;
 static int32_t g_settings_volume = 80;
 static uint8_t g_settings_volume_syncing = 0u;
+static ui_settings_network_mode_t g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
 static lv_obj_t *g_volume_overlay = NULL;
 static lv_obj_t *g_volume_slider = NULL;
 static lv_timer_t *g_volume_hide_timer = NULL;
+
+static void ai_answer_scroll_top(ui_ai_view_t *view);
 
 /* ==========================================================================
  * 通用 UI 工具函数
@@ -311,11 +314,24 @@ static void camera_capture_event_cb(lv_event_t *e)
 static void camera_upload_event_cb(lv_event_t *e)
 {
     if(lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        int ret = -1;
         if(g_callbacks.camera_upload_requested != NULL) {
-            g_callbacks.camera_upload_requested();
+            ret = g_callbacks.camera_upload_requested();
         }
-        ui_event_set_ai_message(UI_TEXT_AI_IMAGE_UPLOADING);
-        ui_event_set_ai_waiting(true);
+        if(ret == 0) {
+            ui_event_set_ai_message(UI_TEXT_AI_IMAGE_UPLOADING);
+            ui_event_set_ai_waiting(true);
+        }
+        else if(ret == -3) {
+            ui_event_set_ai_waiting(false);
+            ui_event_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
+            ui_event_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_BUSY);
+        }
+        else {
+            ui_event_set_ai_waiting(false);
+            ui_event_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
+            ui_event_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        }
         ui_shell_switch_to(UI_APP_ID_AI);
     }
 }
@@ -342,9 +358,9 @@ static const char *ai_waiting_text(void)
     if(g_ai_message_id == UI_TEXT_AI_IMAGE_UPLOADING) {
         switch(g_ai_wait_dot_count) {
             case 1:
-                return "图片上传中，正在等待服务器处理.";
+                return "图片上传中.";
             case 2:
-                return "图片上传中，正在等待服务器处理..";
+                return "图片上传中..";
             default:
                 return ui_i18n_text(UI_TEXT_AI_IMAGE_UPLOADING);
         }
@@ -463,9 +479,11 @@ static void ai_set_speaking(ui_ai_view_t *view, bool speaking)
     }
     if(speaking) {
         lv_label_set_text(view->answer_label, ui_i18n_text(UI_TEXT_AI_LISTENING));
+        ai_answer_scroll_top(view);
     }
     else if(g_ai_waiting == 0u) {
         lv_label_set_text(view->answer_label, ui_i18n_text(g_ai_message_id));
+        ai_answer_scroll_top(view);
     }
     ai_apply_cancel_entry(view);
 }
@@ -482,6 +500,13 @@ static void ai_wait_timer_cb(lv_timer_t *timer)
     lv_label_set_text(g_ai_view->answer_label, ai_waiting_text());
 }
 
+static void ai_answer_scroll_top(ui_ai_view_t *view)
+{
+    if(view != NULL && view->answer_panel != NULL) {
+        lv_obj_scroll_to_y(view->answer_panel, 0, LV_ANIM_OFF);
+    }
+}
+
 /**
  * @brief AI 提问按钮事件：长按开始录音，松开停止并触发问答。
  *
@@ -494,12 +519,22 @@ static void ai_ask_event_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     ui_ai_view_t *view = (ui_ai_view_t *)lv_event_get_user_data(e);
 
-    if(code == LV_EVENT_SHORT_CLICKED && ai_cancel_entry_active()) {
+    if(g_ai_waiting != 0u) {
         if(g_callbacks.ai_cancel_requested != NULL) {
-            g_callbacks.ai_cancel_requested();
+            if(ai_cancel_entry_active() && code == LV_EVENT_SHORT_CLICKED) {
+                g_callbacks.ai_cancel_requested();
+                ui_event_set_ai_message(UI_TEXT_AI_IDLE);
+                ui_event_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
+            }
         }
+        return;
     }
-    else if(code == LV_EVENT_LONG_PRESSED) {
+
+    if(code == LV_EVENT_SHORT_CLICKED) {
+        return;
+    }
+
+    if(code == LV_EVENT_LONG_PRESSED) {
         ai_set_speaking(view, true);
         if(g_callbacks.ai_question_started != NULL) {
             g_callbacks.ai_question_started();
@@ -690,25 +725,37 @@ static void settings_set_network_selected(ui_settings_view_t *view, ui_settings_
         return;
     }
 
+    if(g_settings_pending_network != UI_SETTINGS_NETWORK_NONE &&
+       mode == g_settings_pending_network) {
+        g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
+    }
+
     view->selected_network = mode;
     lv_color_t active_bg = lv_color_white();
     lv_color_t active_text = lv_color_black();
+    lv_color_t pending_bg = lv_color_make(0x22, 0x22, 0x22);
+    lv_color_t pending_text = lv_color_make(0xA8, 0xA8, 0xA8);
     lv_color_t idle_bg = lv_color_black();
     lv_color_t idle_text = lv_color_white();
     if(view->wlan_button != NULL) {
         bool active = mode == UI_SETTINGS_NETWORK_WLAN;
-        lv_obj_set_style_bg_color(view->wlan_button, active ? active_bg : idle_bg, 0);
-        lv_obj_set_style_border_width(view->wlan_button, 0, 0);
+        bool pending = g_settings_pending_network == UI_SETTINGS_NETWORK_WLAN && !active;
+        lv_obj_set_style_bg_color(view->wlan_button, active ? active_bg : (pending ? pending_bg : idle_bg), 0);
+        lv_obj_set_style_border_width(view->wlan_button, pending ? 1 : 0, 0);
+        lv_obj_set_style_border_color(view->wlan_button, lv_color_make(0x58, 0x58, 0x58), 0);
         if(view->wlan_ssid_label != NULL) {
-            lv_obj_set_style_text_color(view->wlan_ssid_label, active ? active_text : idle_text, 0);
+            lv_obj_set_style_text_color(view->wlan_ssid_label, active ? active_text : (pending ? pending_text : idle_text), 0);
         }
     }
     if(view->cellular_button != NULL) {
         bool active = mode == UI_SETTINGS_NETWORK_4G;
-        lv_obj_set_style_bg_color(view->cellular_button, active ? active_bg : idle_bg, 0);
-        lv_obj_set_style_border_width(view->cellular_button, 0, 0);
+        bool pending = g_settings_pending_network == UI_SETTINGS_NETWORK_4G && !active;
+        lv_obj_set_style_bg_color(view->cellular_button, active ? active_bg : (pending ? pending_bg : idle_bg), 0);
+        lv_obj_set_style_border_width(view->cellular_button, pending ? 1 : 0, 0);
+        lv_obj_set_style_border_color(view->cellular_button, lv_color_make(0x58, 0x58, 0x58), 0);
         if(view->cellular_label != NULL) {
-            lv_obj_set_style_text_color(view->cellular_label, active ? active_text : idle_text, 0);
+            lv_label_set_text(view->cellular_label, "移动数据");
+            lv_obj_set_style_text_color(view->cellular_label, active ? active_text : (pending ? pending_text : idle_text), 0);
         }
     }
 }
@@ -1016,8 +1063,20 @@ static void settings_4g_event_cb(lv_event_t *e)
     if(view->selected_network == UI_SETTINGS_NETWORK_4G) {
         return;
     }
+    if(g_settings_pending_network == UI_SETTINGS_NETWORK_4G) {
+        settings_refresh_network_selected(view);
+        return;
+    }
 
-    g_callbacks.settings_4g_select_requested();
+    int ret = g_callbacks.settings_4g_select_requested();
+    if(ret == 0) {
+        g_settings_pending_network = UI_SETTINGS_NETWORK_4G;
+        settings_refresh_network_selected(view);
+        settings_refresh_wlan_ssid(view);
+    } else if(g_settings_pending_network == UI_SETTINGS_NETWORK_NONE) {
+        g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
+        settings_refresh_network_selected(view);
+    }
 }
 
 static void settings_wlan_select_event_cb(lv_event_t *e)
@@ -1033,11 +1092,17 @@ static void settings_wlan_select_event_cb(lv_event_t *e)
         if(view->selected_network == UI_SETTINGS_NETWORK_WLAN) {
             return;
         }
+        if(g_settings_pending_network == UI_SETTINGS_NETWORK_WLAN) {
+            settings_refresh_network_selected(view);
+            return;
+        }
         if(view->network_status_label != NULL) {
             lv_obj_remove_flag(view->network_status_label, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(view->network_status_label, "正在切换WLAN...");
         }
         if(g_callbacks.settings_wifi_select_requested != NULL) {
+            g_settings_pending_network = UI_SETTINGS_NETWORK_WLAN;
+            settings_refresh_network_selected(view);
             g_callbacks.settings_wifi_select_requested();
         } else {
             lv_obj_remove_flag(view->wlan_page, LV_OBJ_FLAG_HIDDEN);
@@ -1128,6 +1193,10 @@ void ui_event_register_ai(ui_ai_view_t *view)
     }
 
     g_ai_view = view;
+    if(g_ai_waiting == 0u) {
+        g_ai_message_id = UI_TEXT_AI_IDLE;
+        g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
+    }
     ai_set_speaking(view, false);
     if(view->camera_button != NULL) {
         lv_obj_add_event_cb(view->camera_button, ai_camera_event_cb, LV_EVENT_CLICKED, view);
@@ -1140,6 +1209,7 @@ void ui_event_register_ai(ui_ai_view_t *view)
     if(view->answer_label != NULL) {
         lv_label_set_text(view->answer_label, ui_i18n_text(g_ai_message_id));
         lv_obj_set_style_text_font(view->answer_label, ui_font_normal(), 0);
+        ai_answer_scroll_top(view);
     }
     if(g_ai_waiting != 0u) {
         ui_event_set_ai_waiting(true);
@@ -1173,6 +1243,7 @@ void ui_event_set_ai_waiting(bool waiting)
         g_ai_wait_dot_count = 0u;
         if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
             lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(g_ai_message_id));
+            ai_answer_scroll_top(g_ai_view);
         }
         return;
     }
@@ -1181,6 +1252,7 @@ void ui_event_set_ai_waiting(bool waiting)
     if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
         lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(g_ai_message_id));
         lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
+        ai_answer_scroll_top(g_ai_view);
     }
     if(g_ai_wait_timer == NULL) {
         g_ai_wait_timer = lv_timer_create(ai_wait_timer_cb, 320, NULL);
@@ -1194,6 +1266,7 @@ void ui_event_set_ai_message(ui_text_id_t text_id)
     if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
         lv_label_set_text(g_ai_view->answer_label, ui_i18n_text(text_id));
         lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
+        ai_answer_scroll_top(g_ai_view);
     }
 }
 
@@ -1203,6 +1276,7 @@ void ui_event_set_ai_answer_text(const char *text)
     if(g_ai_view != NULL && g_ai_view->answer_label != NULL) {
         lv_label_set_text(g_ai_view->answer_label, text != NULL ? text : "");
         lv_obj_set_style_text_font(g_ai_view->answer_label, ui_font_normal(), 0);
+        ai_answer_scroll_top(g_ai_view);
     }
 }
 
@@ -1328,6 +1402,7 @@ void ui_event_settings_show_wifi_connect_result(int ret)
     }
 
     if(ret == 0) {
+        g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
         if(view->wlan_status_label != NULL) {
             lv_label_set_text(view->wlan_status_label, "WLAN已启用");
         }
@@ -1344,6 +1419,7 @@ void ui_event_settings_show_wifi_connect_result(int ret)
     }
 
     settings_hide_wifi_dialog(view);
+    g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
     if(view->wlan_status_label != NULL) {
         lv_label_set_text(view->wlan_status_label, "连接失败");
     }
@@ -1364,8 +1440,10 @@ void ui_event_settings_show_4g_select_result(ui_settings_4g_status_t status, int
         lv_label_set_text(view->network_status_label, settings_4g_status_text(status));
     }
     if(ret == 0) {
+        g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
         settings_set_network_selected(view, UI_SETTINGS_NETWORK_4G);
     } else {
+        g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
         settings_refresh_network_selected(view);
     }
     settings_refresh_wlan_ssid(view);

@@ -53,7 +53,7 @@ typedef struct {
     void (*camera_entered)(void);                      /**< 相机页面进入回调。 */
     void (*camera_exited)(void);                       /**< 相机页面退出回调。 */
     void (*camera_capture_requested)(void);            /**< 相机拍照请求回调。 */
-    void (*camera_upload_requested)(void);             /**< 相机上传请求回调。 */
+    int (*camera_upload_requested)(void);              /**< 相机上传请求回调。 */
     void (*camera_retake_requested)(void);             /**< 相机重拍请求回调。 */
     void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
@@ -66,7 +66,7 @@ typedef struct {
     void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */
     void (*settings_wifi_connect_requested)(const char *ssid,
                                             const char *password); /**< WLAN 连接请求。 */
-    void (*settings_4g_select_requested)(void);                    /**< 4G 切换请求。 */
+    int (*settings_4g_select_requested)(void);                     /**< 4G 切换请求。 */
     int (*settings_wifi_ssid_get)(char *ssid, size_t size);        /**< 查询当前 WLAN SSID。 */
     void (*power_shutdown_confirmed)(void);                        /**< 用户确认关机回调。 */
 } ui_event_callbacks_t;
@@ -101,6 +101,7 @@ typedef struct {
  * @brief AI 页面视图对象集合。
  */
 typedef struct {
+    lv_obj_t *answer_panel;  /**< AI 回答滚动容器。 */
     lv_obj_t *answer_label;  /**< AI 回答显示标签。 */
     lv_obj_t *audio_button;  /**< AI 回复语音播放按钮。 */
     lv_obj_t *audio_label;   /**< AI 回复语音播放图标/文字。 */

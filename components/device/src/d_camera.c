@@ -5,8 +5,10 @@
 #include "d_camera.h"
 
 #include "d_config.h"
+#include "d_pca9557.h"
 #include "wdriver_i2c.h"
 #include "driver/gpio.h"
+#include "osal_task.h"
 
 #include <stdint.h>
 
@@ -23,6 +25,17 @@ static pixformat_t s_camera_pixformat = PIXFORMAT_RGB565;
 
 /** @brief 当前摄像头输出尺寸，用于避免重复切换 sensor 模式。 */
 static framesize_t s_camera_framesize = D_CAMERA_PREVIEW_FRAME_SIZE;
+
+/** @brief JPEG 拍照后下一次回到 RGB565 预览需要重建 HAL。 */
+static uint8_t s_camera_rebuild_rgb565_pending = 0u;
+
+/*
+ * OV2640 寄存器级色彩增强默认关闭。稳定性优先，预览只使用 esp-camera
+ * 公开 sensor API 调参；需要重新调色时再单独打开这个开关验证。
+ */
+#ifndef D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST
+#define D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST 0
+#endif
 
 /** @brief OV2640 DSP register bank id, matching esp32-camera ov2640_regs.h. */
 #define D_CAMERA_OV2640_BANK_DSP 0
@@ -54,6 +67,9 @@ static int d_camera_err_to_int(int ret)
 static int d_camera_set_pwdn_level(int level)
 {
     if (d_camera_PWDN_IO == GPIO_NUM_NC) {
+        if (d_pca9557_is_initialized() == 1) {
+            return d_pca9557_set_camera_pwdn(level != 0 ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW);
+        }
         return 0;
     }
 
@@ -80,6 +96,7 @@ static int d_camera_set_pwdn_level(int level)
     return ret;
 }
 
+#if D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST
 /**
  * @brief 写 OV2640 指定 bank 的 8-bit 寄存器。
  */
@@ -160,6 +177,7 @@ static void d_camera_apply_ov2640_preview_boost(sensor_t *sensor)
            "OV2640 预览色彩增强已应用: chroma_gain=0x%02X",
            D_CAMERA_OV2640_PREVIEW_CHROMA_GAIN);
 }
+#endif
 
 /**
  * @brief 调整 sensor 默认画面参数。
@@ -293,7 +311,9 @@ static void d_camera_apply_preview_tuning(pixformat_t pixformat)
             D_LOGW(TAG, "摄像头锐度设置失败, ret=%d", ret);
         }
     }
+#if D_CAMERA_ENABLE_OV2640_PREVIEW_BOOST
     d_camera_apply_ov2640_preview_boost(sensor);
+#endif
 
     D_LOGI(TAG,
                 "摄像头预览参数已调校: pid=0x%04X, awb=on, agc=on, gainceiling=2x, aec=on, ae_level=-1, brightness=-2, saturation=%d, contrast=%d, raw_gma=on, lenc=on",
@@ -333,9 +353,10 @@ static void d_camera_log_sensor_info(void)
  * RGB/YUV 接收路径取帧，表现为 fb->format 是 JPEG、数据却不是 JPEG。
  * 因此本项目在 RGB565 预览和 JPEG 拍照之间切换时，采用 deinit/init 重建。
  */
-static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize)
+static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize, int force_reinit)
 {
-    if (s_camera_inited != 0u &&
+    if (force_reinit == 0 &&
+        s_camera_inited != 0u &&
         s_camera_pixformat == pixformat &&
         s_camera_framesize == framesize) {
         return 0;
@@ -348,6 +369,8 @@ static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize)
             return deinit_ret;
         }
         s_camera_inited = 0u;
+        (void)d_camera_set_pwdn_level(1);
+        osal_delay_ms(80u);
     }
 
     if (wdriver_i2c_get_bus_handle() == NULL) {
@@ -359,6 +382,7 @@ static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize)
     if (ret != 0) {
         return ret;
     }
+    osal_delay_ms(80u);
 
     camera_config_t camera_config = {
         .pin_pwdn = d_camera_PWDN_IO,
@@ -416,7 +440,7 @@ static int d_camera_apply_mode(pixformat_t pixformat, framesize_t framesize)
 
 int d_camera_init(void)
 {
-    return d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE);
+    return d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE, 0);
 }
 
 int d_camera_deinit(void)
@@ -432,6 +456,7 @@ int d_camera_deinit(void)
     s_camera_inited = 0u;
     s_camera_pixformat = PIXFORMAT_RGB565;
     s_camera_framesize = D_CAMERA_PREVIEW_FRAME_SIZE;
+    s_camera_rebuild_rgb565_pending = 0u;
     return ret;
 }
 
@@ -441,11 +466,15 @@ int d_camera_set_rgb565_mode(void)
         D_LOGE(TAG, "切换 RGB565 模式失败: 摄像头未初始化");
         return -1;
     }
-    int ret = d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE);
+    int force_reinit = (s_camera_rebuild_rgb565_pending != 0u ||
+                        s_camera_pixformat != PIXFORMAT_RGB565 ||
+                        s_camera_framesize != D_CAMERA_PREVIEW_FRAME_SIZE) ? 1 : 0;
+    int ret = d_camera_apply_mode(PIXFORMAT_RGB565, D_CAMERA_PREVIEW_FRAME_SIZE, force_reinit);
     if (ret != 0) {
         D_LOGE(TAG, "切换 RGB565 模式失败, ret=%d", ret);
         return ret;
     }
+    s_camera_rebuild_rgb565_pending = 0u;
     D_LOGI(TAG, "摄像头已切换到 RGB565 预览模式, frame_size=%d",
                 D_CAMERA_PREVIEW_FRAME_SIZE);
     return 0;
@@ -457,11 +486,12 @@ int d_camera_set_jpeg_mode(void)
         D_LOGE(TAG, "切换 JPEG 模式失败: 摄像头未初始化");
         return -1;
     }
-    int ret = d_camera_apply_mode(PIXFORMAT_JPEG, D_CAMERA_CAPTURE_FRAME_SIZE);
+    int ret = d_camera_apply_mode(PIXFORMAT_JPEG, D_CAMERA_CAPTURE_FRAME_SIZE, 1);
     if (ret != 0) {
         D_LOGE(TAG, "切换 JPEG 模式失败, ret=%d", ret);
         return ret;
     }
+    s_camera_rebuild_rgb565_pending = 1u;
     D_LOGI(TAG, "摄像头已切换到 JPEG 拍照模式, frame_size=%d",
                 D_CAMERA_CAPTURE_FRAME_SIZE);
     return 0;

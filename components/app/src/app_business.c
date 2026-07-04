@@ -41,6 +41,7 @@
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_buttons.h"
+#include "service_screen.h"
 #include "ui_event.h"
 
 #include <stdint.h>
@@ -245,6 +246,9 @@ static void app_business_on_ai_reply_stop_requested(void)
 
 static void app_business_on_ai_cancel_requested(void)
 {
+    if (app_camera_cancel_current() == 0) {
+        return;
+    }
     (void)app_ai_voice_cancel_current();
 }
 
@@ -267,9 +271,9 @@ static void app_business_on_camera_capture(void)
 }
 
 /** @brief 相机上传按钮 → HTTP POST 上传暂存 JPEG。 */
-static void app_business_on_camera_upload(void)
+static int app_business_on_camera_upload(void)
 {
-    app_camera_upload();
+    return app_camera_upload();
 }
 
 /** @brief 相机重拍按钮 → 清理 JPEG 并恢复预览。 */
@@ -509,10 +513,10 @@ static void app_business_on_wifi_select(void)
     }
 }
 
-static void app_business_on_4g_select(void)
+static int app_business_on_4g_select(void)
 {
     if (app_network_get_mode() == APP_NETWORK_MODE_4G || s_network_switch_busy || s_fake_4g_connect_busy) {
-        return;
+        return -1;
     }
 
     s_fake_4g_connect_busy = 1;
@@ -526,7 +530,10 @@ static void app_business_on_4g_select(void)
         s_fake_4g_connect_busy = 0;
         s_network_switch_busy = 0;
         (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
+        return -2;
     }
+
+    return 0;
 }
 
 static void app_business_on_power_key_long_press(void *user_data)

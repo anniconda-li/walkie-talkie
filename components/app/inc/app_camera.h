@@ -42,8 +42,20 @@ void app_camera_capture(void);
 
 /**
  * @brief 请求上传当前暂存 JPEG。
+ *
+ * @return 成功接收上传请求返回 0；忙碌或没有可上传图片返回负值。
  */
-void app_camera_upload(void);
+int app_camera_upload(void);
+
+/**
+ * @brief 取消当前相机上传流程。
+ *
+ * 若 JPEG 上传已经进入 HTTP 调用，底层请求会在返回后被忽略；若仍在队列中，
+ * 上传请求会被直接清除。
+ *
+ * @return 成功发起取消返回 0；当前没有相机上传返回负值。
+ */
+int app_camera_cancel_current(void);
 
 /**
  * @brief 请求重拍。

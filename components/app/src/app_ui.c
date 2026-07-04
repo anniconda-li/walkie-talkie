@@ -76,8 +76,8 @@ int app_ui_set_network_status(int wifi_state, int cellular_state)
     }
 
     if (service_screen_lock(100) != 0) {
-        APP_LOGE(TAG, "UI 网络状态更新失败: LVGL 加锁超时");
-        return -2;
+        /* 周期性状态栏刷新可丢帧，避免相机预览占锁时刷失败日志。 */
+        return 0;
     }
 
     ui_shell_set_signal_levels((uint8_t)wifi_state, (uint8_t)cellular_state);
@@ -98,8 +98,8 @@ int app_ui_set_battery_level(int percent)
     }
 
     if (service_screen_lock(100) != 0) {
-        APP_LOGE(TAG, "UI 电量更新失败: LVGL 加锁超时");
-        return -2;
+        /* 周期性状态栏刷新可丢帧，避免相机预览占锁时刷失败日志。 */
+        return 0;
     }
 
     ui_shell_set_battery_level((uint8_t)percent);

@@ -20,7 +20,8 @@ ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、UDP 实时对�
 - `APP_BUSINESS_SERVER_HOST`: UDP 对讲服务器地址。
 - `APP_BUSINESS_UDP_PORT`: UDP 对讲端口，默认 `9000`。
 - `APP_BUSINESS_HTTP_BASE_URL`: FastAPI 业务服务根地址，例如 `http://<PC_LAN_IP>:8000`。
-- `APP_AI_HTTP_CHUNK_BYTES`: AI HTTP 分片大小，当前 `32768` 字节。
+- `APP_AI_UPLOAD_CHUNK_BYTES`: AI 请求音频上传分片大小，当前 `8192` 字节。
+- `APP_AI_REPLY_CHUNK_BYTES`: AI 回复音频拉取分片大小，当前 `32768` 字节。
 - `AUTO_PLAY_REPLY_AUDIO`: AI 回复语音是否自动播放，默认 `0`，即文本先显示、语音按钮手动播放。
 - `APP_BUSINESS_AUDIO_SAMPLE_RATE`: 业务音频采样率，当前 `16000` Hz。
 - `APP_BUSINESS_AI_MAX_MS`: 单次 AI 录音上限，当前 `60000` ms。
@@ -38,7 +39,7 @@ AI 问答采用半双工流程：
 2. `app_ai_voice` 抢占音频会话，与 PTT 互斥。
 3. AI 任务循环读取 PCM，直接写入请求 WAV 缓冲区的 `data` 区。
 4. 用户松手后停止采集，回填 WAV 头。
-5. 固件创建 AI session，并按 32KB 分片上传请求 WAV。
+5. 固件创建 AI session，并按 `APP_AI_UPLOAD_CHUNK_BYTES` 分片上传请求 WAV。
 6. 固件通知服务端处理并轮询 `result_info`。
 7. 服务端先返回 `answer_text`，UI 立即更新回答文本。
 8. TTS 在服务端后台生成；语音未就绪时 UI 喇叭按钮为灰色禁用。
@@ -50,7 +51,7 @@ AI 问答采用半双工流程：
 当前内存策略：
 
 - 请求侧保留一次完整请求 WAV 缓冲，最大约 `1,920,044` 字节。
-- 回复侧不保留完整 WAV，只保留一个 32KB HTTP 分片缓冲和约 512ms 的 PCM 预缓冲。
+- 回复侧不保留完整 WAV，只保留一个 HTTP 分片缓冲和约 512ms 的 PCM 预缓冲。
 - 回复 WAV 允许 `data` chunk 不在 44 字节处；客户端会跳过额外 chunk，例如 `JUNK`。
 - 若任一分片下载、WAV 解析或播放失败，本次 AI 会话失败并释放音频会话锁。
 - 自动播放可通过 `AUTO_PLAY_REPLY_AUDIO` 开启；默认值必须保持 `0`，避免文本显示和音频播放绑定。
@@ -97,13 +98,13 @@ Content-Type: application/json
 响应：
 
 ```json
-{"session":"abc123","chunk_size":32768}
+{"session":"abc123","chunk_size":8192}
 ```
 
 字段：
 
 - `session`: 服务端生成的本次问答会话 ID。
-- `chunk_size`: 服务端建议分片大小；当前固件固定按 `32768` 字节分片。
+- `chunk_size`: 服务端建议分片大小；当前固件按 `APP_AI_UPLOAD_CHUNK_BYTES` 字节上传请求音频。
 
 ### 2. 上传请求 WAV 分片
 
@@ -119,7 +120,7 @@ Content-Type: application/octet-stream
 - `index`: 分片序号，从 0 开始。
 - `offset`: 当前分片在完整请求 WAV 中的字节偏移。
 - `total`: 完整请求 WAV 总字节数。
-- body: 当前 WAV 原始字节片，长度不超过 `32768` 字节，最后一片允许短片。
+- body: 当前 WAV 原始字节片，长度不超过 `APP_AI_UPLOAD_CHUNK_BYTES` 字节，最后一片允许短片。
 
 响应：
 
@@ -245,7 +246,7 @@ Content-Type: application/json
 字段：
 
 - `offset`: 当前拉取片在完整回复 WAV 中的字节偏移。
-- `len`: 期望拉取字节数，最大 `32768` 字节，最后一片允许短片。
+- `len`: 期望拉取字节数，最大 `APP_AI_REPLY_CHUNK_BYTES` 字节，最后一片允许短片。
 - 响应 body 必须直接返回对应范围的 WAV 原始字节，不要包 JSON，不要 base64。
 
 客户端拉取过程中会流式校验：
@@ -289,7 +290,7 @@ Content-Type: image/jpeg
 
 ## ML307C 注意事项
 
-ML307C 的 HTTP 能力当前基于 AT 指令封装。`AT+HTTP=<id>,<body_size>,<timeout>,<latency>` 的 `body_size` 范围为 `0-65535`，因此固件把 AI HTTP 单片请求体限制为 `32768` 字节。
+ML307C 的 HTTP 能力当前基于 AT 指令封装。`AT+HTTP=<id>,<body_size>,<timeout>,<latency>` 的 `body_size` 范围为 `0-65535`，因此固件把 AI HTTP 单片请求体限制在对应的上传/拉取分片大小内。
 
 当前 AI 回复不依赖单次大 HTTP 响应，而是通过 `result_chunk` 分片拉取并边播边丢弃，避免大响应占用本地内存，也降低 UART/AT 解析压力。
 
@@ -338,6 +339,6 @@ py -3.11 -m venv .venv
 - AI 播放在分片边界卡顿：确认当前固件包含后台下载 + PCM 预缓冲实现；旧实现会在每个 HTTP 请求之间停播。
 - AI 回复失败：检查服务端 `result_info.reply_wav_size` 或兼容字段 `total` 是否正确，`result_chunk` 是否按 offset/len 返回纯 WAV 字节。
 - WAV 解析失败：确认回复为 PCM 16kHz、mono、16-bit，并且存在合法 `fmt ` 和 `data` chunk。
-- ML307C HTTP 失败：确认单片 body 不超过 `32768` 字节，URL 和 header 没有超过 AT 命令缓冲限制。
+- ML307C HTTP 失败：确认单片 body 不超过对应的上传/拉取分片大小，URL 和 header 没有超过 AT 命令缓冲限制。
 - 相机上传失败：确认 body 是完整 JPEG，且 `Content-Type` 包含 `image/jpeg` 或 `image/jpg`。
 - UDP 没有回音：确认设备和测试服务在同一局域网，端口为 `9000`，防火墙允许 UDP 入站。

@@ -92,15 +92,17 @@ extern "C" {
  */
 #define APP_CAMERA_PREVIEW_TEST_MODE    APP_CAMERA_PREVIEW_TEST_NORMAL
 /** @brief AI HTTP 单片请求等待响应的超时时间，单位 ms。 */
-#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    30000u
+#define APP_AI_HTTP_CHUNK_TIMEOUT_MS    60000u
 /** @brief AI 服务器处理等待总超时时间，单位 ms。 */
 #define APP_AI_PROCESS_TIMEOUT_MS       300000u
 /** @brief AI 结果轮询间隔，单位 ms。 */
 #define APP_AI_RESULT_POLL_MS           1000u
 /** @brief AI 回复语音是否默认自动播放；0 表示需要用户点击播放按钮。 */
 #define AUTO_PLAY_REPLY_AUDIO           0
-/** @brief AI HTTP 分片大小。 */
-#define APP_AI_HTTP_CHUNK_BYTES         32768u
+/** @brief AI 请求音频上传分片大小，减小单次 body 可提升热点弱网下的上传稳定性。 */
+#define APP_AI_UPLOAD_CHUNK_BYTES       8192u
+/** @brief AI 回复音频拉取分片大小，保持较大片以减少播放时 HTTP 往返造成的卡顿。 */
+#define APP_AI_REPLY_CHUNK_BYTES        32768u
 /** @brief 开机默认频道号。 */
 #define APP_BUSINESS_DEFAULT_CHANNEL    1
 /** @brief 业务统一 PCM 采样率，单位 Hz。 */

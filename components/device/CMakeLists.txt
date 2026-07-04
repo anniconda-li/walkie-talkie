@@ -20,6 +20,7 @@ idf_component_register(
         esp_http_client
         heap
         esp_driver_gpio
+        esp_driver_ledc
         esp_adc
         esp_lcd
         espressif__esp32-camera

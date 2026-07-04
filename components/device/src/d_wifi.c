@@ -239,9 +239,10 @@ int d_wifi_connect(const char *ssid, const char *password, uint32_t timeout_ms)
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
     wifi_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
+    (void)esp_wifi_disconnect();
+    osal_delay_ms(150u);
     s_wifi_got_ip = 0;
     s_wifi_disconnect_reason = 0;
-    (void)esp_wifi_disconnect();
     ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     if (ret == 0) {
         ret = esp_wifi_connect();
@@ -524,18 +525,47 @@ int d_wifi_http_post(const char *url,
 
     ret = device_wifi_err_to_int(esp_http_client_open(client, (int)body_len));
     if (ret == 0) {
-        int written = 0;
-        if (body_len > 0u) {
-            written = esp_http_client_write(client, (const char *)body, (int)body_len);
+        uint32_t written_total = 0u;
+        uint32_t write_start_ms = osal_get_tick_ms();
+        while (written_total < body_len) {
+            uint32_t remain = body_len - written_total;
+            int write_len = (int)(remain > 4096u ? 4096u : remain);
+            int written = esp_http_client_write(client,
+                                                (const char *)&body[written_total],
+                                                write_len);
+            if (written <= 0) {
+                ret = written < 0 ? written : -4;
+                D_LOGW(TAG,
+                       "HTTP POST body 写入失败, ret=%d, written=%u/%u",
+                       ret,
+                       (unsigned int)written_total,
+                       (unsigned int)body_len);
+                break;
+            }
+            written_total += (uint32_t)written;
         }
-        if (written != (int)body_len) {
+        if (ret == 0 && written_total != body_len) {
             ret = -4;
+            D_LOGW(TAG,
+                   "HTTP POST body 写入不完整, written=%u/%u",
+                   (unsigned int)written_total,
+                   (unsigned int)body_len);
+        }
+        if (ret == 0 && body_len >= 16384u) {
+            D_LOGI(TAG,
+                   "HTTP POST body 写入完成, body_len=%u, write_ms=%u",
+                   (unsigned int)body_len,
+                   (unsigned int)(osal_get_tick_ms() - write_start_ms));
         }
     }
     if (ret == 0) {
         int header_len = esp_http_client_fetch_headers(client);
         if (header_len < 0) {
             ret = header_len;
+            D_LOGW(TAG,
+                   "HTTP POST 等待响应头失败, ret=%d, body_len=%u",
+                   ret,
+                   (unsigned int)body_len);
         }
     }
     if (ret == 0) {

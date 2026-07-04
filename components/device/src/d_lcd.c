@@ -46,7 +46,7 @@ static const char *TAG = "d_lcd";
 /**
  * @brief 摄像头预览整帧 polling RAMWR 开关。
  *
- * 当前关闭整帧写入，走 32 行分块 polling RAMWR，避免整帧 tx_param 在部分
+ * 当前关闭整帧写入，走多行分块 polling RAMWR，避免整帧 tx_param 在部分
  * LCD IO/驱动组合上不稳定。
  */
 #ifndef D_LCD_PREVIEW_DIRECT_RAMWR
@@ -58,7 +58,8 @@ static const char *TAG = "d_lcd";
  *
  * camera frame 在 PSRAM，分块拷贝到内部 DMA buffer 后用 polling RAMWR 发屏。
  */
-#define D_LCD_DMA_BOUNCE_LINES 32u
+#define D_LCD_DMA_BOUNCE_LINES 16u
+#define D_LCD_DMA_BOUNCE_MIN_LINES 1u
 
 /**
  * @brief 直刷 RGB565 数据发送前交换字节。
@@ -93,6 +94,9 @@ static uint8_t *s_lcd_dma_bounce_buf = NULL;
 
 /** @brief 内部 DMA 中转缓冲大小。 */
 static size_t s_lcd_dma_bounce_size = 0u;
+
+/** @brief 当前可稳定分配的 DMA 中转缓冲行数。 */
+static size_t s_lcd_dma_bounce_lines = D_LCD_DMA_BOUNCE_LINES;
 
 #if D_LCD_PREVIEW_DIRECT_RAMWR
 /** @brief 整帧 polling RAMWR 是否仍可尝试。 */
@@ -143,7 +147,11 @@ static int d_lcd_ensure_dma_bounce(size_t min_bytes)
 
     s_lcd_dma_bounce_buf = (uint8_t *)heap_caps_malloc(min_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (s_lcd_dma_bounce_buf == NULL) {
-        D_LOGE(TAG, "LCD DMA 中转缓冲分配失败, bytes=%u", (unsigned int)min_bytes);
+        D_LOGW(TAG,
+               "LCD DMA 中转缓冲分配失败, bytes=%u, internal_free=%u, dma_largest=%u",
+               (unsigned int)min_bytes,
+               (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
         return -1;
     }
 
@@ -422,6 +430,7 @@ int d_lcd_deinit(void)
         heap_caps_free(s_lcd_dma_bounce_buf);
         s_lcd_dma_bounce_buf = NULL;
         s_lcd_dma_bounce_size = 0u;
+        s_lcd_dma_bounce_lines = D_LCD_DMA_BOUNCE_LINES;
         D_LOGI(TAG, "LCD DMA 中转缓冲已释放");
     }
 
@@ -538,7 +547,7 @@ static int d_lcd_draw_bitmap_bounced(int x_start,
     const int width = x_end - x_start;
     const int height = y_end - y_start;
     const size_t line_bytes = (size_t)width * sizeof(uint16_t);
-    size_t chunk_lines = D_LCD_DMA_BOUNCE_LINES;
+    size_t chunk_lines = s_lcd_dma_bounce_lines;
     if (chunk_lines > (size_t)height) {
         chunk_lines = (size_t)height;
     }
@@ -546,9 +555,30 @@ static int d_lcd_draw_bitmap_bounced(int x_start,
         return -2;
     }
 
-    int ret = d_lcd_ensure_dma_bounce(line_bytes * chunk_lines);
-    if (ret != 0) {
-        return ret;
+    int ret = -1;
+    while (chunk_lines >= D_LCD_DMA_BOUNCE_MIN_LINES) {
+        ret = d_lcd_ensure_dma_bounce(line_bytes * chunk_lines);
+        if (ret == 0) {
+            s_lcd_dma_bounce_lines = chunk_lines;
+            break;
+        }
+
+        if (chunk_lines == D_LCD_DMA_BOUNCE_MIN_LINES) {
+            D_LOGE(TAG,
+                   "LCD DMA 中转缓冲不可用, min_bytes=%u",
+                   (unsigned int)(line_bytes * chunk_lines));
+            return ret;
+        }
+
+        size_t next_lines = chunk_lines / 2u;
+        if (next_lines < D_LCD_DMA_BOUNCE_MIN_LINES) {
+            next_lines = D_LCD_DMA_BOUNCE_MIN_LINES;
+        }
+        D_LOGW(TAG,
+               "LCD DMA 中转缓冲降级, lines=%u -> %u",
+               (unsigned int)chunk_lines,
+               (unsigned int)next_lines);
+        chunk_lines = next_lines;
     }
 
     /*

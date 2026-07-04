@@ -289,6 +289,8 @@ static void set_firmware_version_label(lv_obj_t *label)
  */
 lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
 {
+    g_settings_view = (ui_settings_view_t){0};
+
     lv_obj_t *root = lv_obj_create(parent);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(root, UI_SCREEN_WIDTH, UI_SCREEN_HEIGHT);
@@ -312,24 +314,26 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
                                                             2,
                                                             &g_settings_view.cellular_label);
 
-    lv_obj_t *firmware_box = create_setting_box(g_settings_panel, 2, 70, 188, 58);
+    lv_obj_t *firmware_box = create_setting_box(g_settings_panel, 2, 70, 188, 72);
 
     /* 固件版本信息行（只读标签） */
     g_settings_view.firmware_label = create_caption(firmware_box, ui_i18n_text(UI_TEXT_SETTINGS_FIRMWARE), 8);
 
     g_settings_view.version_label = lv_label_create(firmware_box);
     set_firmware_version_label(g_settings_view.version_label);
-    lv_obj_set_pos(g_settings_view.version_label, 12, 33);
-    lv_obj_set_width(g_settings_view.version_label, 164);
+    lv_obj_set_pos(g_settings_view.version_label, 96, 8);
+    lv_obj_set_width(g_settings_view.version_label, 80);
     lv_label_set_long_mode(g_settings_view.version_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(g_settings_view.version_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_color(g_settings_view.version_label, lv_color_white(), 0);
 
-    g_settings_view.network_status_label = lv_label_create(g_settings_panel);
-    lv_label_set_text(g_settings_view.network_status_label, "");
-    lv_obj_set_pos(g_settings_view.network_status_label, 2, 210);
-    lv_obj_set_width(g_settings_view.network_status_label, 188);
-    lv_obj_set_style_text_color(g_settings_view.network_status_label, lv_color_make(0xD8, 0xD8, 0xD8), 0);
-    lv_obj_add_flag(g_settings_view.network_status_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *ota_label = lv_label_create(firmware_box);
+    lv_label_set_text(ota_label, "已是最新版本");
+    lv_obj_set_pos(ota_label, 12, 42);
+    lv_obj_set_width(ota_label, 164);
+    lv_label_set_long_mode(ota_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(ota_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_color(ota_label, lv_color_make(0xB8, 0xF0, 0xD0), 0);
 
     g_settings_view.wlan_page = create_wlan_page(root);
     ui_event_register_settings(&g_settings_view);
