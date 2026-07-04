@@ -27,6 +27,8 @@ static volatile int s_monitor_started = 0;
 static osal_task_t s_monitor_task = NULL;
 static d_power_control_long_press_cb_t s_long_press_cb = NULL;
 static void *s_long_press_user_data = NULL;
+static d_power_control_short_press_cb_t s_short_press_cb = NULL;
+static void *s_short_press_user_data = NULL;
 
 static int d_power_control_err_to_int(int ret)
 {
@@ -86,6 +88,10 @@ static void d_power_control_monitor_task(void *arg)
 
             case D_POWER_CONTROL_STATE_PRESSED:
                 if (!pressed) {
+                    if (s_short_press_cb != NULL) {
+                        D_LOGI(TAG, "检测到电源键短按");
+                        s_short_press_cb(s_short_press_user_data);
+                    }
                     state = D_POWER_CONTROL_STATE_IDLE;
                 } else if ((uint32_t)(now_ms - pressed_start_ms) >= D_POWER_CONTROL_LONG_PRESS_MS) {
                     D_LOGI(TAG, "检测到电源键长按");
@@ -186,6 +192,13 @@ void d_power_control_set_long_press_callback(d_power_control_long_press_cb_t cb,
 {
     s_long_press_cb = cb;
     s_long_press_user_data = user_data;
+}
+
+void d_power_control_set_short_press_callback(d_power_control_short_press_cb_t cb,
+                                              void *user_data)
+{
+    s_short_press_cb = cb;
+    s_short_press_user_data = user_data;
 }
 
 int d_power_control_shutdown(void)
