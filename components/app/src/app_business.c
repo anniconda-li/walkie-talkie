@@ -41,6 +41,7 @@
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_buttons.h"
+#include "service_screen.h"
 #include "ui_event.h"
 
 #include <stdint.h>
@@ -82,6 +83,7 @@ static volatile int s_wifi_connect_busy = 0;
 static volatile int s_network_switch_busy = 0;
 static volatile int s_fake_4g_connect_busy = 0;
 static int32_t s_volume = 80;
+static int32_t s_brightness = 80;
 static osal_queue_t s_volume_step_queue = NULL;
 static osal_task_t s_volume_task = NULL;
 
@@ -245,6 +247,9 @@ static void app_business_on_ai_reply_stop_requested(void)
 
 static void app_business_on_ai_cancel_requested(void)
 {
+    if (app_camera_cancel_current() == 0) {
+        return;
+    }
     (void)app_ai_voice_cancel_current();
 }
 
@@ -267,9 +272,9 @@ static void app_business_on_camera_capture(void)
 }
 
 /** @brief 相机上传按钮 → HTTP POST 上传暂存 JPEG。 */
-static void app_business_on_camera_upload(void)
+static int app_business_on_camera_upload(void)
 {
-    app_camera_upload();
+    return app_camera_upload();
 }
 
 /** @brief 相机重拍按钮 → 清理 JPEG 并恢复预览。 */
@@ -306,6 +311,27 @@ static void app_business_set_volume(int32_t value, int sync_ui)
 static void app_business_on_volume_changed(int32_t value)
 {
     app_business_set_volume(value, 0);
+}
+
+static void app_business_set_brightness(int32_t value, int sync_ui)
+{
+    if (value < 0) {
+        value = 0;
+    } else if (value > 100) {
+        value = 100;
+    }
+
+    s_brightness = value;
+    (void)service_screen_set_brightness((uint8_t)value);
+    if (sync_ui) {
+        (void)app_ui_set_settings_brightness(value);
+    }
+    APP_LOGI(TAG, "屏幕亮度已设置, brightness=%ld", (long)value);
+}
+
+static void app_business_on_brightness_changed(int32_t value)
+{
+    app_business_set_brightness(value, 0);
 }
 
 static void app_business_on_volume_button_step(int step)
@@ -509,10 +535,10 @@ static void app_business_on_wifi_select(void)
     }
 }
 
-static void app_business_on_4g_select(void)
+static int app_business_on_4g_select(void)
 {
     if (app_network_get_mode() == APP_NETWORK_MODE_4G || s_network_switch_busy || s_fake_4g_connect_busy) {
-        return;
+        return -1;
     }
 
     s_fake_4g_connect_busy = 1;
@@ -526,7 +552,10 @@ static void app_business_on_4g_select(void)
         s_fake_4g_connect_busy = 0;
         s_network_switch_busy = 0;
         (void)app_ui_settings_show_4g_select_result(UI_SETTINGS_4G_UNAVAILABLE, -1);
+        return -2;
     }
+
+    return 0;
 }
 
 static void app_business_on_power_key_long_press(void *user_data)
@@ -566,6 +595,7 @@ static void app_business_register_ui_callbacks(void)
         .ai_reply_stop_requested = app_business_on_ai_reply_stop_requested,
         .ai_cancel_requested = app_business_on_ai_cancel_requested,
         .settings_volume_changed = app_business_on_volume_changed,
+        .settings_brightness_changed = app_business_on_brightness_changed,
         .settings_network_mode_get = app_business_get_network_mode,
         .settings_wifi_select_requested = app_business_on_wifi_select,
         .settings_wifi_scan_requested = app_business_on_wifi_scan,
@@ -614,6 +644,7 @@ int app_business_start(void)
     /* 先注册 UI 回调，再启动后台业务，确保开机后用户操作能被接收。 */
     app_business_register_ui_callbacks();
     app_business_set_volume(s_volume, 0);
+    app_business_set_brightness(s_brightness, 0);
 
     ret = app_network_start();
     if (ret != 0) {

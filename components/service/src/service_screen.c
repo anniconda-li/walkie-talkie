@@ -292,3 +292,21 @@ int service_screen_display_on(int on)
 
     return ret;
 }
+
+int service_screen_set_brightness(uint8_t percent)
+{
+    if (s_screen_ops_ready == 0u || s_screen_ops.set_brightness == NULL) {
+        SERVICE_LOGE(TAG, "屏幕亮度设置失败: 屏幕服务未初始化");
+        return -1;
+    }
+
+    if (percent > 100u) {
+        percent = 100u;
+    }
+
+    int ret = s_screen_ops.set_brightness(percent);
+    if (ret != 0) {
+        SERVICE_LOGE(TAG, "屏幕亮度设置失败, percent=%u, ret=%d", (unsigned int)percent, ret);
+    }
+    return ret;
+}

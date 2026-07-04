@@ -22,6 +22,7 @@ typedef struct {
     void *(*get_panel)(void);    /**< 获取下层显示 panel 不透明句柄，仅供 service 内部接入 UI runtime。 */
     void *(*get_touch)(void);    /**< 获取下层触摸不透明句柄，仅供 service 内部接入 UI runtime。 */
     int (*display_on)(int on);    /**< 设置下层显示和背光开关。 */
+    int (*set_brightness)(uint8_t percent); /**< 设置下层背光亮度百分比。 */
     int (*draw_rgb565)(int x,
                        int y,
                        int w,
@@ -101,6 +102,14 @@ int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data);
  * @return 成功返回 0；失败返回负值。
  */
 int service_screen_display_on(int on);
+
+/**
+ * @brief 设置屏幕背光亮度。
+ *
+ * @param[in] percent 亮度百分比，范围 0-100。
+ * @return 成功返回 0；失败返回负值。
+ */
+int service_screen_set_brightness(uint8_t percent);
 
 #ifdef __cplusplus
 }

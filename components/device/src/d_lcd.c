@@ -7,7 +7,7 @@
 #include "d_config.h"
 #include "wdriver_i2c.h"
 #include "wdriver_spi.h"
-#include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
@@ -45,7 +45,7 @@ static const char *TAG = "d_lcd";
 /**
  * @brief 摄像头预览整帧 polling RAMWR 开关。
  *
- * 当前关闭整帧写入，走 32 行分块 polling RAMWR，避免整帧 tx_param 在部分
+ * 当前关闭整帧写入，走多行分块 polling RAMWR，避免整帧 tx_param 在部分
  * LCD IO/驱动组合上不稳定。
  */
 #ifndef D_LCD_PREVIEW_DIRECT_RAMWR
@@ -57,7 +57,8 @@ static const char *TAG = "d_lcd";
  *
  * camera frame 在 PSRAM，分块拷贝到内部 DMA buffer 后用 polling RAMWR 发屏。
  */
-#define D_LCD_DMA_BOUNCE_LINES 32u
+#define D_LCD_DMA_BOUNCE_LINES 16u
+#define D_LCD_DMA_BOUNCE_MIN_LINES 1u
 
 /**
  * @brief 直刷 RGB565 数据发送前交换字节。
@@ -66,6 +67,14 @@ static const char *TAG = "d_lcd";
  * swap_bytes 配置只适用于 LVGL draw buffer，不套用到 camera frame。
  */
 #define D_LCD_PREVIEW_SWAP_RGB565_BYTES 0
+
+#define D_LCD_BACKLIGHT_LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define D_LCD_BACKLIGHT_LEDC_TIMER      LEDC_TIMER_1
+#define D_LCD_BACKLIGHT_LEDC_CHANNEL    LEDC_CHANNEL_1
+#define D_LCD_BACKLIGHT_LEDC_RESOLUTION LEDC_TIMER_13_BIT
+#define D_LCD_BACKLIGHT_LEDC_FREQ_HZ    5000u
+#define D_LCD_BACKLIGHT_DUTY_MAX        ((1u << 13) - 1u)
+#define D_LCD_DEFAULT_BRIGHTNESS        80u
 
 /**
  * @brief LCD 显示面板 IO 句柄。
@@ -93,12 +102,22 @@ static uint8_t *s_lcd_dma_bounce_buf = NULL;
 /** @brief 内部 DMA 中转缓冲大小。 */
 static size_t s_lcd_dma_bounce_size = 0u;
 
+/** @brief 当前可稳定分配的 DMA 中转缓冲行数。 */
+static size_t s_lcd_dma_bounce_lines = D_LCD_DMA_BOUNCE_LINES;
+
+/** @brief 背光 PWM 是否已初始化。 */
+static uint8_t s_lcd_backlight_pwm_ready = 0u;
+
+/** @brief 当前背光亮度百分比。 */
+static uint8_t s_lcd_brightness_percent = D_LCD_DEFAULT_BRIGHTNESS;
+
 #if D_LCD_PREVIEW_DIRECT_RAMWR
 /** @brief 整帧 polling RAMWR 是否仍可尝试。 */
 static uint8_t s_lcd_direct_ramwr_available = 1u;
 #endif
 
 static int d_lcd_err_to_int(int ret);
+static int d_lcd_backlight_pwm_init(void);
 static int d_lcd_set_backlight(int on);
 static int d_lcd_draw_bitmap_bounced(int x_start,
                                           int y_start,
@@ -142,7 +161,11 @@ static int d_lcd_ensure_dma_bounce(size_t min_bytes)
 
     s_lcd_dma_bounce_buf = (uint8_t *)heap_caps_malloc(min_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (s_lcd_dma_bounce_buf == NULL) {
-        D_LOGE(TAG, "LCD DMA 中转缓冲分配失败, bytes=%u", (unsigned int)min_bytes);
+        D_LOGW(TAG,
+               "LCD DMA 中转缓冲分配失败, bytes=%u, internal_free=%u, dma_largest=%u",
+               (unsigned int)min_bytes,
+               (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
         return -1;
     }
 
@@ -162,10 +185,74 @@ static int d_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-/** @brief 通过 ESP GPIO17 控制 LCD 背光，高电平点亮。 */
+static int d_lcd_backlight_pwm_init(void)
+{
+    if (s_lcd_backlight_pwm_ready != 0u) {
+        return 0;
+    }
+
+    ledc_timer_config_t timer_cfg = {
+        .speed_mode = D_LCD_BACKLIGHT_LEDC_MODE,
+        .duty_resolution = D_LCD_BACKLIGHT_LEDC_RESOLUTION,
+        .timer_num = D_LCD_BACKLIGHT_LEDC_TIMER,
+        .freq_hz = D_LCD_BACKLIGHT_LEDC_FREQ_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    int ret = d_lcd_err_to_int(ledc_timer_config(&timer_cfg));
+    if (ret != 0) {
+        D_LOGE(TAG, "LCD 背光 PWM timer 初始化失败, ret=%d", ret);
+        return ret;
+    }
+
+    ledc_channel_config_t channel_cfg = {
+        .gpio_num = d_lcd_BL_IO,
+        .speed_mode = D_LCD_BACKLIGHT_LEDC_MODE,
+        .channel = D_LCD_BACKLIGHT_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = D_LCD_BACKLIGHT_LEDC_TIMER,
+        .duty = 0,
+        .hpoint = 0,
+    };
+    ret = d_lcd_err_to_int(ledc_channel_config(&channel_cfg));
+    if (ret != 0) {
+        D_LOGE(TAG, "LCD 背光 PWM channel 初始化失败, io=%d, ret=%d", d_lcd_BL_IO, ret);
+        return ret;
+    }
+
+    s_lcd_backlight_pwm_ready = 1u;
+    D_LOGI(TAG, "LCD 背光 PWM 初始化完成, io=%d, freq=%u",
+           d_lcd_BL_IO,
+           (unsigned int)D_LCD_BACKLIGHT_LEDC_FREQ_HZ);
+    return 0;
+}
+
+static int d_lcd_apply_backlight_duty(uint8_t percent)
+{
+    if (percent > 100u) {
+        percent = 100u;
+    }
+    if (d_lcd_backlight_pwm_init() != 0) {
+        return -1;
+    }
+
+    uint32_t duty = ((uint32_t)percent * D_LCD_BACKLIGHT_DUTY_MAX) / 100u;
+    int ret = d_lcd_err_to_int(ledc_set_duty(D_LCD_BACKLIGHT_LEDC_MODE,
+                                             D_LCD_BACKLIGHT_LEDC_CHANNEL,
+                                             duty));
+    if (ret == 0) {
+        ret = d_lcd_err_to_int(ledc_update_duty(D_LCD_BACKLIGHT_LEDC_MODE,
+                                                D_LCD_BACKLIGHT_LEDC_CHANNEL));
+    }
+    if (ret != 0) {
+        D_LOGE(TAG, "LCD 背光亮度设置失败, percent=%u, ret=%d", (unsigned int)percent, ret);
+    }
+    return ret;
+}
+
+/** @brief 通过 PWM 控制 LCD 背光，高占空比更亮。 */
 static int d_lcd_set_backlight(int on)
 {
-    int ret = d_lcd_err_to_int(gpio_set_level(d_lcd_BL_IO, on != 0));
+    int ret = d_lcd_apply_backlight_duty(on != 0 ? s_lcd_brightness_percent : 0u);
     if (ret != 0) {
         D_LOGE(TAG, "LCD 背光控制失败, io=%d, ret=%d", d_lcd_BL_IO, ret);
     } else {
@@ -195,14 +282,7 @@ int d_lcd_display_init(void)
         return 0;
     }
 
-    gpio_config_t bl_cfg = {
-        .pin_bit_mask = 1ULL << d_lcd_BL_IO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    int ret = d_lcd_err_to_int(gpio_config(&bl_cfg));
+    int ret = d_lcd_backlight_pwm_init();
     if (ret == 0) {
         ret = d_lcd_set_backlight(0);
     }
@@ -408,6 +488,7 @@ int d_lcd_deinit(void)
         heap_caps_free(s_lcd_dma_bounce_buf);
         s_lcd_dma_bounce_buf = NULL;
         s_lcd_dma_bounce_size = 0u;
+        s_lcd_dma_bounce_lines = D_LCD_DMA_BOUNCE_LINES;
         D_LOGI(TAG, "LCD DMA 中转缓冲已释放");
     }
 
@@ -446,6 +527,24 @@ int d_lcd_display_on(int on)
         D_LOGE(TAG, "LCD 显示开关失败, ret=%d", ret);
     }
 
+    return ret;
+}
+
+int d_lcd_set_brightness(uint8_t percent)
+{
+    if (percent > 100u) {
+        percent = 100u;
+    }
+
+    s_lcd_brightness_percent = percent;
+    int ret = 0;
+    if (s_lcd_panel != NULL && percent > 0u) {
+        ret = d_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, true));
+    }
+    if (ret == 0) {
+        ret = d_lcd_apply_backlight_duty(percent);
+    }
+    D_LOGI(TAG, "LCD 背光亮度=%u%%, ret=%d", (unsigned int)percent, ret);
     return ret;
 }
 
@@ -524,7 +623,7 @@ static int d_lcd_draw_bitmap_bounced(int x_start,
     const int width = x_end - x_start;
     const int height = y_end - y_start;
     const size_t line_bytes = (size_t)width * sizeof(uint16_t);
-    size_t chunk_lines = D_LCD_DMA_BOUNCE_LINES;
+    size_t chunk_lines = s_lcd_dma_bounce_lines;
     if (chunk_lines > (size_t)height) {
         chunk_lines = (size_t)height;
     }
@@ -532,9 +631,30 @@ static int d_lcd_draw_bitmap_bounced(int x_start,
         return -2;
     }
 
-    int ret = d_lcd_ensure_dma_bounce(line_bytes * chunk_lines);
-    if (ret != 0) {
-        return ret;
+    int ret = -1;
+    while (chunk_lines >= D_LCD_DMA_BOUNCE_MIN_LINES) {
+        ret = d_lcd_ensure_dma_bounce(line_bytes * chunk_lines);
+        if (ret == 0) {
+            s_lcd_dma_bounce_lines = chunk_lines;
+            break;
+        }
+
+        if (chunk_lines == D_LCD_DMA_BOUNCE_MIN_LINES) {
+            D_LOGE(TAG,
+                   "LCD DMA 中转缓冲不可用, min_bytes=%u",
+                   (unsigned int)(line_bytes * chunk_lines));
+            return ret;
+        }
+
+        size_t next_lines = chunk_lines / 2u;
+        if (next_lines < D_LCD_DMA_BOUNCE_MIN_LINES) {
+            next_lines = D_LCD_DMA_BOUNCE_MIN_LINES;
+        }
+        D_LOGW(TAG,
+               "LCD DMA 中转缓冲降级, lines=%u -> %u",
+               (unsigned int)chunk_lines,
+               (unsigned int)next_lines);
+        chunk_lines = next_lines;
     }
 
     /*

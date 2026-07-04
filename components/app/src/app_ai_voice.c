@@ -1061,8 +1061,8 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
         }
 
         uint32_t chunk_len = wav_len - offset;
-        if (chunk_len > APP_AI_HTTP_CHUNK_BYTES) {
-            chunk_len = APP_AI_HTTP_CHUNK_BYTES;
+        if (chunk_len > APP_AI_UPLOAD_CHUNK_BYTES) {
+            chunk_len = APP_AI_UPLOAD_CHUNK_BYTES;
         }
 
         char query[192];
@@ -1079,6 +1079,12 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
             return -2;
         }
 
+        APP_LOGI(TAG,
+                 "AI 上传分片, index=%u, offset=%u, len=%u, total=%u",
+                 (unsigned int)index,
+                 (unsigned int)offset,
+                 (unsigned int)chunk_len,
+                 (unsigned int)wav_len);
         int ret = service_network_http_post(url,
                                             "application/octet-stream",
                                             &s_ai_wav_buf[offset],
@@ -1274,8 +1280,8 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
         }
 
         uint32_t chunk_len = ctx->total - offset;
-        if (chunk_len > APP_AI_HTTP_CHUNK_BYTES) {
-            chunk_len = APP_AI_HTTP_CHUNK_BYTES;
+        if (chunk_len > APP_AI_REPLY_CHUNK_BYTES) {
+            chunk_len = APP_AI_REPLY_CHUNK_BYTES;
         }
 
         char query[192];
@@ -1632,9 +1638,9 @@ static uint32_t app_ai_voice_record_to_wav_buffer(void)
  * 1. 阻塞等待 notify（来自 app_ai_voice_record_start()）
  * 2. 循环读取 service_audio PCM，直接写入 s_ai_wav_buf 的 WAV data 区
  * 3. 写入 WAV 文件头（44 字节），封装成标准 WAV 格式
- * 5. 创建服务器 session，按 32KB 分片上传请求 WAV
+ * 5. 创建服务器 session，按 APP_AI_UPLOAD_CHUNK_BYTES 分片上传请求 WAV
  * 6. finish 后轮询 result_info，拿到回复 WAV 总长度
- * 7. 按 32KB 拉取 result_chunk，边解析 WAV 边播放 PCM，播放后丢弃分片
+ * 7. 按 APP_AI_REPLY_CHUNK_BYTES 拉取 result_chunk，边解析 WAV 边播放 PCM，播放后丢弃分片
  * 8. 调用 app_business_audio_session_end() 释放音频会话锁
  * 9. 回到步骤 1，等待下一次录音完成
  *
@@ -1822,11 +1828,11 @@ int app_ai_voice_start(void)
              "AI WAV 缓存已分配到 PSRAM, bytes=%u",
              (unsigned int)APP_BUSINESS_AI_WAV_BUF_BYTES);
 
-    s_ai_reply_chunk_buf = (uint8_t *)osal_heap_alloc_external(APP_AI_HTTP_CHUNK_BYTES);
+    s_ai_reply_chunk_buf = (uint8_t *)osal_heap_alloc_external(APP_AI_REPLY_CHUNK_BYTES);
     if (s_ai_reply_chunk_buf == NULL) {
         APP_LOGE(TAG,
                  "AI 回复分片缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
-                 (unsigned int)APP_AI_HTTP_CHUNK_BYTES,
+                 (unsigned int)APP_AI_REPLY_CHUNK_BYTES,
                  (unsigned int)osal_heap_get_external_free_size());
         osal_heap_free(s_ai_wav_buf);
         s_ai_wav_buf = NULL;
@@ -1835,7 +1841,7 @@ int app_ai_voice_start(void)
 
     APP_LOGI(TAG,
              "AI 回复分片缓存已分配到 PSRAM, bytes=%u",
-             (unsigned int)APP_AI_HTTP_CHUNK_BYTES);
+             (unsigned int)APP_AI_REPLY_CHUNK_BYTES);
 
     int ret = osal_task_create("biz_ai", app_ai_voice_task, NULL, 8192u, 5u, &s_ai_task);
     if (ret != 0) {
@@ -1868,18 +1874,27 @@ int app_ai_voice_start(void)
 void app_ai_voice_record_start(void)
 {
     if (!s_started) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 模块未启动");
         return;
     }
     if (s_ai_state == APP_AI_STATE_CANCELING) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 正在取消当前会话");
         return;
     }
-    if (s_ai_recording || s_reply_play_busy) {
+    if (s_ai_recording) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 已在录音中");
+        return;
+    }
+    if (s_reply_play_busy) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 回复语音播放中");
         return;
     }
     if (app_business_audio_session_is_busy()) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 音频会话占用中");
         return;
     }
     if (app_business_audio_session_try_begin() != 0) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 音频会话抢占失败");
         return;
     }
 

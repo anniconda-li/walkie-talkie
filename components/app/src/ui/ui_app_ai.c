@@ -8,7 +8,7 @@
  * │    状态栏（shell 管理）     │  y=0..30
  * ├──────────────────────────┤
  * │  ┌────────────────────┐  │
- * │  │  AI 回答显示区域     │  │  y=56, w=204, h=170
+ * │  │  AI 回答显示区域     │  │  y=56, w=204, h=170，可上下滑动
  * │  │  "AI 回答会显示..."  │  │
  * │  └────────────────────┘  │
  * │                          │
@@ -103,7 +103,7 @@ static void start_y_anim(lv_obj_t *obj,
  * ## 控件层级
  * root (全屏透明容器)
  * ├── g_answer_panel (深灰圆角矩形, y=56, 204×170)
- * │   └── answer_label (多行文本, 宽度 180)
+ * │   └── answer_label (多行文本, 宽度 180，超出面板后滑动查看)
  * ├── voice_bars[4] (4 根橙色柱子, 初始隐藏)
  * ├── camera_button (圆角图标按钮, y=256, 104×48)
  * └── ask_button (圆角图标按钮, y=256, 104×48)
@@ -126,9 +126,12 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
 
     /* AI 回答显示面板 */
     g_answer_panel = lv_obj_create(root);
-    lv_obj_remove_flag(g_answer_panel, LV_OBJ_FLAG_SCROLLABLE);
+    g_ai_view.answer_panel = g_answer_panel;
+    lv_obj_add_flag(g_answer_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(g_answer_panel, 18, 56);
     lv_obj_set_size(g_answer_panel, 204, 170);
+    lv_obj_set_scroll_dir(g_answer_panel, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(g_answer_panel, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_radius(g_answer_panel, 16, 0);
     lv_obj_set_style_bg_color(g_answer_panel, lv_color_make(0x22, 0x22, 0x22), 0);
     lv_obj_set_style_bg_opa(g_answer_panel, LV_OPA_COVER, 0);
@@ -140,6 +143,7 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
     lv_label_set_text(g_ai_view.answer_label, ui_i18n_text(UI_TEXT_AI_IDLE));
     lv_label_set_long_mode(g_ai_view.answer_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(g_ai_view.answer_label, 180);
+    lv_obj_set_height(g_ai_view.answer_label, LV_SIZE_CONTENT);
     lv_obj_set_style_text_color(g_ai_view.answer_label, lv_color_make(0xEA, 0xEA, 0xEA), 0);
     lv_obj_set_style_text_font(g_ai_view.answer_label, ui_font_normal(), 0);
     lv_obj_set_pos(g_ai_view.answer_label, 0, 0);

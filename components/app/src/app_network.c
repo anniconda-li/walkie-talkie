@@ -23,6 +23,11 @@ static const char *TAG = "app_network";
 #define APP_NETWORK_NVS_WIFI_SSID      "wifi_ssid"
 #define APP_NETWORK_NVS_WIFI_PASSWORD  "wifi_pwd"
 #define APP_NETWORK_WIFI_CONNECT_MS    15000u
+#define APP_NETWORK_FAKE_4G_CONNECT_MS 22000u
+#define APP_NETWORK_WIFI_RETRY_COUNT   2u
+#define APP_NETWORK_FAKE_4G_RETRY_COUNT 5u
+#define APP_NETWORK_RETRY_DELAY_MS     1200u
+#define APP_NETWORK_MONITOR_MS         10000u
 #define APP_NETWORK_FAKE_4G_SSID       "14"
 #define APP_NETWORK_FAKE_4G_PASSWORD   "12345678"
 
@@ -90,6 +95,51 @@ static int app_network_ensure_wifi_service(void)
     }
 
     return service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+}
+
+static int app_network_connect_sta_with_retry(const char *ssid,
+                                              const char *password,
+                                              uint32_t timeout_ms,
+                                              uint32_t retry_count)
+{
+    int ret = -1;
+
+    if (ssid == NULL || ssid[0] == '\0') {
+        return -1;
+    }
+
+    for (uint32_t attempt = 0u; attempt < retry_count; attempt++) {
+        (void)d_wifi_disconnect();
+        osal_delay_ms(300u);
+        ret = d_wifi_connect(ssid, password, timeout_ms);
+        if (ret == 0) {
+            return 0;
+        }
+
+        APP_LOGW(TAG,
+                 "WiFi STA 连接失败, ssid=%s, attempt=%u/%u, ret=%d",
+                 ssid,
+                 (unsigned int)(attempt + 1u),
+                 (unsigned int)retry_count,
+                 ret);
+        osal_delay_ms(APP_NETWORK_RETRY_DELAY_MS);
+    }
+
+    return ret;
+}
+
+static int app_network_is_connected_to(const char *ssid)
+{
+    d_wifi_status_t status;
+
+    if (ssid == NULL || ssid[0] == '\0') {
+        return 0;
+    }
+    if (d_wifi_get_status(&status) != 0 || status.link_ready != 1) {
+        return 0;
+    }
+
+    return strcmp(status.ssid, ssid) == 0 ? 1 : 0;
 }
 
 static int app_network_nvs_open(nvs_handle_t *handle, nvs_open_mode_t mode)
@@ -188,7 +238,10 @@ int app_network_connect_wifi(const char *ssid, const char *password)
 
     app_network_enter_user_mode(APP_NETWORK_MODE_WIFI);
 
-    ret = d_wifi_connect(ssid, password, APP_NETWORK_WIFI_CONNECT_MS);
+    ret = app_network_connect_sta_with_retry(ssid,
+                                             password,
+                                             APP_NETWORK_WIFI_CONNECT_MS,
+                                             APP_NETWORK_WIFI_RETRY_COUNT);
     if (ret != 0) {
         APP_LOGW(TAG, "WiFi 连接失败, ssid=%s, ret=%d", ssid != NULL ? ssid : "", ret);
         (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
@@ -240,13 +293,20 @@ int app_network_select_4g(void)
         return ret;
     }
 
-    app_network_set_mode(APP_NETWORK_MODE_4G);
-    app_intercom_network_changed();
+    if (app_network_is_connected_to(APP_NETWORK_FAKE_4G_SSID)) {
+        app_network_set_mode(APP_NETWORK_MODE_4G);
+        app_intercom_network_changed();
+        app_network_end_switch();
+        APP_LOGI(TAG, "伪 4G WiFi 已连接, ssid=%s", APP_NETWORK_FAKE_4G_SSID);
+        return 0;
+    }
+
     (void)d_wifi_disconnect();
 
-    ret = d_wifi_connect(APP_NETWORK_FAKE_4G_SSID,
-                         APP_NETWORK_FAKE_4G_PASSWORD,
-                         APP_NETWORK_WIFI_CONNECT_MS);
+    ret = app_network_connect_sta_with_retry(APP_NETWORK_FAKE_4G_SSID,
+                                             APP_NETWORK_FAKE_4G_PASSWORD,
+                                             APP_NETWORK_FAKE_4G_CONNECT_MS,
+                                             APP_NETWORK_FAKE_4G_RETRY_COUNT);
     if (ret != 0) {
         APP_LOGW(TAG, "伪 4G WiFi 连接失败, ssid=%s, ret=%d", APP_NETWORK_FAKE_4G_SSID, ret);
         (void)d_wifi_disconnect();
@@ -254,6 +314,7 @@ int app_network_select_4g(void)
         return ret;
     }
 
+    app_network_set_mode(APP_NETWORK_MODE_4G);
     app_intercom_network_changed();
     app_network_end_switch();
     APP_LOGI(TAG, "已切换到伪 4G WiFi, ssid=%s", APP_NETWORK_FAKE_4G_SSID);
@@ -272,7 +333,7 @@ int app_network_recover(void)
         if (mode == APP_NETWORK_MODE_4G) {
             return app_network_select_4g();
         }
-        return service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+        return app_network_select_saved_wifi();
     }
 
     return -1;
@@ -349,7 +410,17 @@ static void app_network_task(void *arg)
     }
 
     while (1) {
-        osal_delay_ms(60000u);
+        osal_delay_ms(APP_NETWORK_MONITOR_MS);
+        if (s_switching) {
+            continue;
+        }
+
+        app_network_mode_t mode = app_network_get_mode();
+        if ((mode == APP_NETWORK_MODE_WIFI || mode == APP_NETWORK_MODE_4G) &&
+            service_network_is_ready() != 1) {
+            APP_LOGW(TAG, "网络未就绪，按当前模式恢复, mode=%d", (int)mode);
+            (void)app_network_recover();
+        }
     }
 }
 

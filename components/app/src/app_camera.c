@@ -30,13 +30,35 @@ static const char *TAG = "app_camera";
 #define APP_CAMERA_TASK_STACK          4096u
 /** @brief 相机后台任务优先级，低于 PTT，避免影响实时音频。 */
 #define APP_CAMERA_TASK_PRIORITY       4u
+/** @brief JPEG 上传任务栈大小。 */
+#define APP_CAMERA_UPLOAD_TASK_STACK   4096u
+/** @brief JPEG 上传任务优先级，低于预览任务。 */
+#define APP_CAMERA_UPLOAD_TASK_PRIORITY 3u
 /** @brief 模式切换后丢弃帧数，用于等待 sensor 输出稳定。 */
 #define APP_CAMERA_MODE_DISCARD_FRAMES 5u
+/** @brief RGB565 预览恢复后额外暖机帧数，避免首批异常帧直刷到 LCD。 */
+#define APP_CAMERA_RGB565_WARMUP_FRAMES 4u
 /** @brief JPEG 模式切换后最多尝试取帧次数。 */
 #define APP_CAMERA_JPEG_CAPTURE_TRIES 10u
+/** @brief 连续检测到异常预览帧后的相机模式重建阈值。 */
+#define APP_CAMERA_BAD_PREVIEW_REJECT_LIMIT 6u
+/** @brief 绿屏检测采样步长，使用质数减少固定纹理误判。 */
+#define APP_CAMERA_GREEN_SAMPLE_STEP 97u
+/** @brief 横纹检测列采样步长。 */
+#define APP_CAMERA_STRIPE_SAMPLE_X_STEP 16u
+/** @brief 横纹检测相邻行亮度差阈值。 */
+#define APP_CAMERA_STRIPE_ROW_DELTA 42
+
+typedef struct {
+    uint8_t *jpeg_buf;
+    uint32_t jpeg_len;
+    uint32_t queued_at_ms;
+} app_camera_upload_job_t;
 
 /** @brief 相机后台任务句柄。 */
 static osal_task_t s_camera_task = NULL;
+/** @brief JPEG 上传任务句柄。 */
+static osal_task_t s_upload_task = NULL;
 /** @brief 相机业务状态锁，保护请求标志和 JPEG 暂存状态。 */
 static osal_mutex_t s_camera_mutex = NULL;
 /** @brief 相机业务是否已启动。 */
@@ -51,6 +73,12 @@ static volatile int s_frozen = 0;
 static volatile int s_capture_req = 0;
 /** @brief 上传请求标志，由 UI 回调置位，后台任务消费。 */
 static volatile int s_upload_req = 0;
+/** @brief 当前是否正在处理一次 JPEG 上传，用于切页时保留暂存图像。 */
+static volatile int s_upload_in_progress = 0;
+/** @brief 当前上传是否已被用户中止；HTTP 返回后据此忽略结果。 */
+static volatile int s_upload_cancel_requested = 0;
+/** @brief 当前是否有独立 JPEG 上传任务在运行。 */
+static volatile int s_upload_task_running = 0;
 /** @brief 重拍请求标志，由 UI 回调置位，后台任务消费。 */
 static volatile int s_retake_req = 0;
 /** @brief JPEG 暂存缓冲，分配在外部大容量内存。 */
@@ -61,6 +89,14 @@ static uint32_t s_jpeg_buf_size = 0u;
 static uint32_t s_jpeg_len = 0u;
 /** @brief HTTP 上传响应临时缓冲。 */
 static uint8_t s_upload_resp[APP_CAMERA_UPLOAD_RESP_BYTES];
+/** @brief 单次 JPEG 上传任务参数；同一时间只允许一个上传任务。 */
+static app_camera_upload_job_t s_upload_job;
+/** @brief 上传按钮点击后入队时间。 */
+static uint32_t s_upload_queued_at_ms = 0u;
+/** @brief RGB565 预览恢复后还需跳过的暖机帧数。 */
+static uint8_t s_preview_warmup_frames = 0u;
+/** @brief 连续拒绝的疑似异常预览帧数量。 */
+static uint8_t s_bad_preview_reject_count = 0u;
 #if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
 /** @brief 固定色块测试缓冲，保存在 PSRAM，避免占用内部 SRAM。 */
 static uint16_t *s_color_test_buf = NULL;
@@ -220,6 +256,29 @@ static void app_camera_handle_upload_response(const uint8_t *json, uint32_t len)
     (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_READY);
 }
 
+static void app_camera_finish_upload_request(void)
+{
+    if (app_camera_lock() == 0) {
+        s_upload_in_progress = 0;
+        s_upload_cancel_requested = 0;
+        s_upload_task_running = 0;
+        s_upload_task = NULL;
+        s_upload_queued_at_ms = 0u;
+        app_camera_unlock();
+    } else {
+        s_upload_in_progress = 0;
+        s_upload_cancel_requested = 0;
+        s_upload_task_running = 0;
+        s_upload_task = NULL;
+        s_upload_queued_at_ms = 0u;
+    }
+}
+
+static int app_camera_is_upload_cancel_requested(void)
+{
+    return s_upload_cancel_requested != 0;
+}
+
 /**
  * @brief 释放 app 层暂存的 JPEG 数据。
  *
@@ -234,6 +293,19 @@ static void app_camera_clear_jpeg(void)
     }
     s_jpeg_buf_size = 0u;
     s_jpeg_len = 0u;
+}
+
+static void app_camera_free_upload_job(app_camera_upload_job_t *job)
+{
+    if (job == NULL) {
+        return;
+    }
+    if (job->jpeg_buf != NULL) {
+        osal_heap_free(job->jpeg_buf);
+        job->jpeg_buf = NULL;
+    }
+    job->jpeg_len = 0u;
+    job->queued_at_ms = 0u;
 }
 
 /**
@@ -311,6 +383,187 @@ static int app_camera_discard_frames(uint8_t count)
     }
 
     return 0;
+}
+
+static void app_camera_mark_rgb565_warmup(void)
+{
+    s_preview_warmup_frames = APP_CAMERA_RGB565_WARMUP_FRAMES;
+    s_bad_preview_reject_count = 0u;
+}
+
+static int app_camera_frame_is_valid_rgb565_preview(const service_camera_frame_t *frame)
+{
+    if (frame == NULL ||
+        frame->format != SERVICE_CAMERA_FORMAT_RGB565 ||
+        frame->data == NULL ||
+        frame->width != APP_CAMERA_PREVIEW_W ||
+        frame->height != APP_CAMERA_PREVIEW_H ||
+        frame->len < (APP_CAMERA_PREVIEW_W * APP_CAMERA_PREVIEW_H * sizeof(uint16_t))) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static uint32_t app_camera_rgb565_luma_sum(const uint8_t *data, uint32_t pixel_index, uint8_t order)
+{
+    const uint32_t byte_index = pixel_index * sizeof(uint16_t);
+    uint16_t pixel = (uint16_t)data[byte_index] | ((uint16_t)data[byte_index + 1u] << 8);
+    if (order != 0u) {
+        pixel = ((uint16_t)data[byte_index] << 8) | (uint16_t)data[byte_index + 1u];
+    }
+
+    uint8_t r = (uint8_t)((pixel >> 11) & 0x1Fu);
+    uint8_t g = (uint8_t)((pixel >> 5) & 0x3Fu);
+    uint8_t b = (uint8_t)(pixel & 0x1Fu);
+    return (uint32_t)(r << 1) + (uint32_t)g + (uint32_t)(b << 1);
+}
+
+static int app_camera_frame_is_green_screen(const service_camera_frame_t *frame)
+{
+    if (app_camera_frame_is_valid_rgb565_preview(frame) == 0) {
+        return 0;
+    }
+
+    const uint32_t pixel_count = APP_CAMERA_PREVIEW_W * APP_CAMERA_PREVIEW_H;
+    uint32_t samples = 0u;
+    uint32_t strong_green[2] = {0u, 0u};
+    uint32_t dominant_green[2] = {0u, 0u};
+    uint32_t sum_r6[2] = {0u, 0u};
+    uint32_t sum_g6[2] = {0u, 0u};
+    uint32_t sum_b6[2] = {0u, 0u};
+
+    for (uint32_t i = 0u; i < pixel_count; i += APP_CAMERA_GREEN_SAMPLE_STEP) {
+        uint32_t byte_index = i * sizeof(uint16_t);
+        uint16_t pixel[2] = {
+            (uint16_t)frame->data[byte_index] | ((uint16_t)frame->data[byte_index + 1u] << 8),
+            ((uint16_t)frame->data[byte_index] << 8) | (uint16_t)frame->data[byte_index + 1u],
+        };
+
+        samples++;
+        for (uint8_t order = 0u; order < 2u; order++) {
+            uint8_t r = (uint8_t)((pixel[order] >> 11) & 0x1Fu);
+            uint8_t g = (uint8_t)((pixel[order] >> 5) & 0x3Fu);
+            uint8_t b = (uint8_t)(pixel[order] & 0x1Fu);
+            uint8_t r6 = (uint8_t)(r << 1);
+            uint8_t b6 = (uint8_t)(b << 1);
+
+            sum_r6[order] += r6;
+            sum_g6[order] += g;
+            sum_b6[order] += b6;
+            if (g >= 44u && r <= 12u && b <= 12u) {
+                strong_green[order]++;
+            }
+            if (g >= 32u && g >= (uint8_t)(r6 + 6u) && g >= (uint8_t)(b6 + 6u)) {
+                dominant_green[order]++;
+            }
+        }
+    }
+
+    if (samples == 0u) {
+        return 0;
+    }
+
+    for (uint8_t order = 0u; order < 2u; order++) {
+        if ((strong_green[order] * 100u) >= (samples * 50u)) {
+            return 1;
+        }
+        if ((dominant_green[order] * 100u) >= (samples * 78u) &&
+            sum_g6[order] >= (sum_r6[order] + (samples * 8u)) &&
+            sum_g6[order] >= (sum_b6[order] + (samples * 8u))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int app_camera_frame_has_horizontal_stripes(const service_camera_frame_t *frame)
+{
+    if (app_camera_frame_is_valid_rgb565_preview(frame) == 0) {
+        return 0;
+    }
+
+    uint32_t comparisons = 0u;
+    uint32_t strong_delta[2] = {0u, 0u};
+    uint32_t alternating_delta[2] = {0u, 0u};
+    int32_t previous_delta[2] = {0, 0};
+
+    for (uint32_t y = 0u; y + 1u < APP_CAMERA_PREVIEW_H; y++) {
+        uint32_t row_sum[2][2] = {{0u, 0u}, {0u, 0u}};
+        uint32_t x_samples = 0u;
+
+        for (uint32_t x = 4u; x < APP_CAMERA_PREVIEW_W; x += APP_CAMERA_STRIPE_SAMPLE_X_STEP) {
+            uint32_t pixel0 = (y * APP_CAMERA_PREVIEW_W) + x;
+            uint32_t pixel1 = ((y + 1u) * APP_CAMERA_PREVIEW_W) + x;
+            row_sum[0][0] += app_camera_rgb565_luma_sum(frame->data, pixel0, 0u);
+            row_sum[0][1] += app_camera_rgb565_luma_sum(frame->data, pixel1, 0u);
+            row_sum[1][0] += app_camera_rgb565_luma_sum(frame->data, pixel0, 1u);
+            row_sum[1][1] += app_camera_rgb565_luma_sum(frame->data, pixel1, 1u);
+            x_samples++;
+        }
+
+        if (x_samples == 0u) {
+            continue;
+        }
+
+        comparisons++;
+        for (uint8_t order = 0u; order < 2u; order++) {
+            int32_t avg0 = (int32_t)(row_sum[order][0] / x_samples);
+            int32_t avg1 = (int32_t)(row_sum[order][1] / x_samples);
+            int32_t delta = avg0 - avg1;
+            int32_t abs_delta = delta >= 0 ? delta : -delta;
+            if (abs_delta >= APP_CAMERA_STRIPE_ROW_DELTA) {
+                strong_delta[order]++;
+                if ((previous_delta[order] > 0 && delta < 0) ||
+                    (previous_delta[order] < 0 && delta > 0)) {
+                    alternating_delta[order]++;
+                }
+                previous_delta[order] = delta;
+            } else {
+                previous_delta[order] = 0;
+            }
+        }
+    }
+
+    if (comparisons == 0u) {
+        return 0;
+    }
+
+    for (uint8_t order = 0u; order < 2u; order++) {
+        if ((strong_delta[order] * 100u) >= (comparisons * 72u) &&
+            (alternating_delta[order] * 100u) >= (comparisons * 42u)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int app_camera_frame_is_bad_preview(const service_camera_frame_t *frame)
+{
+    return (app_camera_frame_is_green_screen(frame) != 0 ||
+            app_camera_frame_has_horizontal_stripes(frame) != 0) ? 1 : 0;
+}
+
+static void app_camera_recover_rgb565_preview(void)
+{
+    APP_LOGW(TAG, "相机预览连续检测到异常帧，重建 RGB565 模式");
+    s_preview_active = 0;
+    s_frozen = 0;
+
+    (void)service_camera_set_jpeg_mode();
+    (void)app_camera_discard_frames(2u);
+
+    if (service_camera_set_rgb565_mode() == 0) {
+        (void)app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
+        app_camera_mark_rgb565_warmup();
+        if (s_page_active != 0) {
+            s_preview_active = 1;
+        }
+    } else {
+        APP_LOGW(TAG, "相机 RGB565 模式重建失败");
+    }
 }
 
 #if APP_CAMERA_PREVIEW_TEST_MODE == APP_CAMERA_PREVIEW_TEST_COLOR
@@ -396,6 +649,28 @@ static void app_camera_preview_once(void)
         frame.width == APP_CAMERA_PREVIEW_W &&
         frame.height == APP_CAMERA_PREVIEW_H &&
         frame.len >= (APP_CAMERA_PREVIEW_W * APP_CAMERA_PREVIEW_H * sizeof(uint16_t))) {
+        if (s_preview_warmup_frames > 0u) {
+            s_preview_warmup_frames--;
+            service_camera_return_frame(&frame);
+            osal_delay_ms(APP_CAMERA_PREVIEW_INTERVAL_MS);
+            return;
+        }
+        if (app_camera_frame_is_bad_preview(&frame) != 0) {
+            s_bad_preview_reject_count++;
+            if (s_bad_preview_reject_count == 1u ||
+                s_bad_preview_reject_count >= APP_CAMERA_BAD_PREVIEW_REJECT_LIMIT) {
+                APP_LOGW(TAG,
+                         "相机预览疑似异常帧，已跳过, count=%u",
+                         (unsigned int)s_bad_preview_reject_count);
+            }
+            service_camera_return_frame(&frame);
+            if (s_bad_preview_reject_count >= APP_CAMERA_BAD_PREVIEW_REJECT_LIMIT) {
+                app_camera_recover_rgb565_preview();
+            }
+            osal_delay_ms(APP_CAMERA_PREVIEW_INTERVAL_MS);
+            return;
+        }
+        s_bad_preview_reject_count = 0u;
         (void)service_screen_draw_rgb565(APP_CAMERA_PREVIEW_X,
                                          APP_CAMERA_PREVIEW_Y,
                                          APP_CAMERA_PREVIEW_W,
@@ -494,20 +769,37 @@ static void app_camera_do_capture(void)
 /**
  * @brief 执行 JPEG 上传。
  */
-static void app_camera_do_upload(void)
+static void app_camera_do_upload(app_camera_upload_job_t *job)
 {
     int ret = 0;
 
-    if (s_jpeg_buf == NULL || s_jpeg_len == 0u) {
+    if (job == NULL || job->jpeg_buf == NULL || job->jpeg_len == 0u) {
         APP_LOGW(TAG, "相机上传失败: 没有可上传的 JPEG");
+        (void)app_ui_set_ai_waiting(0);
         (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        app_camera_finish_upload_request();
+        return;
+    }
+
+    uint32_t task_start_ms = osal_get_tick_ms();
+    APP_LOGI(TAG,
+             "相机 JPEG 上传任务启动, len=%u, queued_delay=%u",
+             (unsigned int)job->jpeg_len,
+             (unsigned int)(task_start_ms - job->queued_at_ms));
+
+    if (app_camera_is_upload_cancel_requested()) {
+        APP_LOGI(TAG, "相机上传已中止: 请求开始前取消");
+        app_camera_free_upload_job(job);
+        app_camera_finish_upload_request();
         return;
     }
 
     if (service_network_is_ready() != 1) {
         APP_LOGW(TAG, "相机上传失败: 网络未就绪");
-        app_camera_clear_jpeg();
+        app_camera_free_upload_job(job);
+        (void)app_ui_set_ai_waiting(0);
         (void)app_ui_set_ai_message(UI_TEXT_AI_NO_NETWORK);
+        app_camera_finish_upload_request();
         return;
     }
 
@@ -518,49 +810,149 @@ static void app_camera_do_upload(void)
     ret = app_camera_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD, query);
     if (ret != 0) {
         APP_LOGW(TAG, "相机上传 URL 构造失败, ret=%d", ret);
-        app_camera_clear_jpeg();
+        app_camera_free_upload_job(job);
+        (void)app_ui_set_ai_waiting(0);
         (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        app_camera_finish_upload_request();
         return;
     }
 
     for (uint32_t attempt = 0u; attempt <= APP_CAMERA_UPLOAD_RETRY_COUNT; attempt++) {
+        if (app_camera_is_upload_cancel_requested()) {
+            APP_LOGI(TAG, "相机上传已中止: 跳过剩余重试");
+            app_camera_free_upload_job(job);
+            app_camera_finish_upload_request();
+            return;
+        }
         resp_len = 0u;
+        uint32_t http_start_ms = osal_get_tick_ms();
+        APP_LOGI(TAG,
+                 "相机 JPEG HTTP POST 开始, attempt=%u/%u, len=%u, since_click=%u",
+                 (unsigned int)(attempt + 1u),
+                 (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
+                 (unsigned int)job->jpeg_len,
+                 (unsigned int)(http_start_ms - job->queued_at_ms));
         ret = service_network_http_post(url,
                                         "image/jpeg",
-                                        s_jpeg_buf,
-                                        s_jpeg_len,
+                                        job->jpeg_buf,
+                                        job->jpeg_len,
                                         s_upload_resp,
                                         sizeof(s_upload_resp) - 1u,
                                         &resp_len,
                                         APP_CAMERA_UPLOAD_TIMEOUT_MS);
+        uint32_t http_ms = osal_get_tick_ms() - http_start_ms;
         if (ret == 0) {
+            APP_LOGI(TAG,
+                     "相机 JPEG HTTP POST 返回, attempt=%u/%u, http_ms=%u, resp_len=%u",
+                     (unsigned int)(attempt + 1u),
+                     (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
+                     (unsigned int)http_ms,
+                     (unsigned int)resp_len);
             break;
         }
+        if (app_camera_is_upload_cancel_requested()) {
+            APP_LOGI(TAG, "相机上传已中止: HTTP 返回后忽略失败");
+            app_camera_free_upload_job(job);
+            app_camera_finish_upload_request();
+            return;
+        }
         APP_LOGW(TAG,
-                 "相机 JPEG 上传失败, attempt=%u/%u, ret=%d, len=%u",
+                 "相机 JPEG 上传失败, attempt=%u/%u, ret=%d, len=%u, http_ms=%u",
                  (unsigned int)(attempt + 1u),
                  (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
                  ret,
-                 (unsigned int)s_jpeg_len);
+                 (unsigned int)job->jpeg_len,
+                 (unsigned int)http_ms);
         if (attempt < APP_CAMERA_UPLOAD_RETRY_COUNT) {
             osal_delay_ms(APP_CAMERA_UPLOAD_RETRY_DELAY_MS);
         }
     }
 
+    if (app_camera_is_upload_cancel_requested()) {
+        APP_LOGI(TAG, "相机上传已中止: 忽略 HTTP 结果");
+        app_camera_free_upload_job(job);
+        app_camera_finish_upload_request();
+        return;
+    }
+
     if (ret == 0) {
         s_upload_resp[resp_len < sizeof(s_upload_resp) ? resp_len : (sizeof(s_upload_resp) - 1u)] = '\0';
-        APP_LOGI(TAG, "相机 JPEG 上传成功, len=%u, resp_len=%u",
-                 (unsigned int)s_jpeg_len,
-                 (unsigned int)resp_len);
+        APP_LOGI(TAG,
+                 "相机 JPEG 上传成功, len=%u, resp_len=%u, total_ms=%u",
+                 (unsigned int)job->jpeg_len,
+                 (unsigned int)resp_len,
+                 (unsigned int)(osal_get_tick_ms() - job->queued_at_ms));
         app_camera_handle_upload_response(s_upload_resp, resp_len);
     } else {
-        APP_LOGW(TAG, "相机 JPEG 上传失败, ret=%d, len=%u",
+        APP_LOGW(TAG,
+                 "相机 JPEG 上传失败, ret=%d, len=%u, total_ms=%u",
                  ret,
-                 (unsigned int)s_jpeg_len);
+                 (unsigned int)job->jpeg_len,
+                 (unsigned int)(osal_get_tick_ms() - job->queued_at_ms));
+        (void)app_ui_set_ai_waiting(0);
         (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
     }
 
-    app_camera_clear_jpeg();
+    app_camera_free_upload_job(job);
+    app_camera_finish_upload_request();
+}
+
+static void app_camera_upload_task(void *arg)
+{
+    if (arg == NULL) {
+        app_camera_finish_upload_request();
+        osal_task_delete_current();
+        return;
+    }
+
+    app_camera_upload_job_t job = *(app_camera_upload_job_t *)arg;
+    app_camera_do_upload(&job);
+    osal_task_delete_current();
+}
+
+static void app_camera_start_upload_task(void)
+{
+    if (app_camera_is_upload_cancel_requested()) {
+        APP_LOGI(TAG, "相机上传已中止: 任务创建前取消");
+        app_camera_clear_jpeg();
+        app_camera_finish_upload_request();
+        return;
+    }
+
+    if (s_upload_task_running != 0) {
+        APP_LOGW(TAG, "相机上传请求忽略: 已有上传任务运行");
+        return;
+    }
+
+    if (s_jpeg_buf == NULL || s_jpeg_len == 0u) {
+        APP_LOGW(TAG, "相机上传失败: 没有可上传的 JPEG");
+        (void)app_ui_set_ai_waiting(0);
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        app_camera_finish_upload_request();
+        return;
+    }
+
+    s_upload_job.jpeg_buf = s_jpeg_buf;
+    s_upload_job.jpeg_len = s_jpeg_len;
+    s_upload_job.queued_at_ms = s_upload_queued_at_ms != 0u ? s_upload_queued_at_ms : osal_get_tick_ms();
+    s_jpeg_buf = NULL;
+    s_jpeg_buf_size = 0u;
+    s_jpeg_len = 0u;
+    s_upload_task_running = 1;
+
+    int ret = osal_task_create("cam_upload",
+                               app_camera_upload_task,
+                               &s_upload_job,
+                               APP_CAMERA_UPLOAD_TASK_STACK,
+                               APP_CAMERA_UPLOAD_TASK_PRIORITY,
+                               &s_upload_task);
+    if (ret != 0) {
+        APP_LOGE(TAG, "相机上传任务创建失败, ret=%d", ret);
+        app_camera_free_upload_job(&s_upload_job);
+        (void)app_ui_set_ai_waiting(0);
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        app_camera_finish_upload_request();
+    }
 }
 
 /**
@@ -580,6 +972,7 @@ static void app_camera_do_retake(void)
     s_frozen = 0;
     if (s_page_active != 0 && service_camera_set_rgb565_mode() == 0) {
         (void)app_camera_discard_frames(APP_CAMERA_MODE_DISCARD_FRAMES);
+        app_camera_mark_rgb565_warmup();
         s_preview_active = 1;
     }
 }
@@ -630,7 +1023,7 @@ static void app_camera_task(void *arg)
             app_camera_do_capture();
         }
         if (upload) {
-            app_camera_do_upload();
+            app_camera_start_upload_task();
         }
 
         if (s_preview_active != 0 && s_frozen == 0 && s_page_active != 0) {
@@ -708,7 +1101,7 @@ void app_camera_exit(void)
          * 如果用户点击上传后立即跳到 AI 页面，保留 upload 请求和 JPEG 缓冲，
          * 让后台任务继续完成上传；普通退出则清理暂存图像。
          */
-        if (s_upload_req == 0) {
+        if (s_upload_req == 0 && s_upload_in_progress == 0) {
             s_capture_req = 0;
             s_retake_req = 1;
         }
@@ -730,17 +1123,74 @@ void app_camera_capture(void)
     app_camera_notify_task();
 }
 
-void app_camera_upload(void)
+int app_camera_upload(void)
 {
     if (!s_started || service_camera_is_initialized() != 1) {
-        return;
+        return -1;
     }
 
+    if (app_camera_lock() != 0) {
+        return -4;
+    }
+
+    if (s_upload_in_progress != 0 || s_upload_task_running != 0) {
+        APP_LOGW(TAG, "相机上传请求忽略: 当前已有上传进行中");
+        app_camera_unlock();
+        return -3;
+    }
+    if (s_jpeg_buf == NULL || s_jpeg_len == 0u) {
+        APP_LOGW(TAG, "相机上传请求拒绝: 没有可上传的 JPEG");
+        app_camera_unlock();
+        return -2;
+    }
+    s_upload_req = 1;
+    s_upload_in_progress = 1;
+    s_upload_cancel_requested = 0;
+    s_upload_queued_at_ms = osal_get_tick_ms();
+    APP_LOGI(TAG,
+             "相机上传请求入队, jpeg_len=%u, tick=%u",
+             (unsigned int)s_jpeg_len,
+             (unsigned int)s_upload_queued_at_ms);
+    app_camera_unlock();
+    app_camera_notify_task();
+    return 0;
+}
+
+int app_camera_cancel_current(void)
+{
+    if (!s_started) {
+        return -1;
+    }
+
+    int queued = 0;
+    int active = 0;
     if (app_camera_lock() == 0) {
-        s_upload_req = 1;
+        queued = s_upload_req != 0;
+        active = (s_upload_req != 0 || s_upload_in_progress != 0);
+        if (active) {
+            s_upload_cancel_requested = 1;
+            if (queued) {
+                s_upload_req = 0;
+                s_upload_in_progress = 0;
+            }
+        }
         app_camera_unlock();
     }
+
+    if (!active) {
+        return -2;
+    }
+
+    if (queued) {
+        app_camera_clear_jpeg();
+        app_camera_finish_upload_request();
+    }
+    APP_LOGI(TAG,
+             "相机上传取消请求已接收, queued=%d, task_running=%d",
+             queued,
+             s_upload_task_running);
     app_camera_notify_task();
+    return 0;
 }
 
 void app_camera_retake(void)

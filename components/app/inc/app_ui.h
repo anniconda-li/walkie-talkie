@@ -79,6 +79,8 @@ int app_ui_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
 
 int app_ui_set_settings_volume(int32_t volume);
 
+int app_ui_set_settings_brightness(int32_t brightness);
+
 int app_ui_show_power_dialog(void);
 
 int app_ui_prepare_shutdown_blackout(void);

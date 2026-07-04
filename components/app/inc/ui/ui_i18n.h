@@ -35,6 +35,7 @@ typedef enum {
     UI_TEXT_AI_IMAGE_UPLOADING,     /**< 图片上传和分析中提示。 */
     UI_TEXT_AI_IMAGE_READY,         /**< 图片分析完成提示。 */
     UI_TEXT_AI_IMAGE_UPLOAD_FAILED, /**< 图片上传失败提示。 */
+    UI_TEXT_AI_IMAGE_UPLOAD_BUSY,   /**< 上一次图片上传仍在结束中提示。 */
     UI_TEXT_AI_QUESTION_FAILED,     /**< AI 提问失败提示。 */
     UI_TEXT_AI_REPLY_FAILED,        /**< AI 回复接收失败提示。 */
     UI_TEXT_SETTINGS_VOLUME,        /**< 音量文本。 */

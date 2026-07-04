@@ -53,7 +53,7 @@ typedef struct {
     void (*camera_entered)(void);                      /**< 相机页面进入回调。 */
     void (*camera_exited)(void);                       /**< 相机页面退出回调。 */
     void (*camera_capture_requested)(void);            /**< 相机拍照请求回调。 */
-    void (*camera_upload_requested)(void);             /**< 相机上传请求回调。 */
+    int (*camera_upload_requested)(void);              /**< 相机上传请求回调。 */
     void (*camera_retake_requested)(void);             /**< 相机重拍请求回调。 */
     void (*ai_question_started)(void);                 /**< AI 问答录音开始回调。 */
     void (*ai_question_stopped)(void);                 /**< AI 问答录音停止回调。 */
@@ -61,12 +61,13 @@ typedef struct {
     void (*ai_reply_stop_requested)(void);             /**< AI 回复语音停止播放请求回调。 */
     void (*ai_cancel_requested)(void);                 /**< AI 问答中止请求回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
+    void (*settings_brightness_changed)(int32_t value); /**< 屏幕亮度变化回调。 */
     ui_settings_network_mode_t (*settings_network_mode_get)(void); /**< 查询当前网络选择。 */
     void (*settings_wifi_select_requested)(void);                  /**< 切回已保存 WLAN 请求。 */
     void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */
     void (*settings_wifi_connect_requested)(const char *ssid,
                                             const char *password); /**< WLAN 连接请求。 */
-    void (*settings_4g_select_requested)(void);                    /**< 4G 切换请求。 */
+    int (*settings_4g_select_requested)(void);                     /**< 4G 切换请求。 */
     int (*settings_wifi_ssid_get)(char *ssid, size_t size);        /**< 查询当前 WLAN SSID。 */
     void (*power_shutdown_confirmed)(void);                        /**< 用户确认关机回调。 */
 } ui_event_callbacks_t;
@@ -101,6 +102,7 @@ typedef struct {
  * @brief AI 页面视图对象集合。
  */
 typedef struct {
+    lv_obj_t *answer_panel;  /**< AI 回答滚动容器。 */
     lv_obj_t *answer_label;  /**< AI 回答显示标签。 */
     lv_obj_t *audio_button;  /**< AI 回复语音播放按钮。 */
     lv_obj_t *audio_label;   /**< AI 回复语音播放图标/文字。 */
@@ -123,6 +125,8 @@ typedef struct {
     lv_obj_t *wlan_ssid_label;        /**< WLAN 当前热点标签。 */
     lv_obj_t *cellular_label;         /**< 4G 模式标签。 */
     lv_obj_t *network_status_label;   /**< 网络操作提示。 */
+    lv_obj_t *brightness_slider;       /**< 屏幕亮度滑条。 */
+    lv_obj_t *brightness_value_label;  /**< 屏幕亮度数值。 */
     lv_obj_t *wlan_page;              /**< WLAN 子页面。 */
     lv_obj_t *wlan_back_button;       /**< WLAN 子页面返回按钮。 */
     lv_obj_t *wlan_scan_button;       /**< WLAN 扫描按钮。 */
@@ -205,6 +209,7 @@ void ui_event_set_ai_answer_text(const char *text);
 void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
 
 void ui_event_set_settings_volume(int32_t volume);
+void ui_event_set_settings_brightness(int32_t brightness);
 
 /**
  * @brief 注册设置页面视图对象。
