@@ -16,6 +16,7 @@ extern "C" {
 #define d_power_control_HOLD_IO WDRIVER_POWER_HOLD_IO
 
 typedef void (*d_power_control_long_press_cb_t)(void *user_data);
+typedef void (*d_power_control_short_press_cb_t)(void *user_data);
 
 /**
  * @brief 初始化电源保持输出和电源键输入。
@@ -46,6 +47,17 @@ int d_power_control_start_monitor(void);
  */
 void d_power_control_set_long_press_callback(d_power_control_long_press_cb_t cb,
                                              void *user_data);
+
+/**
+ * @brief 注册电源键短按回调。
+ *
+ * 短按只在按下后释放且未达到长按阈值时触发；开机阶段等待松开的那次按键不会触发。
+ *
+ * @param[in] cb        短按回调，传 NULL 可关闭短按处理。
+ * @param[in] user_data 回调用户数据。
+ */
+void d_power_control_set_short_press_callback(d_power_control_short_press_cb_t cb,
+                                              void *user_data);
 
 /**
  * @brief 拉低供电保持脚，请求硬件断电。

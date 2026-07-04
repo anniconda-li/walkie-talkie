@@ -19,6 +19,7 @@
 static const char *TAG = "app_ui";
 
 static int s_ui_created = 0;
+static int s_screen_on = 0;
 
 int app_ui_create(void)
 {
@@ -48,6 +49,7 @@ int app_ui_create(void)
 
     service_screen_unlock();
     s_ui_created = 1;
+    s_screen_on = 1;
 
     APP_LOGI(TAG, "应用 UI 创建完成");
     return 0;
@@ -146,6 +148,39 @@ int app_ui_prepare_shutdown_blackout(void)
 
     service_screen_unlock();
     return 0;
+}
+
+int app_ui_set_screen_on(int on)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    on = on != 0 ? 1 : 0;
+    if (s_screen_on == on) {
+        return 0;
+    }
+
+    if (service_screen_lock(1000) != 0) {
+        APP_LOGE(TAG, "屏幕亮灭切换失败: LVGL 加锁超时");
+        return -2;
+    }
+
+    int ret = service_screen_display_on(on);
+    service_screen_unlock();
+    if (ret != 0) {
+        APP_LOGE(TAG, "屏幕亮灭切换失败, on=%d, ret=%d", on, ret);
+        return ret;
+    }
+
+    s_screen_on = on;
+    APP_LOGI(TAG, "屏幕%s", on != 0 ? "亮屏" : "息屏");
+    return 0;
+}
+
+int app_ui_toggle_screen_on(void)
+{
+    return app_ui_set_screen_on(s_screen_on ? 0 : 1);
 }
 
 int app_ui_set_intercom_state(int state)

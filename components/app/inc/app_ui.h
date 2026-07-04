@@ -85,6 +85,10 @@ int app_ui_show_power_dialog(void);
 
 int app_ui_prepare_shutdown_blackout(void);
 
+int app_ui_set_screen_on(int on);
+
+int app_ui_toggle_screen_on(void);
+
 int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
                                           uint16_t count,
                                           int ret);

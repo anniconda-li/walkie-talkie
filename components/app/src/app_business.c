@@ -539,7 +539,14 @@ static int app_business_on_4g_select(void)
 static void app_business_on_power_key_long_press(void *user_data)
 {
     (void)user_data;
+    (void)app_ui_set_screen_on(1);
     (void)app_ui_show_power_dialog();
+}
+
+static void app_business_on_power_key_short_press(void *user_data)
+{
+    (void)user_data;
+    (void)app_ui_toggle_screen_on();
 }
 
 static void app_business_on_power_shutdown_confirmed(void)
@@ -585,6 +592,7 @@ static void app_business_register_ui_callbacks(void)
 
     ui_event_set_callbacks(&callbacks);
     d_power_control_set_long_press_callback(app_business_on_power_key_long_press, NULL);
+    d_power_control_set_short_press_callback(app_business_on_power_key_short_press, NULL);
 }
 
 /* ==========================================================================
