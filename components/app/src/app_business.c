@@ -83,6 +83,7 @@ static volatile int s_wifi_connect_busy = 0;
 static volatile int s_network_switch_busy = 0;
 static volatile int s_fake_4g_connect_busy = 0;
 static int32_t s_volume = 80;
+static int32_t s_brightness = 80;
 static osal_queue_t s_volume_step_queue = NULL;
 static osal_task_t s_volume_task = NULL;
 
@@ -310,6 +311,31 @@ static void app_business_set_volume(int32_t value, int sync_ui)
 static void app_business_on_volume_changed(int32_t value)
 {
     app_business_set_volume(value, 0);
+}
+
+static void app_business_set_brightness(int32_t value, int sync_ui)
+{
+    if (service_screen_supports_brightness() == 0) {
+        return;
+    }
+
+    if (value < 0) {
+        value = 0;
+    } else if (value > 100) {
+        value = 100;
+    }
+
+    s_brightness = value;
+    (void)service_screen_set_brightness((uint8_t)value);
+    if (sync_ui) {
+        (void)app_ui_set_settings_brightness(value);
+    }
+    APP_LOGI(TAG, "屏幕亮度已设置, brightness=%ld", (long)value);
+}
+
+static void app_business_on_brightness_changed(int32_t value)
+{
+    app_business_set_brightness(value, 0);
 }
 
 static void app_business_on_volume_button_step(int step)
@@ -558,6 +584,7 @@ static void app_business_register_ui_callbacks(void)
         .ai_reply_stop_requested = app_business_on_ai_reply_stop_requested,
         .ai_cancel_requested = app_business_on_ai_cancel_requested,
         .settings_volume_changed = app_business_on_volume_changed,
+        .settings_brightness_changed = app_business_on_brightness_changed,
         .settings_network_mode_get = app_business_get_network_mode,
         .settings_wifi_select_requested = app_business_on_wifi_select,
         .settings_wifi_scan_requested = app_business_on_wifi_scan,
@@ -607,6 +634,7 @@ int app_business_start(void)
     /* 先注册 UI 回调，再启动后台业务，确保开机后用户操作能被接收。 */
     app_business_register_ui_callbacks();
     app_business_set_volume(s_volume, 0);
+    app_business_set_brightness(s_brightness, 0);
 
     ret = app_network_start();
     if (ret != 0) {

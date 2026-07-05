@@ -61,6 +61,7 @@ typedef struct {
     void (*ai_reply_stop_requested)(void);             /**< AI 回复语音停止播放请求回调。 */
     void (*ai_cancel_requested)(void);                 /**< AI 问答中止请求回调。 */
     void (*settings_volume_changed)(int32_t value);    /**< 音量变化回调。 */
+    void (*settings_brightness_changed)(int32_t value); /**< 屏幕亮度变化回调。 */
     ui_settings_network_mode_t (*settings_network_mode_get)(void); /**< 查询当前网络选择。 */
     int (*settings_wifi_select_requested)(void);                   /**< 进入 WLAN 扫描模式请求。 */
     void (*settings_wifi_scan_requested)(void);                    /**< WLAN 扫描请求。 */
@@ -124,6 +125,8 @@ typedef struct {
     lv_obj_t *wlan_ssid_label;        /**< WLAN 当前热点标签。 */
     lv_obj_t *cellular_label;         /**< 4G 模式标签。 */
     lv_obj_t *network_status_label;   /**< 网络操作提示。 */
+    lv_obj_t *brightness_slider;       /**< 屏幕亮度滑条。 */
+    lv_obj_t *brightness_value_label;  /**< 屏幕亮度数值。 */
     lv_obj_t *wlan_page;              /**< WLAN 子页面。 */
     lv_obj_t *wlan_back_button;       /**< WLAN 子页面返回按钮。 */
     lv_obj_t *wlan_scan_button;       /**< WLAN 扫描按钮。 */
@@ -206,6 +209,7 @@ void ui_event_set_ai_answer_text(const char *text);
 void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
 
 void ui_event_set_settings_volume(int32_t volume);
+void ui_event_set_settings_brightness(int32_t brightness);
 
 /**
  * @brief 注册设置页面视图对象。

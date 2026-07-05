@@ -30,6 +30,7 @@
 #include "ui_i18n.h"
 #include "ui_theme.h"
 #include "esp_app_desc.h"
+#include "service_screen.h"
 
 /** @brief 设置页面全局视图对象。 */
 static ui_settings_view_t g_settings_view;
@@ -334,6 +335,31 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
     lv_label_set_long_mode(ota_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(ota_label, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_style_text_color(ota_label, lv_color_make(0xB8, 0xF0, 0xD0), 0);
+
+    if (service_screen_supports_brightness() != 0) {
+        lv_obj_t *brightness_box = create_setting_box(g_settings_panel, 2, 152, 188, 68);
+        (void)create_caption(brightness_box, "屏幕亮度", 8);
+
+        g_settings_view.brightness_value_label = lv_label_create(brightness_box);
+        lv_label_set_text(g_settings_view.brightness_value_label, "80%");
+        lv_obj_set_pos(g_settings_view.brightness_value_label, 132, 8);
+        lv_obj_set_width(g_settings_view.brightness_value_label, 44);
+        lv_obj_set_style_text_align(g_settings_view.brightness_value_label, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_style_text_color(g_settings_view.brightness_value_label, lv_color_white(), 0);
+
+        g_settings_view.brightness_slider = lv_slider_create(brightness_box);
+        lv_slider_set_range(g_settings_view.brightness_slider, 10, 100);
+        lv_slider_set_value(g_settings_view.brightness_slider, 80, LV_ANIM_OFF);
+        lv_obj_set_pos(g_settings_view.brightness_slider, 12, 42);
+        lv_obj_set_size(g_settings_view.brightness_slider, 164, 10);
+        lv_obj_set_style_bg_color(g_settings_view.brightness_slider, lv_color_make(0x72, 0x72, 0x72), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(g_settings_view.brightness_slider, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(g_settings_view.brightness_slider, 5, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(g_settings_view.brightness_slider, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(g_settings_view.brightness_slider, 5, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(g_settings_view.brightness_slider, lv_color_white(), LV_PART_KNOB);
+        lv_obj_set_style_border_width(g_settings_view.brightness_slider, 0, LV_PART_KNOB);
+    }
 
     g_settings_view.wlan_page = create_wlan_page(root);
     ui_event_register_settings(&g_settings_view);

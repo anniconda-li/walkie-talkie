@@ -53,6 +53,8 @@ static ui_ai_audio_btn_state_t g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
 static lv_obj_t *g_ai_cancel_label = NULL;
 static int32_t g_settings_volume = 80;
 static uint8_t g_settings_volume_syncing = 0u;
+static int32_t g_settings_brightness = 80;
+static uint8_t g_settings_brightness_syncing = 0u;
 static ui_settings_network_mode_t g_settings_pending_network = UI_SETTINGS_NETWORK_NONE;
 static lv_obj_t *g_volume_overlay = NULL;
 static lv_obj_t *g_volume_slider = NULL;
@@ -633,6 +635,42 @@ static int32_t normalize_volume_step(int32_t volume)
     }
 
     return ((volume + 5) / 10) * 10;
+}
+
+static int32_t normalize_percent(int32_t value)
+{
+    if(value < 0) {
+        return 0;
+    }
+    if(value > 100) {
+        return 100;
+    }
+    return value;
+}
+
+static void settings_refresh_brightness_label(ui_settings_view_t *view)
+{
+    if(view == NULL || view->brightness_value_label == NULL) {
+        return;
+    }
+
+    lv_label_set_text_fmt(view->brightness_value_label, "%ld%%", (long)g_settings_brightness);
+}
+
+static void settings_brightness_slider_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || g_settings_brightness_syncing != 0u) {
+        return;
+    }
+
+    ui_settings_view_t *view = (ui_settings_view_t *)lv_event_get_user_data(e);
+    lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
+    int32_t brightness = normalize_percent(lv_slider_get_value(slider));
+    g_settings_brightness = brightness;
+    settings_refresh_brightness_label(view);
+    if(g_callbacks.settings_brightness_changed != NULL) {
+        g_callbacks.settings_brightness_changed(brightness);
+    }
 }
 
 static void volume_overlay_hide_timer_cb(lv_timer_t *timer)
@@ -1301,6 +1339,22 @@ void ui_event_set_settings_volume(int32_t volume)
     volume_overlay_refresh_hide_timer();
 }
 
+void ui_event_set_settings_brightness(int32_t brightness)
+{
+    brightness = normalize_percent(brightness);
+
+    g_settings_brightness = brightness;
+    ui_settings_view_t *view = g_settings_view;
+    if(view == NULL || view->brightness_slider == NULL) {
+        return;
+    }
+
+    g_settings_brightness_syncing = 1u;
+    lv_slider_set_value(view->brightness_slider, brightness, LV_ANIM_OFF);
+    g_settings_brightness_syncing = 0u;
+    settings_refresh_brightness_label(view);
+}
+
 void ui_event_register_settings(ui_settings_view_t *view)
 {
     if(view == NULL) {
@@ -1326,8 +1380,12 @@ void ui_event_register_settings(ui_settings_view_t *view)
     if(view->cancel_button != NULL) {
         lv_obj_add_event_cb(view->cancel_button, settings_wifi_cancel_event_cb, LV_EVENT_CLICKED, view);
     }
+    if(view->brightness_slider != NULL) {
+        lv_obj_add_event_cb(view->brightness_slider, settings_brightness_slider_event_cb, LV_EVENT_VALUE_CHANGED, view);
+    }
     settings_refresh_network_selected(view);
     settings_refresh_wlan_ssid(view);
+    ui_event_set_settings_brightness(g_settings_brightness);
     if(g_settings_refresh_timer == NULL) {
         g_settings_refresh_timer = lv_timer_create(settings_refresh_timer_cb, 1000, view);
     } else {
