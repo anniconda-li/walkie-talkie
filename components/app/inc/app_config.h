@@ -36,8 +36,10 @@ extern "C" {
 #define APP_LOGE(tag, fmt, ...) do { (void)(tag); } while (0)
 #endif
 
-/** @brief 本机注册到服务器的设备名。 */
-#define APP_BUSINESS_DEVICE_NAME        "walkie-01"
+/** @brief 全局设备 ID，AI、相机和对讲业务都使用同一个身份。 */
+#define APP_DEVICE_ID                   "walkie-01"
+/** @brief 兼容旧业务命名，统一指向 APP_DEVICE_ID。 */
+#define APP_BUSINESS_DEVICE_NAME        APP_DEVICE_ID
 /** @brief UDP 对讲服务器地址。 */
 #define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
 /** @brief UDP 对讲服务器端口。 */
