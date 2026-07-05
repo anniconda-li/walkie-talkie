@@ -104,6 +104,13 @@ int service_screen_draw_rgb565(int x, int y, int w, int h, const void *data);
 int service_screen_display_on(int on);
 
 /**
+ * @brief 查询当前屏幕是否支持亮度百分比调节。
+ *
+ * @return 支持返回 1；不支持或未初始化返回 0。
+ */
+int service_screen_supports_brightness(void);
+
+/**
  * @brief 设置屏幕背光亮度。
  *
  * @param[in] percent 亮度百分比，范围 0-100。

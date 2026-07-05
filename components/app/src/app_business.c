@@ -315,6 +315,10 @@ static void app_business_on_volume_changed(int32_t value)
 
 static void app_business_set_brightness(int32_t value, int sync_ui)
 {
+    if (service_screen_supports_brightness() == 0) {
+        return;
+    }
+
     if (value < 0) {
         value = 0;
     } else if (value > 100) {

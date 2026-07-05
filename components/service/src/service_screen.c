@@ -293,11 +293,20 @@ int service_screen_display_on(int on)
     return ret;
 }
 
+int service_screen_supports_brightness(void)
+{
+    return (s_screen_ops_ready != 0u && s_screen_ops.set_brightness != NULL) ? 1 : 0;
+}
+
 int service_screen_set_brightness(uint8_t percent)
 {
-    if (s_screen_ops_ready == 0u || s_screen_ops.set_brightness == NULL) {
+    if (s_screen_ops_ready == 0u) {
         SERVICE_LOGE(TAG, "屏幕亮度设置失败: 屏幕服务未初始化");
         return -1;
+    }
+    if (s_screen_ops.set_brightness == NULL) {
+        SERVICE_LOGW(TAG, "屏幕亮度设置忽略: 当前屏幕不支持亮度调节");
+        return -2;
     }
 
     if (percent > 100u) {
