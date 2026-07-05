@@ -230,35 +230,95 @@ static int app_camera_json_is_true(const uint8_t *json, uint32_t len, const char
     return strncmp(start, "true", 4u) == 0 ? 1 : 0;
 }
 
+static int app_camera_json_looks_like_object(const uint8_t *json, uint32_t len)
+{
+    if (json == NULL || len == 0u) {
+        return 0;
+    }
+
+    uint32_t pos = 0u;
+    while (pos < len &&
+           (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n')) {
+        pos++;
+    }
+    return pos < len && json[pos] == '{';
+}
+
+static int app_camera_json_has_key(const uint8_t *json, uint32_t len, const char *key)
+{
+    if (json == NULL || key == NULL) {
+        return 0;
+    }
+
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *start = strstr((const char *)json, pattern);
+    return start != NULL && start < (const char *)json + len;
+}
+
+static int app_camera_upload_response_is_error(const uint8_t *json, uint32_t len)
+{
+    char status[24];
+    status[0] = '\0';
+    (void)app_camera_json_get_string(json, len, "status", status, sizeof(status));
+
+    return strcmp(status, "error") == 0 ||
+           strcmp(status, "failed") == 0 ||
+           app_camera_json_has_key(json, len, "error") ||
+           app_camera_json_has_key(json, len, "detail");
+}
+
+static int app_camera_upload_response_is_ready(const uint8_t *json, uint32_t len)
+{
+    char status[24];
+    char latest_artifact_id[96];
+    status[0] = '\0';
+    latest_artifact_id[0] = '\0';
+
+    (void)app_camera_json_get_string(json, len, "status", status, sizeof(status));
+    (void)app_camera_json_get_string(json,
+                                     len,
+                                     "latest_artifact_id",
+                                     latest_artifact_id,
+                                     sizeof(latest_artifact_id));
+
+    return strcmp(status, "ready") == 0 ||
+           latest_artifact_id[0] != '\0' ||
+           app_camera_json_is_true(json, len, "accepted") ||
+           app_camera_json_is_true(json, len, "ok");
+}
+
 static void app_camera_handle_upload_response(const uint8_t *json, uint32_t len)
 {
     char answer_text[512];
     answer_text[0] = '\0';
 
-    int ok = app_camera_json_is_true(json, len, "ok");
-    int analysis_ok = app_camera_json_is_true(json, len, "analysis_ok");
     (void)app_camera_json_get_string(json, len, "answer_text", answer_text, sizeof(answer_text));
 
     (void)app_ui_set_ai_waiting(0);
     (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
 
-    if (!ok) {
-        APP_LOGW(TAG, "相机图像分析失败: ok=false");
+    if (!app_camera_json_looks_like_object(json, len)) {
+        APP_LOGW(TAG, "相机上传响应不是 JSON 对象, len=%u", (unsigned int)len);
         (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
         return;
     }
 
-    if (!analysis_ok) {
-        APP_LOGW(TAG, "相机图像分析要求重拍");
-        if (answer_text[0] != '\0') {
-            (void)app_ui_set_ai_answer_text(answer_text);
-        } else {
-            (void)app_ui_set_ai_answer_text("这张照片信息不太够，请重拍。");
-        }
+    if (app_camera_upload_response_is_error(json, len)) {
+        APP_LOGW(TAG, "相机上传响应包含错误字段");
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
         return;
     }
 
-    APP_LOGI(TAG, "相机图像分析完成，可以提问");
+    if (app_camera_upload_response_is_ready(json, len)) {
+        APP_LOGI(TAG, "相机图像分析完成，可以提问");
+    } else if (answer_text[0] != '\0') {
+        APP_LOGI(TAG, "相机上传完成，识别结果不确定");
+        (void)app_ui_set_ai_answer_text(answer_text);
+        return;
+    } else {
+        APP_LOGI(TAG, "相机上传完成，响应未包含明确文物字段");
+    }
     (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_READY);
 }
 

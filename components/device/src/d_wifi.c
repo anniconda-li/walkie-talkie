@@ -569,6 +569,16 @@ int d_wifi_http_post(const char *url,
         }
     }
     if (ret == 0) {
+        int status_code = esp_http_client_get_status_code(client);
+        if (status_code < 200 || status_code >= 300) {
+            ret = -6;
+            D_LOGW(TAG,
+                   "HTTP POST 状态码非 2xx, status=%d, body_len=%u",
+                   status_code,
+                   (unsigned int)body_len);
+        }
+    }
+    if (ret == 0) {
         int read_len = esp_http_client_read_response(client, (char *)resp, (int)resp_size);
         if (read_len < 0) {
             ret = read_len;
