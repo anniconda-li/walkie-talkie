@@ -679,7 +679,7 @@ int app_business_start(void)
 
     s_started = 1;
     APP_LOGI(TAG, "业务启动完成, device=%s, server=%s:%d, channel=%d",
-             APP_BUSINESS_DEVICE_NAME,
+             APP_DEVICE_ID,
              APP_BUSINESS_SERVER_HOST,
              APP_BUSINESS_UDP_PORT,
              APP_BUSINESS_DEFAULT_CHANNEL);

@@ -72,6 +72,9 @@ typedef struct {
     uint8_t text_ready;
     uint8_t audio_ready;
     uint8_t audio_failed;
+    uint8_t no_speech;
+    uint8_t canceled;
+    uint8_t failed;
 } app_ai_voice_result_info_t;
 
 static app_ai_voice_result_info_t s_ai_result_info;
@@ -102,6 +105,7 @@ static char s_ai_current_session[64];
 
 #define APP_AI_CANCELED_RET                 (-900)
 #define APP_AI_PLAY_STOPPED_RET             (-901)
+#define APP_AI_TEXT_ONLY_RET                (-902)
 #define APP_AI_BACKEND_CANCEL_ON_DEVICE     0
 
 #if APP_AI_BACKEND_CANCEL_ON_DEVICE
@@ -141,6 +145,16 @@ static int app_ai_voice_is_active_session(const char *session)
     return session != NULL &&
            s_ai_current_session[0] != '\0' &&
            strcmp(session, s_ai_current_session) == 0;
+}
+
+static int app_ai_voice_is_audio_fetch_allowed(const char *session)
+{
+    if (!app_ai_voice_is_active_session(session) || app_ai_voice_is_playback_interrupted()) {
+        return 0;
+    }
+
+    app_ai_voice_state_t state = s_ai_state;
+    return state == APP_AI_STATE_DOWNLOADING_AUDIO || state == APP_AI_STATE_PLAYING_AUDIO;
 }
 
 /* ==========================================================================
@@ -823,16 +837,23 @@ static void app_ai_voice_parse_result_info(const char *session,
     (void)app_ai_voice_json_get_string(json, len, "tts_status", info->tts_status, sizeof(info->tts_status));
     (void)app_ai_voice_json_get_string(json, len, "tts_error", info->tts_error, sizeof(info->tts_error));
     (void)app_ai_voice_json_get_string(json, len, "answer_text", info->answer_text, sizeof(info->answer_text));
+    (void)app_ai_voice_json_get_string(json, len, "session", info->session, sizeof(info->session));
 
     info->text_ready = (info->answer_text[0] != '\0' ||
                         strcmp(info->status, "text_ready") == 0 ||
-                        strcmp(info->status, "audio_ready") == 0) ? 1u : 0u;
+                        strcmp(info->status, "audio_ready") == 0 ||
+                        strcmp(info->status, "audio_failed") == 0 ||
+                        strcmp(info->status, "no_speech") == 0) ? 1u : 0u;
     info->audio_ready = (strcmp(info->status, "audio_ready") == 0 ||
                          app_ai_voice_json_is_true(json, len, "audio_ready") ||
                          app_ai_voice_json_is_true(json, len, "reply_wav_ready") ||
                          app_ai_voice_json_is_true(json, len, "ready")) ? 1u : 0u;
     info->audio_failed = (strcmp(info->status, "audio_failed") == 0 ||
                           strcmp(info->tts_status, "failed") == 0) ? 1u : 0u;
+    info->no_speech = strcmp(info->status, "no_speech") == 0 ? 1u : 0u;
+    info->canceled = (strcmp(info->status, "cancelled") == 0 ||
+                      strcmp(info->status, "canceled") == 0) ? 1u : 0u;
+    info->failed = strcmp(info->status, "failed") == 0 ? 1u : 0u;
 
     if (app_ai_voice_json_get_u32(json, len, "reply_wav_size", &info->total) != 0) {
         if (app_ai_voice_json_get_u32(json, len, "total", &info->total) != 0) {
@@ -878,7 +899,7 @@ static int app_ai_voice_send_backend_cancel(const char *session)
         return -1;
     }
 
-    snprintf(query, sizeof(query), "session=%s", session);
+    snprintf(query, sizeof(query), "session=%s&device=%s", session, APP_DEVICE_ID);
     if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_CANCEL, query) != 0) {
         return -2;
     }
@@ -958,7 +979,7 @@ static int app_ai_voice_send_backend_stop_audio(const char *session)
         return -1;
     }
 
-    snprintf(query, sizeof(query), "session=%s", session);
+    snprintf(query, sizeof(query), "session=%s&device=%s", session, APP_DEVICE_ID);
     if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_STOP_AUDIO, query) != 0) {
         return -2;
     }
@@ -1022,7 +1043,7 @@ static int app_ai_voice_start_session(char *session, size_t session_size)
     int written = snprintf(json,
                            sizeof(json),
                            "{\"device\":\"%s\",\"language\":\"zh\"}",
-                           APP_BUSINESS_DEVICE_NAME);
+                           APP_DEVICE_ID);
     if (written <= 0 || (size_t)written >= sizeof(json)) {
         return -2;
     }
@@ -1070,8 +1091,9 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
         uint32_t resp_len = 0u;
         snprintf(query,
                  sizeof(query),
-                 "session=%s&index=%u&offset=%u&total=%u",
+                 "session=%s&device=%s&index=%u&offset=%u&total=%u",
                  session,
+                 APP_DEVICE_ID,
                  (unsigned int)index,
                  (unsigned int)offset,
                  (unsigned int)wav_len);
@@ -1119,7 +1141,7 @@ static int app_ai_voice_finish_upload(const char *session)
     char url[256];
     uint32_t resp_len = 0u;
 
-    snprintf(query, sizeof(query), "session=%s", session);
+    snprintf(query, sizeof(query), "session=%s&device=%s", session, APP_DEVICE_ID);
     if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_FINISH, query) != 0) {
         return -1;
     }
@@ -1163,7 +1185,7 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
         char url[256];
         uint32_t resp_len = 0u;
 
-        snprintf(query, sizeof(query), "session=%s", session);
+        snprintf(query, sizeof(query), "session=%s&device=%s", session, APP_DEVICE_ID);
         if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_RESULT_INFO, query) != 0) {
             return -2;
         }
@@ -1182,6 +1204,26 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
             s_ai_resp_buf[resp_len < sizeof(s_ai_resp_buf) ? resp_len : (sizeof(s_ai_resp_buf) - 1u)] = '\0';
             app_ai_voice_result_info_t *info = &s_ai_result_info;
             app_ai_voice_parse_result_info(session, s_ai_resp_buf, resp_len, info);
+
+            if (info->session[0] != '\0' && strcmp(info->session, session) != 0) {
+                APP_LOGW(CANCEL_TAG,
+                         "old session response ignored, active=%s, got=%s",
+                         session,
+                         info->session);
+                return APP_AI_CANCELED_RET;
+            }
+
+            if (info->canceled) {
+                APP_LOGI(CANCEL_TAG, "backend reports session cancelled, session=%s", session);
+                return APP_AI_CANCELED_RET;
+            }
+
+            if (info->failed) {
+                APP_LOGW("AI-UI", "backend reports session failed");
+                (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
+                return -6;
+            }
 
             if (info->text_ready && !text_shown) {
                 APP_LOGI("AI-UI", "text_ready answer_len=%u", (unsigned int)strlen(info->answer_text));
@@ -1218,6 +1260,17 @@ static int app_ai_voice_wait_result_info(const char *session, uint32_t *total)
                     (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
                     return 0;
                 }
+            }
+
+            if (info->no_speech) {
+                APP_LOGI("AI-UI", "no_speech");
+                if (info->answer_text[0] != '\0') {
+                    (void)app_ui_set_ai_answer_text(info->answer_text);
+                } else {
+                    (void)app_ui_set_ai_answer_text("我没有听清，请再说一遍。");
+                }
+                (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
+                return APP_AI_TEXT_ONLY_RET;
             }
 
             if (info->text_ready && audio_wait_logged == 0u) {
@@ -1278,6 +1331,10 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
             APP_LOGW(CANCEL_TAG, "old session response ignored, session=%s", ctx->session);
             return APP_AI_CANCELED_RET;
         }
+        if (!app_ai_voice_is_audio_fetch_allowed(ctx->session)) {
+            APP_LOGI("AI-UI", "reply download stopped by state");
+            return APP_AI_PLAY_STOPPED_RET;
+        }
 
         uint32_t chunk_len = ctx->total - offset;
         if (chunk_len > APP_AI_REPLY_CHUNK_BYTES) {
@@ -1290,8 +1347,9 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
         static const uint8_t empty_json[] = "{}";
         snprintf(query,
                  sizeof(query),
-                 "session=%s&offset=%u&len=%u",
+                 "session=%s&device=%s&offset=%u&len=%u",
                  ctx->session,
+                 APP_DEVICE_ID,
                  (unsigned int)offset,
                  (unsigned int)chunk_len);
         if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK, query) != 0) {
@@ -1314,12 +1372,19 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
             APP_LOGW(CANCEL_TAG, "old session response ignored, session=%s", ctx->session);
             return APP_AI_CANCELED_RET;
         }
-        if (ret != 0 || resp_len != chunk_len) {
+        if (!app_ai_voice_is_audio_fetch_allowed(ctx->session)) {
+            APP_LOGI("AI-UI", "reply chunk ignored after playback state changed");
+            return APP_AI_PLAY_STOPPED_RET;
+        }
+        if (ret != 0 ||
+            resp_len == 0u ||
+            resp_len > chunk_len ||
+            (resp_len < chunk_len && offset + resp_len < ctx->total)) {
             APP_LOGW(TAG,
-                     "AI 回复分片下载失败, offset=%u, expect=%u, got=%u, ret=%d",
-                     (unsigned int)offset,
-                     (unsigned int)chunk_len,
-                     (unsigned int)resp_len,
+                      "AI 回复分片下载失败, offset=%u, expect=%u, got=%u, ret=%d",
+                      (unsigned int)offset,
+                      (unsigned int)chunk_len,
+                      (unsigned int)resp_len,
                      ret);
             return ret != 0 ? ret : -3;
         }
@@ -1334,7 +1399,7 @@ static int app_ai_voice_fetch_result_chunks(app_ai_voice_reply_playback_ctx_t *c
             return ret;
         }
 
-        offset += chunk_len;
+        offset += resp_len;
     }
 
     return app_ai_voice_wav_stream_finish(&stream);
@@ -1730,7 +1795,10 @@ static void app_ai_voice_task(void *arg)
                     (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
                     app_ai_voice_clear_reply_state();
                     app_ai_voice_set_state(APP_AI_STATE_CANCELED);
-                } else if (ret != 0 && ret != -4 && ret != -5) {
+                } else if (ret != 0 &&
+                           ret != -4 &&
+                           ret != -5 &&
+                           ret != APP_AI_TEXT_ONLY_RET) {
                     (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
                     (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
                     app_ai_voice_set_state(APP_AI_STATE_FAILED);
@@ -1775,7 +1843,11 @@ static void app_ai_voice_task(void *arg)
                 }
             }
 
-            if (ret != 0) {
+            if (ret != 0 &&
+                ret != APP_AI_CANCELED_RET &&
+                ret != APP_AI_TEXT_ONLY_RET &&
+                ret != -4 &&
+                ret != -5) {
                 APP_LOGW(TAG, "AI 分片问答失败, ret=%d", ret);
             }
         } else {

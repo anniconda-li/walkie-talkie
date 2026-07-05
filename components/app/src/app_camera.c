@@ -898,7 +898,7 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
     uint32_t resp_len = 0u;
     char url[256];
     char query[96];
-    snprintf(query, sizeof(query), "device=%s", APP_BUSINESS_DEVICE_NAME);
+    snprintf(query, sizeof(query), "device=%s", APP_DEVICE_ID);
     ret = app_camera_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_CAMERA_UPLOAD, query);
     if (ret != 0) {
         APP_LOGW(TAG, "相机上传 URL 构造失败, ret=%d", ret);

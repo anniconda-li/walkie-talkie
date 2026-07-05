@@ -288,7 +288,7 @@ static uint16_t app_intercom_build_packet(uint8_t *out,
     app_intercom_write_u32(&out[12], osal_get_tick_ms());
     /* 设备名固定 16 字节，短名后面补 0，便于服务器原样转发和客户端比较。 */
     memset(&out[16], 0, APP_INTERCOM_DEVICE_FIELD_LEN);
-    strncpy((char *)&out[16], APP_BUSINESS_DEVICE_NAME, APP_INTERCOM_DEVICE_FIELD_LEN - 1u);
+    strncpy((char *)&out[16], APP_DEVICE_ID, APP_INTERCOM_DEVICE_FIELD_LEN - 1u);
     app_intercom_write_u16(&out[32], payload_len);
 
     if (payload != NULL && payload_len > 0u) {
@@ -357,7 +357,7 @@ static int app_intercom_packet_is_own(const uint8_t *packet)
 
     memcpy(name, &packet[16], APP_INTERCOM_DEVICE_FIELD_LEN);
     name[APP_INTERCOM_DEVICE_FIELD_LEN] = '\0';
-    return strncmp(name, APP_BUSINESS_DEVICE_NAME, APP_INTERCOM_DEVICE_FIELD_LEN) == 0;
+    return strncmp(name, APP_DEVICE_ID, APP_INTERCOM_DEVICE_FIELD_LEN) == 0;
 }
 
 /**
