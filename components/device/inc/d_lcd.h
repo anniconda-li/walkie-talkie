@@ -105,14 +105,6 @@ int d_lcd_is_initialized(void);
 int d_lcd_display_on(int on);
 
 /**
- * @brief 设置 LCD 背光亮度。
- *
- * @param[in] percent 亮度百分比，范围 0-100；0 表示背光关闭。
- * @return 成功返回 0；失败返回负值。
- */
-int d_lcd_set_brightness(uint8_t percent);
-
-/**
  * @brief 绘制 RGB565 位图。
  *
  * @param[in] x_start 起始 X 坐标。

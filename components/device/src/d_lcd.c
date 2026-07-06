@@ -5,9 +5,10 @@
 #include "d_lcd.h"
 
 #include "d_config.h"
+#include "d_pca9557.h"
 #include "wdriver_i2c.h"
 #include "wdriver_spi.h"
-#include "driver/ledc.h"
+#include "driver/gpio.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
@@ -68,14 +69,6 @@ static const char *TAG = "d_lcd";
  */
 #define D_LCD_PREVIEW_SWAP_RGB565_BYTES 0
 
-#define D_LCD_BACKLIGHT_LEDC_MODE       LEDC_LOW_SPEED_MODE
-#define D_LCD_BACKLIGHT_LEDC_TIMER      LEDC_TIMER_1
-#define D_LCD_BACKLIGHT_LEDC_CHANNEL    LEDC_CHANNEL_1
-#define D_LCD_BACKLIGHT_LEDC_RESOLUTION LEDC_TIMER_13_BIT
-#define D_LCD_BACKLIGHT_LEDC_FREQ_HZ    5000u
-#define D_LCD_BACKLIGHT_DUTY_MAX        ((1u << 13) - 1u)
-#define D_LCD_DEFAULT_BRIGHTNESS        80u
-
 /**
  * @brief LCD 显示面板 IO 句柄。
  */
@@ -105,19 +98,12 @@ static size_t s_lcd_dma_bounce_size = 0u;
 /** @brief 当前可稳定分配的 DMA 中转缓冲行数。 */
 static size_t s_lcd_dma_bounce_lines = D_LCD_DMA_BOUNCE_LINES;
 
-/** @brief 背光 PWM 是否已初始化。 */
-static uint8_t s_lcd_backlight_pwm_ready = 0u;
-
-/** @brief 当前背光亮度百分比。 */
-static uint8_t s_lcd_brightness_percent = D_LCD_DEFAULT_BRIGHTNESS;
-
 #if D_LCD_PREVIEW_DIRECT_RAMWR
 /** @brief 整帧 polling RAMWR 是否仍可尝试。 */
 static uint8_t s_lcd_direct_ramwr_available = 1u;
 #endif
 
 static int d_lcd_err_to_int(int ret);
-static int d_lcd_backlight_pwm_init(void);
 static int d_lcd_set_backlight(int on);
 static int d_lcd_draw_bitmap_bounced(int x_start,
                                           int y_start,
@@ -185,74 +171,20 @@ static int d_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-static int d_lcd_backlight_pwm_init(void)
-{
-    if (s_lcd_backlight_pwm_ready != 0u) {
-        return 0;
-    }
-
-    ledc_timer_config_t timer_cfg = {
-        .speed_mode = D_LCD_BACKLIGHT_LEDC_MODE,
-        .duty_resolution = D_LCD_BACKLIGHT_LEDC_RESOLUTION,
-        .timer_num = D_LCD_BACKLIGHT_LEDC_TIMER,
-        .freq_hz = D_LCD_BACKLIGHT_LEDC_FREQ_HZ,
-        .clk_cfg = LEDC_AUTO_CLK,
-    };
-    int ret = d_lcd_err_to_int(ledc_timer_config(&timer_cfg));
-    if (ret != 0) {
-        D_LOGE(TAG, "LCD 背光 PWM timer 初始化失败, ret=%d", ret);
-        return ret;
-    }
-
-    ledc_channel_config_t channel_cfg = {
-        .gpio_num = d_lcd_BL_IO,
-        .speed_mode = D_LCD_BACKLIGHT_LEDC_MODE,
-        .channel = D_LCD_BACKLIGHT_LEDC_CHANNEL,
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = D_LCD_BACKLIGHT_LEDC_TIMER,
-        .duty = 0,
-        .hpoint = 0,
-    };
-    ret = d_lcd_err_to_int(ledc_channel_config(&channel_cfg));
-    if (ret != 0) {
-        D_LOGE(TAG, "LCD 背光 PWM channel 初始化失败, io=%d, ret=%d", d_lcd_BL_IO, ret);
-        return ret;
-    }
-
-    s_lcd_backlight_pwm_ready = 1u;
-    D_LOGI(TAG, "LCD 背光 PWM 初始化完成, io=%d, freq=%u",
-           d_lcd_BL_IO,
-           (unsigned int)D_LCD_BACKLIGHT_LEDC_FREQ_HZ);
-    return 0;
-}
-
-static int d_lcd_apply_backlight_duty(uint8_t percent)
-{
-    if (percent > 100u) {
-        percent = 100u;
-    }
-    if (d_lcd_backlight_pwm_init() != 0) {
-        return -1;
-    }
-
-    uint32_t duty = ((uint32_t)percent * D_LCD_BACKLIGHT_DUTY_MAX) / 100u;
-    int ret = d_lcd_err_to_int(ledc_set_duty(D_LCD_BACKLIGHT_LEDC_MODE,
-                                             D_LCD_BACKLIGHT_LEDC_CHANNEL,
-                                             duty));
-    if (ret == 0) {
-        ret = d_lcd_err_to_int(ledc_update_duty(D_LCD_BACKLIGHT_LEDC_MODE,
-                                                D_LCD_BACKLIGHT_LEDC_CHANNEL));
-    }
-    if (ret != 0) {
-        D_LOGE(TAG, "LCD 背光亮度设置失败, percent=%u, ret=%d", (unsigned int)percent, ret);
-    }
-    return ret;
-}
-
-/** @brief 通过 PWM 控制 LCD 背光，高占空比更亮。 */
+/** @brief 控制 LCD 背光，高电平点亮；GPIO_NUM_NC 表示背光接在 PCA9557 IO4。 */
 static int d_lcd_set_backlight(int on)
 {
-    int ret = d_lcd_apply_backlight_duty(on != 0 ? s_lcd_brightness_percent : 0u);
+    int ret = 0;
+
+    if (d_lcd_BL_IO == GPIO_NUM_NC) {
+        ret = d_pca9557_set_lcd_backlight(on);
+        if (ret != 0) {
+            D_LOGE(TAG, "LCD 背光控制失败, pca_io=4, ret=%d", ret);
+        }
+        return ret;
+    }
+
+    ret = d_lcd_err_to_int(gpio_set_level(d_lcd_BL_IO, on != 0));
     if (ret != 0) {
         D_LOGE(TAG, "LCD 背光控制失败, io=%d, ret=%d", d_lcd_BL_IO, ret);
     } else {
@@ -282,7 +214,17 @@ int d_lcd_display_init(void)
         return 0;
     }
 
-    int ret = d_lcd_backlight_pwm_init();
+    int ret = 0;
+    if (d_lcd_BL_IO != GPIO_NUM_NC) {
+        gpio_config_t bl_cfg = {
+            .pin_bit_mask = 1ULL << d_lcd_BL_IO,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ret = d_lcd_err_to_int(gpio_config(&bl_cfg));
+    }
     if (ret == 0) {
         ret = d_lcd_set_backlight(0);
     }
@@ -527,24 +469,6 @@ int d_lcd_display_on(int on)
         D_LOGE(TAG, "LCD 显示开关失败, ret=%d", ret);
     }
 
-    return ret;
-}
-
-int d_lcd_set_brightness(uint8_t percent)
-{
-    if (percent > 100u) {
-        percent = 100u;
-    }
-
-    s_lcd_brightness_percent = percent;
-    int ret = 0;
-    if (s_lcd_panel != NULL && percent > 0u) {
-        ret = d_lcd_err_to_int(esp_lcd_panel_disp_on_off(s_lcd_panel, true));
-    }
-    if (ret == 0) {
-        ret = d_lcd_apply_backlight_duty(percent);
-    }
-    D_LOGI(TAG, "LCD 背光亮度=%u%%, ret=%d", (unsigned int)percent, ret);
     return ret;
 }
 
