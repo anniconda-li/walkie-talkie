@@ -24,20 +24,21 @@
  * ## 自定义应用层协议（基于 WTK1 魔数）
  * ```
  * Byte 0-3:  "WTK1" 魔数
- * Byte 4:    包类型（1=REGISTER, 2=CHANNEL, 3=PTT_START, 4=AUDIO, 5=PTT_STOP, 6=HEARTBEAT）
+ * Byte 4:    包类型（1=REGISTER, 2=CHANNEL, 3=PTT_START, 4=AUDIO, 5=PTT_STOP, 6=HEARTBEAT, 7=AUDIO_OPUS）
  * Byte 5:    头长度（固定 34）
  * Byte 6-7:  频道号（uint16 LE）
  * Byte 8-11: 序列号（uint32 LE）
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（仅 AUDIO 包有，PCM 16bit 单声道）
+ * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，AUDIO_OPUS 为 16kHz mono 20ms Opus 裸帧）
  * ```
  */
 #include "app_intercom.h"
 
 #include "app_business.h"
 #include "app_config.h"
+#include "decoder/impl/esp_opus_dec.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
@@ -108,6 +109,7 @@ typedef enum {
     APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（20ms PCM） */
     APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
     APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（空闲 3s 间隔） */
+    APP_INTERCOM_PKT_AUDIO_OPUS = 7, /**< 音频数据帧（20ms Opus，下行兼容） */
 } app_intercom_packet_type_t;
 
 /**
@@ -157,6 +159,12 @@ static uint32_t s_rx_play_log_ms = 0u;
 static uint8_t s_rx_buf[APP_INTERCOM_PACKET_MAX_BYTES * 2u];
 /** @brief UDP 接收播放 PCM 缓冲，单任务独占使用。 */
 static int16_t s_rx_pcm[APP_BUSINESS_FRAME_SAMPLES];
+/** @brief UDP 接收 Opus 解码输出缓冲，解码后再进入原 jitter buffer。 */
+static int16_t s_rx_opus_pcm[APP_BUSINESS_FRAME_SAMPLES];
+/** @brief UDP 接收 Opus 解码器句柄，仅 biz_udp_rx 任务使用。 */
+static void *s_rx_opus_dec = NULL;
+/** @brief UDP 接收 Opus 解码失败日志节流时间。 */
+static uint32_t s_rx_opus_fail_log_ms = 0u;
 /** @brief UDP 接收上一帧 PCM，用于缺包补偿。 */
 static int16_t s_rx_last_pcm[APP_BUSINESS_FRAME_SAMPLES];
 /** @brief UDP 接收 jitter buffer。 */
@@ -671,10 +679,15 @@ static void app_intercom_jitter_reset_for_source(const char *device, uint32_t se
     app_intercom_rx_stats_reset(seq);
 }
 
-static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
+static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *view,
+                                            const uint8_t *pcm,
+                                            uint16_t samples)
 {
-    if (view == NULL || view->payload == NULL || view->payload_len < sizeof(int16_t)) {
+    if (view == NULL || pcm == NULL || samples == 0u) {
         return;
+    }
+    if (samples > APP_BUSINESS_FRAME_SAMPLES) {
+        samples = APP_BUSINESS_FRAME_SAMPLES;
     }
 
     if (s_rx_jitter_ready == 0u ||
@@ -709,18 +722,117 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
         s_rx_stat_overwrite++;
     }
 
-    uint16_t samples = (uint16_t)(view->payload_len / sizeof(int16_t));
-    if (samples > APP_BUSINESS_FRAME_SAMPLES) {
-        samples = APP_BUSINESS_FRAME_SAMPLES;
-    }
-
     memset(frame->pcm, 0, sizeof(frame->pcm));
-    memcpy(frame->pcm, view->payload, (size_t)samples * sizeof(int16_t));
+    memcpy(frame->pcm, pcm, (size_t)samples * sizeof(int16_t));
     frame->samples = samples;
     frame->seq = view->seq;
     frame->valid = 1u;
     s_rx_jitter_last_enqueue_ms = now;
     app_intercom_rx_stats_log(now);
+}
+
+static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
+{
+    if (view == NULL || view->payload == NULL || view->payload_len < sizeof(int16_t)) {
+        return;
+    }
+
+    uint16_t samples = (uint16_t)(view->payload_len / sizeof(int16_t));
+    app_intercom_jitter_enqueue_pcm(view, view->payload, samples);
+}
+
+static int app_intercom_opus_decoder_ensure(void)
+{
+    if (s_rx_opus_dec != NULL) {
+        return 0;
+    }
+
+    esp_opus_dec_cfg_t cfg = ESP_OPUS_DEC_CONFIG_DEFAULT();
+    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
+    cfg.channel = ESP_AUDIO_MONO;
+    cfg.frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS;
+    cfg.self_delimited = false;
+
+    esp_audio_err_t ret = esp_opus_dec_open(&cfg, sizeof(cfg), &s_rx_opus_dec);
+    if (ret != ESP_AUDIO_ERR_OK) {
+        s_rx_opus_dec = NULL;
+        APP_LOGW(TAG, "UDP Opus解码器初始化失败, ret=%d", (int)ret);
+        return -1;
+    }
+
+    APP_LOGI(TAG, "UDP Opus下行解码已启用: 16kHz mono 20ms");
+    return 0;
+}
+
+static void app_intercom_opus_log_fail(const char *reason,
+                                       int ret,
+                                       uint32_t decoded_size,
+                                       uint16_t payload_len)
+{
+    uint32_t now = osal_get_tick_ms();
+    if ((uint32_t)(now - s_rx_opus_fail_log_ms) < 1000u) {
+        return;
+    }
+
+    APP_LOGW(TAG,
+             "UDP Opus解码失败: %s, ret=%d, payload=%u, decoded=%u",
+             reason != NULL ? reason : "unknown",
+             ret,
+             (unsigned int)payload_len,
+             (unsigned int)decoded_size);
+    s_rx_opus_fail_log_ms = now;
+}
+
+static int app_intercom_decode_opus_payload(const uint8_t *payload,
+                                            uint16_t payload_len,
+                                            int16_t *out_pcm,
+                                            uint16_t *out_samples)
+{
+    if (payload == NULL || payload_len == 0u || out_pcm == NULL || out_samples == NULL) {
+        return -1;
+    }
+    if (app_intercom_opus_decoder_ensure() != 0) {
+        return -1;
+    }
+
+    esp_audio_dec_in_raw_t raw = {
+        .buffer = (uint8_t *)payload,
+        .len = payload_len,
+        .consumed = 0u,
+        .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
+    };
+    esp_audio_dec_out_frame_t frame = {
+        .buffer = (uint8_t *)out_pcm,
+        .len = APP_BUSINESS_FRAME_BYTES,
+        .needed_size = 0u,
+        .decoded_size = 0u,
+    };
+    esp_audio_dec_info_t info = {0};
+
+    esp_audio_err_t ret = esp_opus_dec_decode(s_rx_opus_dec, &raw, &frame, &info);
+    if (ret != ESP_AUDIO_ERR_OK) {
+        (void)esp_opus_dec_reset(s_rx_opus_dec);
+        app_intercom_opus_log_fail("decode", (int)ret, frame.decoded_size, payload_len);
+        return -1;
+    }
+
+    if (frame.decoded_size == 0u ||
+        frame.decoded_size > APP_BUSINESS_FRAME_BYTES ||
+        (frame.decoded_size % sizeof(int16_t)) != 0u) {
+        (void)esp_opus_dec_reset(s_rx_opus_dec);
+        app_intercom_opus_log_fail("bad_size", 0, frame.decoded_size, payload_len);
+        return -1;
+    }
+
+    uint16_t samples = (uint16_t)(frame.decoded_size / sizeof(int16_t));
+    if (samples != APP_BUSINESS_FRAME_SAMPLES) {
+        (void)esp_opus_dec_reset(s_rx_opus_dec);
+        app_intercom_opus_log_fail("bad_samples", 0, frame.decoded_size, payload_len);
+        return -1;
+    }
+
+    *out_samples = samples;
+    return 0;
 }
 
 static void app_intercom_jitter_make_plc_frame(int16_t *out)
@@ -923,10 +1035,10 @@ static void app_intercom_heartbeat_task(void *arg)
  * ## 过滤规则
  * 1. 包频道 != 当前频道 → 忽略（不同频道的人说话听不到）
  * 2. 包来自本机 → 忽略（服务器会原样转发，过滤掉自己的回声）
- * 3. 包类型 != AUDIO → 忽略（控制包不需要本地处理）
+ * 3. 包类型 != AUDIO/AUDIO_OPUS → 忽略（控制包不需要本地处理）
  *
  * ## 播放
- * 如果是有效的音频包，将 payload（PCM 16bit）放入 jitter buffer。
+ * 如果是有效的音频包，将 PCM 或解码后的 Opus PCM 放入 jitter buffer。
  *
  * @param packet 完整包数据。
  * @param len    包长度。
@@ -946,6 +1058,14 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 
     if (view.type == APP_INTERCOM_PKT_AUDIO && view.payload_len > 0u) {
         app_intercom_jitter_enqueue(&view);
+    } else if (view.type == APP_INTERCOM_PKT_AUDIO_OPUS && view.payload_len > 0u) {
+        uint16_t samples = 0u;
+        if (app_intercom_decode_opus_payload(view.payload,
+                                             view.payload_len,
+                                             s_rx_opus_pcm,
+                                             &samples) == 0) {
+            app_intercom_jitter_enqueue_pcm(&view, (const uint8_t *)s_rx_opus_pcm, samples);
+        }
     }
 }
 
