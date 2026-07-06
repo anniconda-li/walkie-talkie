@@ -294,6 +294,7 @@ int service_init_screen(void)
         .get_panel = service_init_screen_get_panel,
         .get_touch = service_init_screen_get_touch,
         .display_on = d_lcd_display_on,
+        .set_brightness = d_lcd_set_brightness,
         .draw_rgb565 = service_init_screen_draw_rgb565,
         .hres = d_lcd_H_RES,
         .vres = d_lcd_V_RES,
