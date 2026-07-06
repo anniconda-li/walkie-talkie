@@ -37,7 +37,7 @@ void app_intercom_set_channel(int32_t channel);
  * @brief 开始 PTT 对讲发送。
  *
  * 该接口通常由 UI 长按事件调用。内部会唤醒 PTT 任务，由任务循环读取
- * 10ms PCM 帧并发送 UDP 音频包。
+ * 20ms PCM 帧并发送 UDP 音频包。
  *
  * @param[in] channel UI 当前频道号；小于等于 0 时沿用当前频道。
  */
