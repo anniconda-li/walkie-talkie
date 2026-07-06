@@ -113,8 +113,8 @@ extern "C" {
 #define APP_BUSINESS_AUDIO_BITS         16u
 /** @brief 业务统一 PCM 声道数，固定单声道。 */
 #define APP_BUSINESS_AUDIO_CHANNELS     1u
-/** @brief UDP 对讲单包 20ms PCM 样本数。 */
-#define APP_BUSINESS_FRAME_SAMPLES      320u
+/** @brief UDP 对讲单包 10ms PCM 样本数。 */
+#define APP_BUSINESS_FRAME_SAMPLES      160u
 /** @brief UDP 对讲单包 PCM 字节数。 */
 #define APP_BUSINESS_FRAME_BYTES        (APP_BUSINESS_FRAME_SAMPLES * sizeof(int16_t))
 /** @brief AI 单次录音最长时长，单位 ms。 */
