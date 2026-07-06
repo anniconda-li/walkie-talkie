@@ -31,7 +31,7 @@
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（仅 AUDIO 包有，前 1 帧为当前 PCM，可选携带上一帧 PCM 冗余）
+ * Byte 34+:  payload（仅 AUDIO 包有，PCM 16bit 单声道）
  * ```
  */
 #include "app_intercom.h"
@@ -54,17 +54,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
 /** @brief WTK1 协议固定包头长度。 */
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-/** @brief 单个 AUDIO 当前帧 payload，等于一帧 20ms PCM 字节数。 */
-#define APP_INTERCOM_AUDIO_FRAME_BYTES  APP_BUSINESS_FRAME_BYTES
-/** @brief AUDIO 包是否携带上一帧 PCM 冗余，用于修复随机丢单包。 */
-#define APP_INTERCOM_AUDIO_REDUNDANCY_ENABLED 1
-#if APP_INTERCOM_AUDIO_REDUNDANCY_ENABLED
-/** @brief 单个 AUDIO 包最大 payload，当前帧 + 上一帧冗余。 */
-#define APP_INTERCOM_PACKET_MAX_PAYLOAD (APP_INTERCOM_AUDIO_FRAME_BYTES * 2u)
-#else
-/** @brief 单个 AUDIO 包最大 payload，仅当前帧。 */
-#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_INTERCOM_AUDIO_FRAME_BYTES
-#endif
+/** @brief 单个 AUDIO 包最大 payload，等于一帧 20ms PCM 字节数。 */
+#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES
 /** @brief 单个 WTK1 包最大总长度，包含固定头和最大音频 payload。 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
 
@@ -208,8 +199,6 @@ static uint32_t s_rx_stat_duplicate = 0u;
 static uint32_t s_rx_stat_overwrite = 0u;
 /** @brief UDP RX 本统计窗口太超前导致播放指针前移的次数。 */
 static uint32_t s_rx_stat_far_ahead = 0u;
-/** @brief UDP RX 本统计窗口通过冗余 payload 恢复的帧数。 */
-static uint32_t s_rx_stat_recovered = 0u;
 
 /** @brief UDP 通道是否已连接就绪。
  *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
@@ -489,7 +478,6 @@ static void app_intercom_rx_stats_reset(uint32_t first_seq)
     s_rx_stat_duplicate = 0u;
     s_rx_stat_overwrite = 0u;
     s_rx_stat_far_ahead = 0u;
-    s_rx_stat_recovered = 0u;
 }
 
 static void app_intercom_rx_stats_note_audio(uint32_t seq)
@@ -527,7 +515,7 @@ static void app_intercom_rx_stats_log(uint32_t now)
     }
 
     APP_LOGI(TAG,
-             "UDP RX统计: device=%s, rx=%u, gap=%u/%u, late=%u, dup=%u, overwrite=%u, far=%u, recovered=%u, expected=%u, last_rx=%u, buffered=%u",
+             "UDP RX统计: device=%s, rx=%u, gap=%u/%u, late=%u, dup=%u, overwrite=%u, far=%u, expected=%u, last_rx=%u, buffered=%u",
              s_rx_jitter_device,
              (unsigned int)s_rx_stat_audio,
              (unsigned int)s_rx_stat_gap_events,
@@ -536,7 +524,6 @@ static void app_intercom_rx_stats_log(uint32_t now)
              (unsigned int)s_rx_stat_duplicate,
              (unsigned int)s_rx_stat_overwrite,
              (unsigned int)s_rx_stat_far_ahead,
-             (unsigned int)s_rx_stat_recovered,
              (unsigned int)s_rx_jitter_expected_seq,
              (unsigned int)s_rx_stat_last_seq,
              (unsigned int)app_intercom_jitter_count_ready());
@@ -549,7 +536,6 @@ static void app_intercom_rx_stats_log(uint32_t now)
     s_rx_stat_duplicate = 0u;
     s_rx_stat_overwrite = 0u;
     s_rx_stat_far_ahead = 0u;
-    s_rx_stat_recovered = 0u;
 }
 
 static void app_intercom_jitter_clear(void)
@@ -685,69 +671,6 @@ static void app_intercom_jitter_reset_for_source(const char *device, uint32_t se
     app_intercom_rx_stats_reset(seq);
 }
 
-static int app_intercom_jitter_store_frame(uint32_t seq,
-                                           const uint8_t *payload,
-                                           uint16_t payload_len,
-                                           uint8_t from_redundancy)
-{
-    if (payload == NULL || payload_len < sizeof(int16_t) || s_rx_jitter_ready == 0u) {
-        return 0;
-    }
-
-    uint32_t now = osal_get_tick_ms();
-
-    if (s_rx_jitter_playing && app_intercom_seq_before(seq, s_rx_jitter_expected_seq)) {
-        if (from_redundancy == 0u) {
-            s_rx_stat_late++;
-        }
-        app_intercom_rx_stats_log(now);
-        return 0;
-    }
-
-    uint32_t ahead = seq - s_rx_jitter_expected_seq;
-    if (ahead >= APP_INTERCOM_JITTER_FRAME_COUNT) {
-        if (from_redundancy != 0u) {
-            return 0;
-        }
-        s_rx_stat_far_ahead++;
-        s_rx_jitter_expected_seq = seq - (APP_INTERCOM_JITTER_FRAME_COUNT - 1u);
-        app_intercom_jitter_drop_before(s_rx_jitter_expected_seq);
-    }
-
-    uint32_t slot_index = seq % APP_INTERCOM_JITTER_FRAME_COUNT;
-    app_intercom_jitter_frame_t *frame = &s_rx_jitter[slot_index];
-    if (frame->valid && frame->seq == seq) {
-        if (from_redundancy == 0u) {
-            s_rx_stat_duplicate++;
-        }
-        app_intercom_rx_stats_log(now);
-        return 0;
-    }
-    if (frame->valid && frame->seq != seq) {
-        if (from_redundancy != 0u) {
-            return 0;
-        }
-        s_rx_stat_overwrite++;
-    }
-
-    uint16_t samples = (uint16_t)(payload_len / sizeof(int16_t));
-    if (samples > APP_BUSINESS_FRAME_SAMPLES) {
-        samples = APP_BUSINESS_FRAME_SAMPLES;
-    }
-
-    memset(frame->pcm, 0, sizeof(frame->pcm));
-    memcpy(frame->pcm, payload, (size_t)samples * sizeof(int16_t));
-    frame->samples = samples;
-    frame->seq = seq;
-    frame->valid = 1u;
-    s_rx_jitter_last_enqueue_ms = now;
-    if (from_redundancy != 0u) {
-        s_rx_stat_recovered++;
-    }
-    app_intercom_rx_stats_log(now);
-    return 1;
-}
-
 static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
 {
     if (view == NULL || view->payload == NULL || view->payload_len < sizeof(int16_t)) {
@@ -759,23 +682,45 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
         app_intercom_jitter_reset_for_source(view->device, view->seq);
     }
 
+    uint32_t now = osal_get_tick_ms();
     app_intercom_rx_stats_note_audio(view->seq);
-    (void)app_intercom_jitter_store_frame(view->seq, view->payload, view->payload_len, 0u);
 
-#if APP_INTERCOM_AUDIO_REDUNDANCY_ENABLED
-    if (view->seq != 0u &&
-        view->payload_len >= (uint16_t)(APP_INTERCOM_AUDIO_FRAME_BYTES * 2u)) {
-        uint32_t prev_seq = view->seq - 1u;
-        const uint8_t *prev_payload = &view->payload[APP_INTERCOM_AUDIO_FRAME_BYTES];
-        if (!app_intercom_seq_before(prev_seq, s_rx_jitter_expected_seq) &&
-            app_intercom_jitter_find(prev_seq) == NULL) {
-            (void)app_intercom_jitter_store_frame(prev_seq,
-                                                  prev_payload,
-                                                  APP_INTERCOM_AUDIO_FRAME_BYTES,
-                                                  1u);
-        }
+    if (s_rx_jitter_playing && app_intercom_seq_before(view->seq, s_rx_jitter_expected_seq)) {
+        s_rx_stat_late++;
+        app_intercom_rx_stats_log(now);
+        return;
     }
-#endif
+
+    uint32_t ahead = view->seq - s_rx_jitter_expected_seq;
+    if (ahead >= APP_INTERCOM_JITTER_FRAME_COUNT) {
+        s_rx_stat_far_ahead++;
+        s_rx_jitter_expected_seq = view->seq - (APP_INTERCOM_JITTER_FRAME_COUNT - 1u);
+        app_intercom_jitter_drop_before(s_rx_jitter_expected_seq);
+    }
+
+    uint32_t slot_index = view->seq % APP_INTERCOM_JITTER_FRAME_COUNT;
+    app_intercom_jitter_frame_t *frame = &s_rx_jitter[slot_index];
+    if (frame->valid && frame->seq == view->seq) {
+        s_rx_stat_duplicate++;
+        app_intercom_rx_stats_log(now);
+        return;
+    }
+    if (frame->valid && frame->seq != view->seq) {
+        s_rx_stat_overwrite++;
+    }
+
+    uint16_t samples = (uint16_t)(view->payload_len / sizeof(int16_t));
+    if (samples > APP_BUSINESS_FRAME_SAMPLES) {
+        samples = APP_BUSINESS_FRAME_SAMPLES;
+    }
+
+    memset(frame->pcm, 0, sizeof(frame->pcm));
+    memcpy(frame->pcm, view->payload, (size_t)samples * sizeof(int16_t));
+    frame->samples = samples;
+    frame->seq = view->seq;
+    frame->valid = 1u;
+    s_rx_jitter_last_enqueue_ms = now;
+    app_intercom_rx_stats_log(now);
 }
 
 static void app_intercom_jitter_make_plc_frame(int16_t *out)
@@ -1108,7 +1053,6 @@ static void app_intercom_ptt_task(void *arg)
 {
     (void)arg;
     int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
-    int16_t prev_pcm[APP_BUSINESS_FRAME_SAMPLES];  /* 上一帧 PCM，用于轻量冗余 */
     uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
@@ -1126,46 +1070,24 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        /* PTT 期间按固定 20ms PCM 帧发送；不做重传，完整帧会顺带携带上一帧冗余。 */
+        /* PTT 期间按固定 20ms PCM 帧发送，第一版不做编解码和重传。 */
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
         uint32_t read_ok = 0u;
         uint32_t read_fail = 0u;
         uint32_t send_ok = 0u;
         uint32_t send_fail = 0u;
-        uint32_t redundancy_sent = 0u;
-        uint16_t prev_samples = 0u;
-        uint8_t prev_valid = 0u;
         int last_read_ret = 0;
         int last_send_ret = 0;
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
                 read_ok++;
-                uint16_t current_bytes = (uint16_t)(samples * sizeof(int16_t));
-                uint16_t payload_len = current_bytes;
-#if APP_INTERCOM_AUDIO_REDUNDANCY_ENABLED
-                if (samples == (int)APP_BUSINESS_FRAME_SAMPLES &&
-                    prev_valid != 0u &&
-                    prev_samples == APP_BUSINESS_FRAME_SAMPLES) {
-                    payload_len = (uint16_t)(payload_len + APP_INTERCOM_AUDIO_FRAME_BYTES);
-                }
-#endif
+                uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
                 uint16_t packet_len = app_intercom_build_packet(packet,
                                                                 APP_INTERCOM_PKT_AUDIO,
-                                                                NULL,
+                                                                (const uint8_t *)pcm,
                                                                 payload_len);
                 if (packet_len > 0u) {
-                    memcpy(&packet[APP_INTERCOM_PACKET_HEADER_LEN],
-                           pcm,
-                           current_bytes);
-#if APP_INTERCOM_AUDIO_REDUNDANCY_ENABLED
-                    if (payload_len > current_bytes) {
-                        memcpy(&packet[APP_INTERCOM_PACKET_HEADER_LEN + current_bytes],
-                               prev_pcm,
-                               APP_INTERCOM_AUDIO_FRAME_BYTES);
-                        redundancy_sent++;
-                    }
-#endif
                     int send_ret = service_network_udp_send(packet, packet_len);
                     if (send_ret == 0) {
                         send_ok++;
@@ -1177,14 +1099,6 @@ static void app_intercom_ptt_task(void *arg)
                     send_fail++;
                     last_send_ret = -100;
                 }
-                if (samples == (int)APP_BUSINESS_FRAME_SAMPLES) {
-                    memcpy(prev_pcm, pcm, APP_INTERCOM_AUDIO_FRAME_BYTES);
-                    prev_samples = (uint16_t)samples;
-                    prev_valid = 1u;
-                } else {
-                    prev_valid = 0u;
-                    prev_samples = 0u;
-                }
             } else {
                 read_fail++;
                 last_read_ret = samples;
@@ -1193,12 +1107,11 @@ static void app_intercom_ptt_task(void *arg)
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
         APP_LOGI(TAG,
                  "PTT 发送统计: read_ok=%u, read_fail=%u, send_ok=%u, send_fail=%u, "
-                 "redundancy=%u, last_read=%d, last_send=%d",
+                 "last_read=%d, last_send=%d",
                  (unsigned int)read_ok,
                  (unsigned int)read_fail,
                  (unsigned int)send_ok,
                  (unsigned int)send_fail,
-                 (unsigned int)redundancy_sent,
                  last_read_ret,
                  last_send_ret);
         app_business_audio_session_end();
