@@ -97,8 +97,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
 #define APP_INTERCOM_JITTER_HIGH_WATER   48u
-/** @brief 发现当前帧缺失且已有后续帧时，立即跳过缺口继续播放真实音频。 */
-#define APP_INTERCOM_JITTER_RESYNC_MISSING 1u
+/** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放真实音频。 */
+#define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
 /** @brief 连续缺包补偿上限，超过后认为本次语音流中断。 */
 #define APP_INTERCOM_JITTER_MAX_MISSING  40u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */

@@ -179,6 +179,10 @@ int d_wifi_prepare(void)
     if (ret != 0) {
         return device_wifi_err_to_int(ret);
     }
+    ret = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ret != 0) {
+        D_LOGW(TAG, "WiFi 关闭省电模式失败, ret=%d", ret);
+    }
 
     s_wifi_prepared = 1;
     D_LOGI(TAG, "WiFi STA 资源准备完成");
