@@ -28,7 +28,6 @@ idf_component_register(
         wdriver
         lvgl__lvgl
         osal
-        espressif__esp_audio_codec
         esp_app_format
         nvs_flash
 
