@@ -62,8 +62,8 @@ static const char *TAG = "app_intercom";
 
 /** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     6144u
-/** @brief UDP 接收解析任务栈大小，播放启停会调用 codec/I2C，预留更深调用栈。 */
-#define APP_INTERCOM_RX_TASK_STACK      6144u
+/** @brief UDP 接收解析任务栈大小，播放/Opus 解码/日志格式化共用该任务，预留更深调用栈。 */
+#define APP_INTERCOM_RX_TASK_STACK      10240u
 /** @brief 心跳和 UDP 重连任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    6144u
 /** @brief PTT 开始采集前等待 UDP 就绪的最长时间。 */
@@ -100,6 +100,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_MAX_MISSING  25u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 300u
+/** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
+#define APP_INTERCOM_GAP_LOG_INTERVAL_MS 1000u
 
 /** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
@@ -189,6 +191,8 @@ static uint8_t s_rx_jitter_target_start = APP_INTERCOM_JITTER_START_FRAMES;
 static uint16_t s_rx_jitter_stable_frames = 0u;
 /** @brief UDP RX 统计日志节流时间。 */
 static uint32_t s_rx_stat_log_ms = 0u;
+/** @brief UDP RX 缺口跳帧日志节流时间。 */
+static uint32_t s_rx_gap_log_ms = 0u;
 /** @brief UDP RX 最近收到的音频序列号。 */
 static uint32_t s_rx_stat_last_seq = 0u;
 /** @brief UDP RX 是否已有上一帧序列号。 */
@@ -914,12 +918,15 @@ static void app_intercom_jitter_play_tick(void)
             if (app_intercom_jitter_find_next_seq(s_rx_jitter_expected_seq, &next_seq) != 0 &&
                 next_seq != s_rx_jitter_expected_seq) {
                 uint32_t skipped = next_seq - s_rx_jitter_expected_seq;
-                APP_LOGW(TAG, "UDP 音频跳过缺口, device=%s, from=%u, to=%u, skipped=%u, buffered=%u",
-                         s_rx_jitter_device,
-                         (unsigned int)s_rx_jitter_expected_seq,
-                         (unsigned int)next_seq,
-                         (unsigned int)skipped,
-                         (unsigned int)app_intercom_jitter_count_ready());
+                if ((uint32_t)(now - s_rx_gap_log_ms) >= APP_INTERCOM_GAP_LOG_INTERVAL_MS) {
+                    APP_LOGW(TAG, "UDP 音频跳过缺口, device=%s, from=%u, to=%u, skipped=%u, buffered=%u",
+                             s_rx_jitter_device,
+                             (unsigned int)s_rx_jitter_expected_seq,
+                             (unsigned int)next_seq,
+                             (unsigned int)skipped,
+                             (unsigned int)app_intercom_jitter_count_ready());
+                    s_rx_gap_log_ms = now;
+                }
                 s_rx_jitter_expected_seq = next_seq;
                 s_rx_jitter_missing = 0u;
                 frame = app_intercom_jitter_find(s_rx_jitter_expected_seq);
@@ -1247,7 +1254,7 @@ static void app_intercom_ptt_task(void *arg)
  *
  * ## 创建的任务
  * - biz_ptt（优先级 6, 栈 6144）—— PTT 发送
- * - biz_udp_rx（优先级 5, 栈 4096）—— UDP 接收
+ * - biz_udp_rx（优先级 5, 栈 10240）—— UDP 接收
  * - biz_heartbeat（优先级 4, 栈 6144）—— 心跳 + 重连
  *
  * 同时尝试首次 UDP 连接。
