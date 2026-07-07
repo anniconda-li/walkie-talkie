@@ -9,7 +9,7 @@
  * 2. 检查音频会话是否被 AI 占用 → 若空闲则置 s_ptt_active = 1
  * 3. notify_give(biz_ptt) → 唤醒 PTT 任务
  * 4. PTT 任务抢占音频会话锁 → 发 PTT_START 控制包
- * 5. 循环：读麦克风 320 samples(20ms) → 封装协议头 → UDP 发送
+ * 5. 循环：读麦克风 320 samples(20ms)，聚合 2 帧(40ms) → 封装协议头 → UDP 发送
  * 6. 用户松手 → s_ptt_active = 0 → 循环退出 → 发 PTT_STOP
  * 7. 释放音频会话锁 → notify_take 阻塞等待下次
  *
@@ -24,21 +24,20 @@
  * ## 自定义应用层协议（基于 WTK1 魔数）
  * ```
  * Byte 0-3:  "WTK1" 魔数
- * Byte 4:    包类型（1=REGISTER, 2=CHANNEL, 3=PTT_START, 4=AUDIO, 5=PTT_STOP, 6=HEARTBEAT, 7=AUDIO_OPUS）
+ * Byte 4:    包类型（1=REGISTER, 2=CHANNEL, 3=PTT_START, 4=AUDIO, 5=PTT_STOP, 6=HEARTBEAT）
  * Byte 5:    头长度（固定 34）
  * Byte 6-7:  频道号（uint16 LE）
  * Byte 8-11: 序列号（uint32 LE）
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，AUDIO_OPUS 为 16kHz mono 20ms Opus 裸帧）
+ * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，当前聚合 40ms）
  * ```
  */
 #include "app_intercom.h"
 
 #include "app_business.h"
 #include "app_config.h"
-#include "decoder/impl/esp_opus_dec.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
@@ -55,14 +54,18 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
 /** @brief WTK1 协议固定包头长度。 */
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-/** @brief 单个 AUDIO 包最大 payload，等于一帧 20ms PCM 字节数。 */
-#define APP_INTERCOM_PACKET_MAX_PAYLOAD APP_BUSINESS_FRAME_BYTES
+/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，2 帧即 40ms/包。 */
+#define APP_INTERCOM_PACKET_FRAMES      2u
+/** @brief 单个 AUDIO 包最大 PCM 样本数。 */
+#define APP_INTERCOM_PACKET_SAMPLES     (APP_BUSINESS_FRAME_SAMPLES * APP_INTERCOM_PACKET_FRAMES)
+/** @brief 单个 AUDIO 包最大 payload，当前为 40ms PCM 字节数。 */
+#define APP_INTERCOM_PACKET_MAX_PAYLOAD (APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t))
 /** @brief 单个 WTK1 包最大总长度，包含固定头和最大音频 payload。 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
 
-/** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
-#define APP_INTERCOM_PTT_TASK_STACK     6144u
-/** @brief UDP 接收解析任务栈大小，播放/Opus 解码/日志格式化共用该任务，预留更深调用栈。 */
+/** @brief PTT 发送任务栈大小，需容纳 40ms 聚合包缓冲和 service_audio_read 调用栈。 */
+#define APP_INTERCOM_PTT_TASK_STACK     8192u
+/** @brief UDP 接收解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
 #define APP_INTERCOM_RX_TASK_STACK      10240u
 /** @brief 心跳和 UDP 重连任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    6144u
@@ -80,24 +83,24 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_READ_IDLE_TIMEOUT_MS 20u
 /** @brief UDP 接收播放中轮询超时，避免网络读取阻塞播放节奏。 */
 #define APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS 4u
-/** @brief UDP 对讲固定音频帧时长。 */
-#define APP_INTERCOM_AUDIO_FRAME_MS      20u
-/** @brief jitter buffer 容量，32 帧约 640ms。 */
+/** @brief UDP 对讲固定音频包时长。 */
+#define APP_INTERCOM_AUDIO_FRAME_MS      (20u * APP_INTERCOM_PACKET_FRAMES)
+/** @brief jitter buffer 容量，32 包约 1280ms。 */
 #define APP_INTERCOM_JITTER_FRAME_COUNT  32u
-/** @brief 正常网络下的起播缓存帧数，10 帧约 200ms。 */
-#define APP_INTERCOM_JITTER_START_FRAMES 10u
-/** @brief 抖动网络下的最大起播缓存帧数，16 帧约 320ms。 */
-#define APP_INTERCOM_JITTER_MAX_START_FRAMES 16u
-/** @brief 稳定播放这么多帧后，逐步降低自适应起播水位。 */
-#define APP_INTERCOM_JITTER_RECOVER_FRAMES 400u
+/** @brief 正常网络下的起播缓存包数，5 包约 200ms。 */
+#define APP_INTERCOM_JITTER_START_FRAMES 5u
+/** @brief 抖动网络下的最大起播缓存包数，8 包约 320ms。 */
+#define APP_INTERCOM_JITTER_MAX_START_FRAMES 8u
+/** @brief 稳定播放这么多包后，逐步降低自适应起播水位。 */
+#define APP_INTERCOM_JITTER_RECOVER_FRAMES 200u
 /** @brief jitter buffer 低水位，低于此值时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
-#define APP_INTERCOM_JITTER_HIGH_WATER   24u
+#define APP_INTERCOM_JITTER_HIGH_WATER   12u
 /** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放。 */
 #define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
-/** @brief 连续缺帧补偿上限，超过后认为本次语音流中断。 */
-#define APP_INTERCOM_JITTER_MAX_MISSING  25u
+/** @brief 连续缺包补偿上限，超过后认为本次语音流中断。 */
+#define APP_INTERCOM_JITTER_MAX_MISSING  12u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 300u
 /** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
@@ -108,10 +111,9 @@ typedef enum {
     APP_INTERCOM_PKT_REGISTER = 1,  /**< 设备注册（上报设备名到服务器） */
     APP_INTERCOM_PKT_CHANNEL = 2,   /**< 频道切换 */
     APP_INTERCOM_PKT_PTT_START = 3, /**< PTT 开始（对讲键按下） */
-    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（20ms PCM） */
+    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（40ms PCM） */
     APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
     APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（空闲 3s 间隔） */
-    APP_INTERCOM_PKT_AUDIO_OPUS = 7, /**< 音频数据帧（20ms Opus，下行兼容） */
 } app_intercom_packet_type_t;
 
 /**
@@ -135,7 +137,7 @@ typedef struct {
     uint8_t valid;                                  /**< 槽位是否有可播放帧。 */
     uint32_t seq;                                  /**< 对应协议序列号。 */
     uint16_t samples;                              /**< PCM 样本数。 */
-    int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /**< 固定 20ms PCM 帧。 */
+    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 固定 40ms PCM 包。 */
 } app_intercom_jitter_frame_t;
 
 /* ==========================================================================
@@ -160,15 +162,9 @@ static uint32_t s_rx_play_log_ms = 0u;
 /** @brief UDP 接收解析缓冲，放在静态区避免挤占 biz_udp_rx 任务栈。 */
 static uint8_t s_rx_buf[APP_INTERCOM_PACKET_MAX_BYTES * 2u];
 /** @brief UDP 接收播放 PCM 缓冲，单任务独占使用。 */
-static int16_t s_rx_pcm[APP_BUSINESS_FRAME_SAMPLES];
-/** @brief UDP 接收 Opus 解码输出缓冲，解码后再进入原 jitter buffer。 */
-static int16_t s_rx_opus_pcm[APP_BUSINESS_FRAME_SAMPLES];
-/** @brief UDP 接收 Opus 解码器句柄，仅 biz_udp_rx 任务使用。 */
-static void *s_rx_opus_dec = NULL;
-/** @brief UDP 接收 Opus 解码失败日志节流时间。 */
-static uint32_t s_rx_opus_fail_log_ms = 0u;
+static int16_t s_rx_pcm[APP_INTERCOM_PACKET_SAMPLES];
 /** @brief UDP 接收上一帧 PCM，用于缺包补偿。 */
-static int16_t s_rx_last_pcm[APP_BUSINESS_FRAME_SAMPLES];
+static int16_t s_rx_last_pcm[APP_INTERCOM_PACKET_SAMPLES];
 /** @brief UDP 接收 jitter buffer。 */
 static app_intercom_jitter_frame_t s_rx_jitter[APP_INTERCOM_JITTER_FRAME_COUNT];
 /** @brief jitter buffer 当前语音流来源设备名。 */
@@ -690,8 +686,8 @@ static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *vi
     if (view == NULL || pcm == NULL || samples == 0u) {
         return;
     }
-    if (samples > APP_BUSINESS_FRAME_SAMPLES) {
-        samples = APP_BUSINESS_FRAME_SAMPLES;
+    if (samples > APP_INTERCOM_PACKET_SAMPLES) {
+        samples = APP_INTERCOM_PACKET_SAMPLES;
     }
 
     if (s_rx_jitter_ready == 0u ||
@@ -745,100 +741,6 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
     app_intercom_jitter_enqueue_pcm(view, view->payload, samples);
 }
 
-static int app_intercom_opus_decoder_ensure(void)
-{
-    if (s_rx_opus_dec != NULL) {
-        return 0;
-    }
-
-    esp_opus_dec_cfg_t cfg = ESP_OPUS_DEC_CONFIG_DEFAULT();
-    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
-    cfg.channel = ESP_AUDIO_MONO;
-    cfg.frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS;
-    cfg.self_delimited = false;
-
-    esp_audio_err_t ret = esp_opus_dec_open(&cfg, sizeof(cfg), &s_rx_opus_dec);
-    if (ret != ESP_AUDIO_ERR_OK) {
-        s_rx_opus_dec = NULL;
-        APP_LOGW(TAG, "UDP Opus解码器初始化失败, ret=%d", (int)ret);
-        return -1;
-    }
-
-    APP_LOGI(TAG, "UDP Opus下行解码已启用: 16kHz mono 20ms");
-    return 0;
-}
-
-static void app_intercom_opus_log_fail(const char *reason,
-                                       int ret,
-                                       uint32_t decoded_size,
-                                       uint16_t payload_len)
-{
-    uint32_t now = osal_get_tick_ms();
-    if ((uint32_t)(now - s_rx_opus_fail_log_ms) < 1000u) {
-        return;
-    }
-
-    APP_LOGW(TAG,
-             "UDP Opus解码失败: %s, ret=%d, payload=%u, decoded=%u",
-             reason != NULL ? reason : "unknown",
-             ret,
-             (unsigned int)payload_len,
-             (unsigned int)decoded_size);
-    s_rx_opus_fail_log_ms = now;
-}
-
-static int app_intercom_decode_opus_payload(const uint8_t *payload,
-                                            uint16_t payload_len,
-                                            int16_t *out_pcm,
-                                            uint16_t *out_samples)
-{
-    if (payload == NULL || payload_len == 0u || out_pcm == NULL || out_samples == NULL) {
-        return -1;
-    }
-    if (app_intercom_opus_decoder_ensure() != 0) {
-        return -1;
-    }
-
-    esp_audio_dec_in_raw_t raw = {
-        .buffer = (uint8_t *)payload,
-        .len = payload_len,
-        .consumed = 0u,
-        .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
-    };
-    esp_audio_dec_out_frame_t frame = {
-        .buffer = (uint8_t *)out_pcm,
-        .len = APP_BUSINESS_FRAME_BYTES,
-        .needed_size = 0u,
-        .decoded_size = 0u,
-    };
-    esp_audio_dec_info_t info = {0};
-
-    esp_audio_err_t ret = esp_opus_dec_decode(s_rx_opus_dec, &raw, &frame, &info);
-    if (ret != ESP_AUDIO_ERR_OK) {
-        (void)esp_opus_dec_reset(s_rx_opus_dec);
-        app_intercom_opus_log_fail("decode", (int)ret, frame.decoded_size, payload_len);
-        return -1;
-    }
-
-    if (frame.decoded_size == 0u ||
-        frame.decoded_size > APP_BUSINESS_FRAME_BYTES ||
-        (frame.decoded_size % sizeof(int16_t)) != 0u) {
-        (void)esp_opus_dec_reset(s_rx_opus_dec);
-        app_intercom_opus_log_fail("bad_size", 0, frame.decoded_size, payload_len);
-        return -1;
-    }
-
-    uint16_t samples = (uint16_t)(frame.decoded_size / sizeof(int16_t));
-    if (samples != APP_BUSINESS_FRAME_SAMPLES) {
-        (void)esp_opus_dec_reset(s_rx_opus_dec);
-        app_intercom_opus_log_fail("bad_samples", 0, frame.decoded_size, payload_len);
-        return -1;
-    }
-
-    *out_samples = samples;
-    return 0;
-}
-
 static void app_intercom_jitter_make_plc_frame(int16_t *out)
 {
     int scale = 0;
@@ -851,7 +753,7 @@ static void app_intercom_jitter_make_plc_frame(int16_t *out)
         scale = 1;
     }
 
-    for (uint32_t i = 0u; i < APP_BUSINESS_FRAME_SAMPLES; i++) {
+    for (uint32_t i = 0u; i < APP_INTERCOM_PACKET_SAMPLES; i++) {
         out[i] = (int16_t)(((int32_t)s_rx_last_pcm[i] * scale) / 4);
     }
 }
@@ -901,7 +803,7 @@ static void app_intercom_jitter_play_tick(void)
     }
 
     app_intercom_jitter_frame_t *frame = app_intercom_jitter_find(s_rx_jitter_expected_seq);
-    uint16_t samples = APP_BUSINESS_FRAME_SAMPLES;
+    uint16_t samples = APP_INTERCOM_PACKET_SAMPLES;
     uint8_t played_real_frame = 0u;
     if (frame != NULL) {
         memcpy(s_rx_pcm, frame->pcm, sizeof(s_rx_pcm));
@@ -1032,6 +934,26 @@ static void app_intercom_heartbeat_task(void *arg)
     }
 }
 
+static int app_intercom_send_audio_packet(uint8_t *packet,
+                                          const int16_t *pcm,
+                                          uint16_t samples)
+{
+    if (packet == NULL || pcm == NULL || samples == 0u || samples > APP_INTERCOM_PACKET_SAMPLES) {
+        return -1;
+    }
+
+    uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
+    uint16_t packet_len = app_intercom_build_packet(packet,
+                                                    APP_INTERCOM_PKT_AUDIO,
+                                                    (const uint8_t *)pcm,
+                                                    payload_len);
+    if (packet_len == 0u) {
+        return -2;
+    }
+
+    return service_network_udp_send(packet, packet_len);
+}
+
 /* ==========================================================================
  * UDP 接收任务
  * ========================================================================== */
@@ -1042,10 +964,10 @@ static void app_intercom_heartbeat_task(void *arg)
  * ## 过滤规则
  * 1. 包频道 != 当前频道 → 忽略（不同频道的人说话听不到）
  * 2. 包来自本机 → 忽略（服务器会原样转发，过滤掉自己的回声）
- * 3. 包类型 != AUDIO/AUDIO_OPUS → 忽略（控制包不需要本地处理）
+ * 3. 包类型 != AUDIO → 忽略（控制包不需要本地处理）
  *
  * ## 播放
- * 如果是有效的音频包，将 PCM 或解码后的 Opus PCM 放入 jitter buffer。
+ * 如果是有效的音频包，将 PCM 放入 jitter buffer。
  *
  * @param packet 完整包数据。
  * @param len    包长度。
@@ -1065,14 +987,6 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 
     if (view.type == APP_INTERCOM_PKT_AUDIO && view.payload_len > 0u) {
         app_intercom_jitter_enqueue(&view);
-    } else if (view.type == APP_INTERCOM_PKT_AUDIO_OPUS && view.payload_len > 0u) {
-        uint16_t samples = 0u;
-        if (app_intercom_decode_opus_payload(view.payload,
-                                             view.payload_len,
-                                             s_rx_opus_pcm,
-                                             &samples) == 0) {
-            app_intercom_jitter_enqueue_pcm(&view, (const uint8_t *)s_rx_opus_pcm, samples);
-        }
     }
 }
 
@@ -1085,7 +999,7 @@ static void app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
  * - 半包：一个完整包可能跨两次 read
  *
  * ## 处理策略
- * 1. 维护一个内部接收环形缓冲区 rx[1348]（= 最大包长 × 2）
+ * 1. 维护一个内部接收缓冲区 rx[最大包长 × 2]
  * 2. 每次读取追加到 used 之后
  * 3. 从 pos 开始扫描 WTK1 魔数
  * 4. 找到魔数 → 解析头长度和 payload 长度 → 判断是否完整包
@@ -1161,16 +1075,17 @@ static void app_intercom_udp_rx_task(void *arg)
  * 3. 发送 PTT_START 控制包（通知服务器和同频道其他人）
  * 4. 循环（while (s_ptt_active)）：
  *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
- *    b. app_intercom_build_packet(packet, AUDIO, pcm, 640)
- *    c. service_network_udp_send(packet, len) —— 发给服务器
- *    d. 服务器收到后原样转发给同频道所有其他客户端
+ *    b. 聚合 2 帧为 40ms PCM 包
+ *    c. app_intercom_build_packet(packet, AUDIO, pcm, 1280)
+ *    d. service_network_udp_send(packet, len) —— 发给服务器
+ *    e. 服务器收到后原样转发给同频道所有其他客户端
  * 5. 用户松手 → s_ptt_active = 0 → 退出循环
  * 6. 发送 PTT_STOP 控制包
  * 7. 打印发送统计（成功/失败帧数）
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
- * - 每帧 20ms (320 samples × 16bit = 640 字节)
+ * - 每包 40ms (640 samples × 16bit = 1280 字节)，降低 UDP 发包频率
  * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
  * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
  *
@@ -1180,6 +1095,7 @@ static void app_intercom_ptt_task(void *arg)
 {
     (void)arg;
     int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
+    int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES];    /* 40ms PCM 聚合包缓冲 */
     uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
@@ -1197,8 +1113,9 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        /* PTT 期间按固定 20ms PCM 帧发送，第一版不做编解码和重传。 */
+        /* PTT 期间按固定 40ms PCM 包发送，不做编解码和重传。 */
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
+        uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
         uint32_t read_fail = 0u;
         uint32_t send_ok = 0u;
@@ -1209,26 +1126,44 @@ static void app_intercom_ptt_task(void *arg)
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
                 read_ok++;
-                uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
-                uint16_t packet_len = app_intercom_build_packet(packet,
-                                                                APP_INTERCOM_PKT_AUDIO,
-                                                                (const uint8_t *)pcm,
-                                                                payload_len);
-                if (packet_len > 0u) {
-                    int send_ret = service_network_udp_send(packet, packet_len);
+                uint16_t offset = 0u;
+                while (offset < (uint16_t)samples) {
+                    uint16_t space = (uint16_t)(APP_INTERCOM_PACKET_SAMPLES - tx_samples);
+                    uint16_t copy_samples = (uint16_t)samples - offset;
+                    if (copy_samples > space) {
+                        copy_samples = space;
+                    }
+                    memcpy(&tx_pcm[tx_samples],
+                           &pcm[offset],
+                           (size_t)copy_samples * sizeof(int16_t));
+                    tx_samples = (uint16_t)(tx_samples + copy_samples);
+                    offset = (uint16_t)(offset + copy_samples);
+
+                    if (tx_samples < APP_INTERCOM_PACKET_SAMPLES) {
+                        continue;
+                    }
+
+                    int send_ret = app_intercom_send_audio_packet(packet, tx_pcm, tx_samples);
                     if (send_ret == 0) {
                         send_ok++;
                     } else {
                         send_fail++;
                         last_send_ret = send_ret;
                     }
-                } else {
-                    send_fail++;
-                    last_send_ret = -100;
+                    tx_samples = 0u;
                 }
             } else {
                 read_fail++;
                 last_read_ret = samples;
+            }
+        }
+        if (tx_samples > 0u) {
+            int send_ret = app_intercom_send_audio_packet(packet, tx_pcm, tx_samples);
+            if (send_ret == 0) {
+                send_ok++;
+            } else {
+                send_fail++;
+                last_send_ret = send_ret;
             }
         }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
@@ -1253,7 +1188,7 @@ static void app_intercom_ptt_task(void *arg)
  * @brief 启动对讲模块（开机时由 app_business_start 调用）。
  *
  * ## 创建的任务
- * - biz_ptt（优先级 6, 栈 6144）—— PTT 发送
+ * - biz_ptt（优先级 6, 栈 8192）—— PTT 发送
  * - biz_udp_rx（优先级 5, 栈 10240）—— UDP 接收
  * - biz_heartbeat（优先级 4, 栈 6144）—— 心跳 + 重连
  *
