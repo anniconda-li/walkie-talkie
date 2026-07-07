@@ -40,8 +40,8 @@ extern "C" {
 #define APP_DEVICE_ID                   "walkie-02"
 /** @brief 兼容旧业务命名，统一指向 APP_DEVICE_ID。 */
 #define APP_BUSINESS_DEVICE_NAME        APP_DEVICE_ID
-/** @brief UDP 对讲服务器地址。 */
-#define APP_BUSINESS_SERVER_HOST        "10.224.127.251"
+/** @brief UDP 对讲服务器地址，与 AI HTTP 服务使用同一台公网服务器。 */
+#define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           19000
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */

@@ -77,32 +77,32 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_HEARTBEAT_IDLE_MS  3000u
 /** @brief 音频忙时不发心跳，只用该间隔继续检查状态。 */
 #define APP_INTERCOM_HEARTBEAT_BUSY_MS  500u
-/** @brief UDP 接收播放空闲关闭时间，避免短抖动导致功放反复开关。 */
-#define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 240u
+/** @brief UDP 接收播放空闲关闭时间，延长以避免弱网短断流导致功放反复开关。 */
+#define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 500u
 /** @brief UDP 接收空闲轮询超时。 */
 #define APP_INTERCOM_RX_READ_IDLE_TIMEOUT_MS 20u
 /** @brief UDP 接收播放中轮询超时，避免网络读取阻塞播放节奏。 */
 #define APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS 4u
 /** @brief UDP 对讲固定音频包时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      (20u * APP_INTERCOM_PACKET_FRAMES)
-/** @brief jitter buffer 容量，32 包约 640ms。 */
-#define APP_INTERCOM_JITTER_FRAME_COUNT  32u
-/** @brief 正常网络下的起播缓存包数，10 包约 200ms。 */
-#define APP_INTERCOM_JITTER_START_FRAMES 10u
-/** @brief 抖动网络下的最大起播缓存包数，16 包约 320ms。 */
-#define APP_INTERCOM_JITTER_MAX_START_FRAMES 16u
+/** @brief jitter buffer 容量，64 包约 1280ms，用延迟换弱网播放连续性。 */
+#define APP_INTERCOM_JITTER_FRAME_COUNT  64u
+/** @brief 正常网络下的起播缓存包数，20 包约 400ms。 */
+#define APP_INTERCOM_JITTER_START_FRAMES 20u
+/** @brief 抖动网络下的最大起播缓存包数，32 包约 640ms。 */
+#define APP_INTERCOM_JITTER_MAX_START_FRAMES 32u
 /** @brief 稳定播放这么多包后，逐步降低自适应起播水位。 */
-#define APP_INTERCOM_JITTER_RECOVER_FRAMES 400u
+#define APP_INTERCOM_JITTER_RECOVER_FRAMES 800u
 /** @brief jitter buffer 低水位，低于此值时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
-#define APP_INTERCOM_JITTER_HIGH_WATER   24u
+#define APP_INTERCOM_JITTER_HIGH_WATER   48u
 /** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放。 */
 #define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
 /** @brief 连续缺包补偿上限，超过后认为本次语音流中断。 */
-#define APP_INTERCOM_JITTER_MAX_MISSING  25u
+#define APP_INTERCOM_JITTER_MAX_MISSING  40u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
-#define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 300u
+#define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 1200u
 /** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
 #define APP_INTERCOM_GAP_LOG_INTERVAL_MS 1000u
 
