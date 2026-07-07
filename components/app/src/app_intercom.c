@@ -97,14 +97,16 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
 #define APP_INTERCOM_JITTER_HIGH_WATER   48u
-/** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放。 */
-#define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
+/** @brief 发现当前帧缺失且已有后续帧时，立即跳过缺口继续播放真实音频。 */
+#define APP_INTERCOM_JITTER_RESYNC_MISSING 1u
 /** @brief 连续缺包补偿上限，超过后认为本次语音流中断。 */
 #define APP_INTERCOM_JITTER_MAX_MISSING  40u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 1200u
 /** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
 #define APP_INTERCOM_GAP_LOG_INTERVAL_MS 1000u
+/** @brief 缺包淡出/真实音频淡入采样数，约 3ms，降低卡顿和点击感。 */
+#define APP_INTERCOM_PLC_FADE_SAMPLES    48u
 
 /** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
@@ -743,18 +745,45 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
 
 static void app_intercom_jitter_make_plc_frame(int16_t *out)
 {
-    int scale = 0;
-
-    if (s_rx_jitter_missing == 1u) {
-        scale = 3;
-    } else if (s_rx_jitter_missing == 2u) {
-        scale = 2;
-    } else if (s_rx_jitter_missing == 3u) {
-        scale = 1;
+    if (out == NULL) {
+        return;
     }
 
-    for (uint32_t i = 0u; i < APP_INTERCOM_PACKET_SAMPLES; i++) {
-        out[i] = (int16_t)(((int32_t)s_rx_last_pcm[i] * scale) / 4);
+    memset(out, 0, (size_t)APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t));
+
+    /*
+     * 只在首个缺包输出很轻的淡出帧，后续缺包保持静音。
+     * 这样避免把上一帧语音反复播放成“卡顿复读”。
+     */
+    if (s_rx_jitter_missing != 1u) {
+        return;
+    }
+
+    uint32_t fade_samples = APP_INTERCOM_PLC_FADE_SAMPLES;
+    if (fade_samples > APP_INTERCOM_PACKET_SAMPLES) {
+        fade_samples = APP_INTERCOM_PACKET_SAMPLES;
+    }
+
+    for (uint32_t i = 0u; i < fade_samples; i++) {
+        int32_t sample = s_rx_last_pcm[i];
+        int32_t gain = (int32_t)(fade_samples - i);
+        out[i] = (int16_t)((sample * gain) / (int32_t)(fade_samples * 4u));
+    }
+}
+
+static void app_intercom_jitter_fade_in_pcm(int16_t *pcm, uint16_t samples)
+{
+    if (pcm == NULL || samples == 0u) {
+        return;
+    }
+
+    uint32_t fade_samples = APP_INTERCOM_PLC_FADE_SAMPLES;
+    if (fade_samples > (uint32_t)samples) {
+        fade_samples = samples;
+    }
+
+    for (uint32_t i = 0u; i < fade_samples; i++) {
+        pcm[i] = (int16_t)(((int32_t)pcm[i] * (int32_t)(i + 1u)) / (int32_t)fade_samples);
     }
 }
 
@@ -806,9 +835,13 @@ static void app_intercom_jitter_play_tick(void)
     uint16_t samples = APP_INTERCOM_PACKET_SAMPLES;
     uint8_t played_real_frame = 0u;
     if (frame != NULL) {
+        uint8_t fade_in = s_rx_jitter_missing != 0u ? 1u : 0u;
         memcpy(s_rx_pcm, frame->pcm, sizeof(s_rx_pcm));
-        memcpy(s_rx_last_pcm, frame->pcm, sizeof(s_rx_last_pcm));
         samples = frame->samples;
+        if (fade_in != 0u) {
+            app_intercom_jitter_fade_in_pcm(s_rx_pcm, samples);
+        }
+        memcpy(s_rx_last_pcm, s_rx_pcm, sizeof(s_rx_last_pcm));
         frame->valid = 0u;
         s_rx_jitter_missing = 0u;
         played_real_frame = 1u;
@@ -829,14 +862,18 @@ static void app_intercom_jitter_play_tick(void)
                              (unsigned int)app_intercom_jitter_count_ready());
                     s_rx_gap_log_ms = now;
                 }
+                uint8_t missing_before_skip = s_rx_jitter_missing;
                 s_rx_jitter_expected_seq = next_seq;
-                s_rx_jitter_missing = 0u;
                 frame = app_intercom_jitter_find(s_rx_jitter_expected_seq);
                 if (frame != NULL) {
                     memcpy(s_rx_pcm, frame->pcm, sizeof(s_rx_pcm));
-                    memcpy(s_rx_last_pcm, frame->pcm, sizeof(s_rx_last_pcm));
                     samples = frame->samples;
+                    if (missing_before_skip != 0u) {
+                        app_intercom_jitter_fade_in_pcm(s_rx_pcm, samples);
+                    }
+                    memcpy(s_rx_last_pcm, s_rx_pcm, sizeof(s_rx_last_pcm));
                     frame->valid = 0u;
+                    s_rx_jitter_missing = 0u;
                     played_real_frame = 1u;
                 } else {
                     app_intercom_jitter_make_plc_frame(s_rx_pcm);
