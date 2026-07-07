@@ -9,7 +9,7 @@
  * 2. 检查音频会话是否被 AI 占用 → 若空闲则置 s_ptt_active = 1
  * 3. notify_give(biz_ptt) → 唤醒 PTT 任务
  * 4. PTT 任务抢占音频会话锁 → 发 PTT_START 控制包
- * 5. 循环：读麦克风 320 samples(20ms)，聚合 2 帧(40ms) → 封装协议头 → UDP 发送
+ * 5. 循环：读麦克风 320 samples(20ms) → 封装协议头 → UDP 发送
  * 6. 用户松手 → s_ptt_active = 0 → 循环退出 → 发 PTT_STOP
  * 7. 释放音频会话锁 → notify_take 阻塞等待下次
  *
@@ -31,7 +31,7 @@
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，当前聚合 40ms）
+ * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，固定 20ms）
  * ```
  */
 #include "app_intercom.h"
@@ -54,16 +54,16 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
 /** @brief WTK1 协议固定包头长度。 */
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，2 帧即 40ms/包。 */
-#define APP_INTERCOM_PACKET_FRAMES      2u
+/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，1 帧即 20ms/包。 */
+#define APP_INTERCOM_PACKET_FRAMES      1u
 /** @brief 单个 AUDIO 包最大 PCM 样本数。 */
 #define APP_INTERCOM_PACKET_SAMPLES     (APP_BUSINESS_FRAME_SAMPLES * APP_INTERCOM_PACKET_FRAMES)
-/** @brief 单个 AUDIO 包最大 payload，当前为 40ms PCM 字节数。 */
+/** @brief 单个 AUDIO 包最大 payload，当前为 20ms PCM 字节数。 */
 #define APP_INTERCOM_PACKET_MAX_PAYLOAD (APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t))
 /** @brief 单个 WTK1 包最大总长度，包含固定头和最大音频 payload。 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
 
-/** @brief PTT 发送任务栈大小，需容纳 40ms 聚合包缓冲和 service_audio_read 调用栈。 */
+/** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     8192u
 /** @brief UDP 接收解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
 #define APP_INTERCOM_RX_TASK_STACK      10240u
@@ -85,22 +85,22 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS 4u
 /** @brief UDP 对讲固定音频包时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      (20u * APP_INTERCOM_PACKET_FRAMES)
-/** @brief jitter buffer 容量，32 包约 1280ms。 */
+/** @brief jitter buffer 容量，32 包约 640ms。 */
 #define APP_INTERCOM_JITTER_FRAME_COUNT  32u
-/** @brief 正常网络下的起播缓存包数，5 包约 200ms。 */
-#define APP_INTERCOM_JITTER_START_FRAMES 5u
-/** @brief 抖动网络下的最大起播缓存包数，8 包约 320ms。 */
-#define APP_INTERCOM_JITTER_MAX_START_FRAMES 8u
+/** @brief 正常网络下的起播缓存包数，10 包约 200ms。 */
+#define APP_INTERCOM_JITTER_START_FRAMES 10u
+/** @brief 抖动网络下的最大起播缓存包数，16 包约 320ms。 */
+#define APP_INTERCOM_JITTER_MAX_START_FRAMES 16u
 /** @brief 稳定播放这么多包后，逐步降低自适应起播水位。 */
-#define APP_INTERCOM_JITTER_RECOVER_FRAMES 200u
+#define APP_INTERCOM_JITTER_RECOVER_FRAMES 400u
 /** @brief jitter buffer 低水位，低于此值时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    2u
 /** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
-#define APP_INTERCOM_JITTER_HIGH_WATER   12u
+#define APP_INTERCOM_JITTER_HIGH_WATER   24u
 /** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放。 */
 #define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
 /** @brief 连续缺包补偿上限，超过后认为本次语音流中断。 */
-#define APP_INTERCOM_JITTER_MAX_MISSING  12u
+#define APP_INTERCOM_JITTER_MAX_MISSING  25u
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 300u
 /** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
@@ -111,7 +111,7 @@ typedef enum {
     APP_INTERCOM_PKT_REGISTER = 1,  /**< 设备注册（上报设备名到服务器） */
     APP_INTERCOM_PKT_CHANNEL = 2,   /**< 频道切换 */
     APP_INTERCOM_PKT_PTT_START = 3, /**< PTT 开始（对讲键按下） */
-    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（40ms PCM） */
+    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（20ms PCM） */
     APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
     APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（空闲 3s 间隔） */
 } app_intercom_packet_type_t;
@@ -137,7 +137,7 @@ typedef struct {
     uint8_t valid;                                  /**< 槽位是否有可播放帧。 */
     uint32_t seq;                                  /**< 对应协议序列号。 */
     uint16_t samples;                              /**< PCM 样本数。 */
-    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 固定 40ms PCM 包。 */
+    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 固定 20ms PCM 包。 */
 } app_intercom_jitter_frame_t;
 
 /* ==========================================================================
@@ -1075,8 +1075,8 @@ static void app_intercom_udp_rx_task(void *arg)
  * 3. 发送 PTT_START 控制包（通知服务器和同频道其他人）
  * 4. 循环（while (s_ptt_active)）：
  *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
- *    b. 聚合 2 帧为 40ms PCM 包
- *    c. app_intercom_build_packet(packet, AUDIO, pcm, 1280)
+ *    b. 按 1 帧为一个 20ms PCM 包
+ *    c. app_intercom_build_packet(packet, AUDIO, pcm, 640)
  *    d. service_network_udp_send(packet, len) —— 发给服务器
  *    e. 服务器收到后原样转发给同频道所有其他客户端
  * 5. 用户松手 → s_ptt_active = 0 → 退出循环
@@ -1085,7 +1085,7 @@ static void app_intercom_udp_rx_task(void *arg)
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
- * - 每包 40ms (640 samples × 16bit = 1280 字节)，降低 UDP 发包频率
+ * - 每包 20ms (320 samples × 16bit = 640 字节)，服务器按 PCM 原样转发
  * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
  * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
  *
@@ -1095,7 +1095,7 @@ static void app_intercom_ptt_task(void *arg)
 {
     (void)arg;
     int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
-    int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES];    /* 40ms PCM 聚合包缓冲 */
+    int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES];    /* PCM 发送包缓冲 */
     uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
@@ -1113,7 +1113,7 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        /* PTT 期间按固定 40ms PCM 包发送，不做编解码和重传。 */
+        /* PTT 期间按固定 20ms PCM 包发送，不做编解码和重传。 */
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
