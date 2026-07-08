@@ -25,6 +25,7 @@ idf_component_register(
         heap
         service
         device
+        freertos
         wdriver
         lvgl__lvgl
         osal
