@@ -44,6 +44,12 @@ extern "C" {
 #define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
 /** @brief UDP 对讲服务器端口。 */
 #define APP_BUSINESS_UDP_PORT           19000
+/** @brief WebSocket 对讲下行端口，复用 AI/相机所在 FastAPI 服务。 */
+#define APP_BUSINESS_WS_PORT            18080
+/** @brief WebSocket 对讲下行路由，设备会追加 device query。 */
+#define APP_BUSINESS_WS_ROUTE_INTERCOM  "/intercom/ws"
+/** @brief 是否启用 WebSocket 下行实验模式；UDP 上行始终保持不变。 */
+#define APP_INTERCOM_USE_WS_DOWNLINK    1
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
 #define APP_BUSINESS_HTTP_BASE_URL      "http://139.129.17.67:18080"
 /** @brief AI 创建会话路由。 */

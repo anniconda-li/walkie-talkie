@@ -29,6 +29,7 @@ idf_component_register(
         lvgl__lvgl
         osal
         esp_app_format
+        lwip
         nvs_flash
 
     )
