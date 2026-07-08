@@ -144,6 +144,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_HANDSHAKE_TIMEOUT_MS 5000u
 /** @brief WebSocket 运行态读取超时，避免任务永久卡住无法感知断网。 */
 #define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
+/** @brief WebSocket 发送超时，避免 PTT 任务在弱网 TCP 写入中长期阻塞。 */
+#define APP_INTERCOM_WS_SEND_TIMEOUT_MS  200u
+/** @brief WebSocket 发送互斥等待时间，拿不到锁即回退 UDP。 */
+#define APP_INTERCOM_WS_TX_LOCK_MS       5u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
 /** @brief WebSocket 下行队列容量，128 包约 2.56s，放在 PSRAM 中吸收播放任务短时阻塞。 */
@@ -152,6 +156,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_DROP_LOG_MS      1000u
 /** @brief WebSocket 下行本地队列统计日志周期。 */
 #define APP_INTERCOM_WS_STAT_LOG_MS      1000u
+/** @brief WebSocket 上行统计日志周期。 */
+#define APP_INTERCOM_WS_TX_STAT_LOG_MS   1000u
 /** @brief RFC 示例 key；设备端只校验 101 状态，不依赖 key 的随机性。 */
 #define APP_INTERCOM_WS_CLIENT_KEY       "dGhlIHNhbXBsZSBub25jZQ=="
 
@@ -315,8 +321,12 @@ static volatile int s_ws_connected = 0;
 static volatile int s_ws_force_reconnect = 0;
 /** @brief WebSocket 断线后请求 RX 任务清空旧播放缓存。 */
 static volatile int s_ws_reset_rx = 0;
+/** @brief WebSocket 当前 socket，握手成功后用于同一连接全双工收发。 */
+static int s_ws_sock = -1;
 /** @brief WebSocket 下行队列互斥锁。 */
 static osal_mutex_t s_ws_rx_mutex = NULL;
+/** @brief WebSocket 发送互斥锁，避免音频帧和 ping/pong 控制帧交叉写 socket。 */
+static osal_mutex_t s_ws_tx_mutex = NULL;
 /** @brief WebSocket binary 下行队列，保存完整 WTK1 包，运行时分配到 PSRAM。 */
 static app_intercom_ws_rx_frame_t *s_ws_rx_ring = NULL;
 /** @brief WebSocket 下行队列写位置。 */
@@ -340,6 +350,13 @@ static uint32_t s_ws_rx_stat_drop_invalid = 0u;
 static uint32_t s_ws_rx_stat_parse_drop = 0u;
 static uint32_t s_ws_rx_stat_control = 0u;
 static uint8_t s_ws_rx_stat_queue_max = 0u;
+/** @brief WebSocket 上行发送统计。 */
+static uint32_t s_ws_tx_stat_log_ms = 0u;
+static uint32_t s_ws_tx_stat_audio = 0u;
+static uint32_t s_ws_tx_stat_control = 0u;
+static uint32_t s_ws_tx_stat_bytes = 0u;
+static uint32_t s_ws_tx_stat_udp_fallback = 0u;
+static uint32_t s_ws_tx_stat_fail = 0u;
 /** @brief WebSocket RX 任务弹出包时的临时缓冲，避免覆盖 UDP 半包缓冲。 */
 static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 
@@ -490,6 +507,10 @@ static int app_intercom_packet_is_own(const uint8_t *packet)
     return strncmp(name, APP_DEVICE_ID, APP_INTERCOM_DEVICE_FIELD_LEN) == 0;
 }
 
+static int app_intercom_send_packet_transport(const uint8_t *packet,
+                                              uint16_t len,
+                                              uint8_t type);
+
 /**
  * @brief 发送无 payload 的控制包（注册/频道/PTT_START/PTT_STOP/心跳）。
  *
@@ -498,14 +519,14 @@ static int app_intercom_packet_is_own(const uint8_t *packet)
  */
 static int app_intercom_send_control(uint8_t type)
 {
-    if (!s_udp_ready) {
-        return -1;
-    }
-
     /* 控制包没有 payload，用于服务器维护设备在线状态和频道状态。 */
     uint8_t packet[APP_INTERCOM_PACKET_HEADER_LEN];
     uint16_t len = app_intercom_build_packet(packet, type, NULL, 0u);
-    return service_network_udp_send(packet, len);
+    if (len == 0u) {
+        return -2;
+    }
+
+    return app_intercom_send_packet_transport(packet, len, type);
 }
 
 static int app_intercom_send_nack(const char *source_device,
@@ -580,19 +601,24 @@ static void app_intercom_reconnect_udp_if_ready(void)
     }
 }
 
-static int app_intercom_wait_udp_ready(uint32_t timeout_ms)
+static int app_intercom_tx_ready(void)
+{
+    return (s_ws_connected != 0 || s_udp_ready != 0) ? 1 : 0;
+}
+
+static int app_intercom_wait_tx_ready(uint32_t timeout_ms)
 {
     uint32_t start = osal_get_tick_ms();
 
-    while (s_ptt_active && !s_udp_ready && (osal_get_tick_ms() - start) < timeout_ms) {
+    while (s_ptt_active && app_intercom_tx_ready() == 0 && (osal_get_tick_ms() - start) < timeout_ms) {
         app_intercom_reconnect_udp_if_ready();
-        if (s_udp_ready) {
+        if (app_intercom_tx_ready() != 0) {
             return 0;
         }
         osal_delay_ms(APP_INTERCOM_PTT_WAIT_STEP_MS);
     }
 
-    return s_udp_ready ? 0 : -1;
+    return app_intercom_tx_ready() != 0 ? 0 : -1;
 }
 
 static int app_intercom_ws_rx_init(void)
@@ -616,6 +642,13 @@ static int app_intercom_ws_rx_init(void)
         if (s_ws_rx_mutex == NULL) {
             APP_LOGE(TAG, "WebSocket 下行队列初始化失败");
             return -2;
+        }
+    }
+    if (s_ws_tx_mutex == NULL) {
+        s_ws_tx_mutex = osal_mutex_create();
+        if (s_ws_tx_mutex == NULL) {
+            APP_LOGE(TAG, "WebSocket 发送锁初始化失败");
+            return -3;
         }
     }
     return 0;
@@ -826,17 +859,68 @@ static int app_intercom_ws_set_recv_timeout(int sock, uint32_t timeout_ms)
     return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 0 : -1;
 }
 
-static int app_intercom_ws_send_control_frame(int sock,
-                                              uint8_t opcode,
-                                              const uint8_t *payload,
-                                              uint8_t payload_len)
+static int app_intercom_ws_set_send_timeout(int sock, uint32_t timeout_ms)
 {
-    uint8_t frame[2u + 4u + 125u];
+    struct timeval tv = {
+        .tv_sec = (long)(timeout_ms / 1000u),
+        .tv_usec = (long)((timeout_ms % 1000u) * 1000u),
+    };
+
+    return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 0 : -1;
+}
+
+static void app_intercom_ws_tx_stats_log(uint32_t now)
+{
+    if ((uint32_t)(now - s_ws_tx_stat_log_ms) < APP_INTERCOM_WS_TX_STAT_LOG_MS) {
+        return;
+    }
+    if (s_ws_tx_stat_audio == 0u &&
+        s_ws_tx_stat_control == 0u &&
+        s_ws_tx_stat_udp_fallback == 0u &&
+        s_ws_tx_stat_fail == 0u) {
+        return;
+    }
+
+    APP_LOGI(TAG,
+             "WS TX统计: audio=%u control=%u bytes=%u fallback_udp=%u fail=%u connected=%d",
+             (unsigned int)s_ws_tx_stat_audio,
+             (unsigned int)s_ws_tx_stat_control,
+             (unsigned int)s_ws_tx_stat_bytes,
+             (unsigned int)s_ws_tx_stat_udp_fallback,
+             (unsigned int)s_ws_tx_stat_fail,
+             s_ws_connected);
+
+    s_ws_tx_stat_log_ms = now;
+    s_ws_tx_stat_audio = 0u;
+    s_ws_tx_stat_control = 0u;
+    s_ws_tx_stat_bytes = 0u;
+    s_ws_tx_stat_udp_fallback = 0u;
+    s_ws_tx_stat_fail = 0u;
+}
+
+static int app_intercom_ws_send_frame(int sock,
+                                      uint8_t opcode,
+                                      const uint8_t *payload,
+                                      uint16_t payload_len)
+{
+    uint8_t frame[2u + 2u + 4u + APP_INTERCOM_PACKET_MAX_BYTES];
     uint8_t mask[4];
     uint32_t seed = osal_get_tick_ms();
+    uint16_t pos = 0u;
 
-    if (payload_len > 125u || (payload_len > 0u && payload == NULL)) {
+    if (payload_len > APP_INTERCOM_PACKET_MAX_BYTES ||
+        (payload_len > 0u && payload == NULL) ||
+        s_ws_tx_mutex == NULL) {
         return -1;
+    }
+
+    if (osal_mutex_lock(s_ws_tx_mutex, APP_INTERCOM_WS_TX_LOCK_MS) != 0) {
+        return -2;
+    }
+    if (sock < 0 ||
+        (s_ws_connected == 0 && opcode != APP_INTERCOM_WS_OPCODE_CLOSE)) {
+        osal_mutex_unlock(s_ws_tx_mutex);
+        return -3;
     }
 
     mask[0] = (uint8_t)(seed & 0xffu);
@@ -844,14 +928,100 @@ static int app_intercom_ws_send_control_frame(int sock,
     mask[2] = (uint8_t)((seed >> 16) & 0xffu);
     mask[3] = (uint8_t)((seed >> 24) & 0xffu);
 
-    frame[0] = (uint8_t)(0x80u | (opcode & 0x0fu));
-    frame[1] = (uint8_t)(0x80u | payload_len);
-    memcpy(&frame[2], mask, sizeof(mask));
-    for (uint8_t i = 0u; i < payload_len; i++) {
-        frame[6u + i] = payload[i] ^ mask[i % 4u];
+    frame[pos++] = (uint8_t)(0x80u | (opcode & 0x0fu));
+    if (payload_len <= 125u) {
+        frame[pos++] = (uint8_t)(0x80u | payload_len);
+    } else {
+        frame[pos++] = (uint8_t)(0x80u | 126u);
+        frame[pos++] = (uint8_t)((payload_len >> 8) & 0xffu);
+        frame[pos++] = (uint8_t)(payload_len & 0xffu);
+    }
+    memcpy(&frame[pos], mask, sizeof(mask));
+    pos = (uint16_t)(pos + sizeof(mask));
+
+    for (uint16_t i = 0u; i < payload_len; i++) {
+        frame[pos + i] = payload[i] ^ mask[i % 4u];
     }
 
-    return app_intercom_ws_send_all(sock, frame, (size_t)(6u + payload_len));
+    int ret = app_intercom_ws_send_all(sock, frame, (size_t)(pos + payload_len));
+    osal_mutex_unlock(s_ws_tx_mutex);
+    return ret;
+}
+
+static int app_intercom_ws_send_control_frame(int sock,
+                                              uint8_t opcode,
+                                              const uint8_t *payload,
+                                              uint8_t payload_len)
+{
+    return app_intercom_ws_send_frame(sock, opcode, payload, payload_len);
+}
+
+static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t len)
+{
+    if (APP_INTERCOM_USE_WS_UPLINK == 0 ||
+        packet == NULL ||
+        len == 0u ||
+        s_ws_connected == 0 ||
+        s_ws_tx_mutex == NULL) {
+        return -1;
+    }
+
+    int sock = s_ws_sock;
+    if (sock < 0) {
+        return -2;
+    }
+
+    int ret = app_intercom_ws_send_frame(sock,
+                                         APP_INTERCOM_WS_OPCODE_BINARY,
+                                         packet,
+                                         len);
+    if (ret != 0) {
+        s_ws_force_reconnect = 1;
+        return -3;
+    }
+
+    return 0;
+}
+
+static int app_intercom_send_packet_transport(const uint8_t *packet,
+                                              uint16_t len,
+                                              uint8_t type)
+{
+    if (packet == NULL || len == 0u) {
+        return -1;
+    }
+
+    uint32_t now = osal_get_tick_ms();
+    int ws_ret = app_intercom_ws_send_binary_packet(packet, len);
+    if (ws_ret == 0) {
+        if (type == APP_INTERCOM_PKT_AUDIO) {
+            s_ws_tx_stat_audio++;
+        } else {
+            s_ws_tx_stat_control++;
+        }
+        s_ws_tx_stat_bytes += len;
+        app_intercom_ws_tx_stats_log(now);
+        return 0;
+    }
+
+    if (APP_INTERCOM_USE_WS_UPLINK != 0 && s_ws_connected != 0) {
+        s_ws_tx_stat_fail++;
+    }
+
+    if (s_udp_ready) {
+        int udp_ret = service_network_udp_send(packet, len);
+        if (udp_ret == 0) {
+            if (APP_INTERCOM_USE_WS_UPLINK != 0) {
+                s_ws_tx_stat_udp_fallback++;
+                app_intercom_ws_tx_stats_log(now);
+            }
+            return 0;
+        }
+        return udp_ret;
+    }
+
+    app_intercom_ws_tx_stats_log(now);
+    return ws_ret;
 }
 
 static int app_intercom_ws_connect_socket(void)
@@ -882,6 +1052,7 @@ static int app_intercom_ws_connect_socket(void)
         close(sock);
         return -3;
     }
+    (void)app_intercom_ws_set_send_timeout(sock, APP_INTERCOM_WS_SEND_TIMEOUT_MS);
 
     return sock;
 }
@@ -1036,6 +1207,11 @@ static void app_intercom_ws_task(void *arg)
         if (service_network_is_ready() != 1) {
             if (s_ws_connected != 0) {
                 s_ws_connected = 0;
+                if (s_ws_tx_mutex != NULL &&
+                    osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
+                    s_ws_sock = -1;
+                    osal_mutex_unlock(s_ws_tx_mutex);
+                }
                 s_ws_reset_rx = 1;
                 app_intercom_ws_rx_clear();
             }
@@ -1047,29 +1223,36 @@ static void app_intercom_ws_task(void *arg)
         s_ws_force_reconnect = 0;
         int sock = app_intercom_ws_connect_socket();
         if (sock < 0) {
-            APP_LOGW(TAG, "WebSocket 下行连接失败, ret=%d", sock);
+            APP_LOGW(TAG, "WebSocket 对讲连接失败, ret=%d", sock);
             osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
             continue;
         }
 
         int ret = app_intercom_ws_handshake(sock);
         if (ret != 0) {
-            APP_LOGW(TAG, "WebSocket 下行握手失败, ret=%d", ret);
+            APP_LOGW(TAG, "WebSocket 对讲握手失败, ret=%d", ret);
             close(sock);
             osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
             continue;
         }
         (void)app_intercom_ws_set_recv_timeout(sock, APP_INTERCOM_WS_RECV_TIMEOUT_MS);
 
+        if (s_ws_tx_mutex != NULL &&
+            osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
+            s_ws_sock = sock;
+            osal_mutex_unlock(s_ws_tx_mutex);
+        }
         s_ws_connected = 1;
         s_ws_reset_rx = 0;
         app_intercom_ws_rx_clear();
         APP_LOGI(TAG,
-                 "WebSocket 下行已连接: ws://%s:%d%s?device=%s",
+                 "WebSocket 对讲已连接: ws://%s:%d%s?device=%s",
                  APP_BUSINESS_SERVER_HOST,
                  APP_BUSINESS_WS_PORT,
                  APP_BUSINESS_WS_ROUTE_INTERCOM,
                  APP_DEVICE_ID);
+        (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
+        (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
         uint32_t last_ping_ms = osal_get_tick_ms();
         while (service_network_is_ready() == 1 && s_ws_force_reconnect == 0) {
@@ -1098,12 +1281,19 @@ static void app_intercom_ws_task(void *arg)
             app_intercom_ws_rx_stats_log(now);
         }
 
-        close(sock);
         s_ws_connected = 0;
+        if (s_ws_tx_mutex != NULL &&
+            osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
+            if (s_ws_sock == sock) {
+                s_ws_sock = -1;
+            }
+            osal_mutex_unlock(s_ws_tx_mutex);
+        }
+        close(sock);
         s_ws_force_reconnect = 0;
         s_ws_reset_rx = 1;
         app_intercom_ws_rx_clear();
-        APP_LOGW(TAG, "WebSocket 下行断开，准备重连");
+        APP_LOGW(TAG, "WebSocket 对讲断开，准备重连");
         osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
     }
 }
@@ -1940,7 +2130,7 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
         return -2;
     }
 
-    return service_network_udp_send(packet, packet_len);
+    return app_intercom_send_packet_transport(packet, packet_len, APP_INTERCOM_PKT_AUDIO);
 }
 
 /* ==========================================================================
@@ -2135,8 +2325,8 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        if (app_intercom_wait_udp_ready(APP_INTERCOM_PTT_WAIT_UDP_MS) != 0) {
-            APP_LOGW(TAG, "PTT 放弃发送: UDP 对讲通道未就绪");
+        if (app_intercom_wait_tx_ready(APP_INTERCOM_PTT_WAIT_UDP_MS) != 0) {
+            APP_LOGW(TAG, "PTT 放弃发送: 对讲上行通道未就绪");
             continue;
         }
 
@@ -2258,7 +2448,7 @@ int app_intercom_start(void)
 
     ret = app_intercom_start_ws_downlink_task();
     if (ret != 0) {
-        APP_LOGW(TAG, "WebSocket 下行任务暂未启动, ret=%d", ret);
+        APP_LOGW(TAG, "WebSocket 对讲任务暂未启动, ret=%d", ret);
     }
 
     ret = osal_task_create("biz_udp_rx",
@@ -2353,6 +2543,12 @@ void app_intercom_ptt_stop(void)
 void app_intercom_network_changed(void)
 {
     s_udp_ready = 0;
+    s_ws_connected = 0;
+    if (s_ws_tx_mutex != NULL &&
+        osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_ws_sock = -1;
+        osal_mutex_unlock(s_ws_tx_mutex);
+    }
     s_ws_force_reconnect = 1;
     s_ws_reset_rx = 1;
     app_intercom_ws_rx_clear();
