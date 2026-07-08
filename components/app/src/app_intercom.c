@@ -50,6 +50,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
@@ -1009,6 +1011,40 @@ static void app_intercom_ws_task(void *arg)
         APP_LOGW(TAG, "WebSocket 下行断开，准备重连");
         osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
     }
+}
+
+static int app_intercom_start_ws_downlink_task(void)
+{
+    if (APP_INTERCOM_USE_WS_DOWNLINK == 0) {
+        return 0;
+    }
+    if (s_ws_task != NULL) {
+        return 0;
+    }
+    if (app_intercom_ws_rx_init() != 0) {
+        return -1;
+    }
+
+    TaskHandle_t handle = NULL;
+    BaseType_t ret = xTaskCreateWithCaps(app_intercom_ws_task,
+                                         "biz_ws_rx",
+                                         APP_INTERCOM_WS_TASK_STACK,
+                                         NULL,
+                                         5u,
+                                         &handle,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ret != pdPASS) {
+        APP_LOGW(TAG,
+                 "WebSocket 下行任务启动失败, ret=%d, psram_free=%u, internal_free=%u, internal_largest=%u",
+                 (int)ret,
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        return -2;
+    }
+
+    s_ws_task = (osal_task_t)handle;
+    return 0;
 }
 
 static void app_intercom_rx_stop_playback(void)
@@ -2049,11 +2085,16 @@ int app_intercom_start(void)
         return 0;
     }
 
-    int ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
-    if (ret != 0) {
-        APP_LOGW(TAG, "UDP 对讲通道初始化失败, ret=%d", ret);
+    int ret = 0;
+    if (service_network_is_ready() == 1) {
+        ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
+        if (ret != 0) {
+            APP_LOGW(TAG, "UDP 对讲通道初始化失败, ret=%d", ret);
+        } else {
+            s_udp_ready = 1;
+        }
     } else {
-        s_udp_ready = 1;
+        APP_LOGI(TAG, "UDP 对讲通道等待网络就绪后连接");
     }
 
     ret = osal_task_create("biz_ptt",
@@ -2067,23 +2108,9 @@ int app_intercom_start(void)
         return ret;
     }
 
-    if (APP_INTERCOM_USE_WS_DOWNLINK != 0) {
-        ret = app_intercom_ws_rx_init();
-        if (ret != 0) {
-            APP_LOGE(TAG, "WebSocket 下行队列启动失败, ret=%d", ret);
-            return ret;
-        }
-
-        ret = osal_task_create("biz_ws_rx",
-                               app_intercom_ws_task,
-                               NULL,
-                               APP_INTERCOM_WS_TASK_STACK,
-                               5u,
-                               &s_ws_task);
-        if (ret != 0) {
-            APP_LOGE(TAG, "WebSocket 下行任务启动失败, ret=%d", ret);
-            return ret;
-        }
+    ret = app_intercom_start_ws_downlink_task();
+    if (ret != 0) {
+        APP_LOGW(TAG, "WebSocket 下行任务暂未启动, ret=%d", ret);
     }
 
     ret = osal_task_create("biz_udp_rx",
