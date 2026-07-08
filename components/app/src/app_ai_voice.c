@@ -28,6 +28,8 @@
 #include "service_network.h"
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1915,16 +1917,29 @@ int app_ai_voice_start(void)
              "AI 回复分片缓存已分配到 PSRAM, bytes=%u",
              (unsigned int)APP_AI_REPLY_CHUNK_BYTES);
 
-    int ret = osal_task_create("biz_ai", app_ai_voice_task, NULL, 8192u, 5u, &s_ai_task);
-    if (ret != 0) {
-        APP_LOGE(TAG, "AI 语音任务启动失败, ret=%d", ret);
+    TaskHandle_t ai_handle = NULL;
+    BaseType_t task_ret = xTaskCreateWithCaps(app_ai_voice_task,
+                                              "biz_ai",
+                                              8192u,
+                                              NULL,
+                                              5u,
+                                              &ai_handle,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (task_ret != pdPASS) {
+        APP_LOGE(TAG,
+                 "AI 语音任务启动失败, ret=%d, psram_free=%u, internal_free=%u, internal_largest=%u",
+                 (int)task_ret,
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         osal_heap_free(s_ai_reply_chunk_buf);
         s_ai_reply_chunk_buf = NULL;
         osal_heap_free(s_ai_wav_buf);
         s_ai_wav_buf = NULL;
-        return ret;
+        return -3;
     }
 
+    s_ai_task = (osal_task_t)ai_handle;
     s_started = 1;
     return 0;
 }
