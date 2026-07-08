@@ -124,6 +124,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_GAP_LOG_INTERVAL_MS 1000u
 /** @brief 缺包淡出/真实音频淡入采样数，约 3ms，降低卡顿和点击感。 */
 #define APP_INTERCOM_PLC_FADE_SAMPLES    48u
+/** @brief 正常收到 PTT_STOP 后写入的短静音尾帧数，用于清掉 I2S/功放尾部残留。 */
+#define APP_INTERCOM_END_SILENCE_FRAMES  2u
+/** @brief 正常结束时从最后一个采样点淡到静音的采样数，约 6ms。 */
+#define APP_INTERCOM_END_RAMP_SAMPLES    96u
 /** @brief NACK payload 长度：source_device[16] + channel + start_seq + count。 */
 #define APP_INTERCOM_NACK_PAYLOAD_LEN    (APP_INTERCOM_DEVICE_FIELD_LEN + 8u)
 /** @brief 单个 NACK 最多请求的连续缺包数，FEC 为主后避免补发突发过大。 */
@@ -1342,6 +1346,41 @@ static void app_intercom_rx_stop_playback(void)
     s_rx_playback_active = 0;
 }
 
+static void app_intercom_rx_play_end_tail(void)
+{
+    if (!s_rx_playback_active) {
+        return;
+    }
+
+    int16_t last_sample = s_rx_last_pcm[APP_INTERCOM_PACKET_SAMPLES - 1u];
+    uint32_t ramp_samples = APP_INTERCOM_END_RAMP_SAMPLES;
+    if (ramp_samples > APP_INTERCOM_PACKET_SAMPLES) {
+        ramp_samples = APP_INTERCOM_PACKET_SAMPLES;
+    }
+
+    memset(s_rx_pcm, 0, sizeof(s_rx_pcm));
+    for (uint32_t i = 0u; i < ramp_samples; i++) {
+        int32_t gain = (int32_t)(ramp_samples - i);
+        s_rx_pcm[i] = (int16_t)(((int32_t)last_sample * gain) / (int32_t)ramp_samples);
+    }
+    (void)service_audio_play(s_rx_pcm, APP_INTERCOM_PACKET_SAMPLES, 30u);
+
+    memset(s_rx_pcm, 0, sizeof(s_rx_pcm));
+    for (uint32_t i = 0u; i < APP_INTERCOM_END_SILENCE_FRAMES; i++) {
+        (void)service_audio_play(s_rx_pcm, APP_INTERCOM_PACKET_SAMPLES, 30u);
+    }
+}
+
+static void app_intercom_rx_stop_playback_smooth(void)
+{
+    if (!s_rx_playback_active) {
+        return;
+    }
+
+    app_intercom_rx_play_end_tail();
+    app_intercom_rx_stop_playback();
+}
+
 static int app_intercom_rx_start_playback(void)
 {
     if (s_rx_playback_active) {
@@ -1979,7 +2018,7 @@ static void app_intercom_jitter_play_tick(void)
         played_real_frame = 1u;
     } else {
         if (s_rx_jitter_ending != 0u && app_intercom_jitter_count_ready() == 0u) {
-            app_intercom_rx_stop_playback();
+            app_intercom_rx_stop_playback_smooth();
             app_intercom_jitter_clear();
             return;
         }
@@ -2061,7 +2100,7 @@ static void app_intercom_jitter_play_tick(void)
     s_rx_jitter_expected_seq++;
     uint8_t buffered_after = app_intercom_jitter_count_ready();
     if (s_rx_jitter_ending != 0u && buffered_after == 0u) {
-        app_intercom_rx_stop_playback();
+        app_intercom_rx_stop_playback_smooth();
         app_intercom_jitter_clear();
         return;
     }
