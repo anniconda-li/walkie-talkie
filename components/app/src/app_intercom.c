@@ -138,8 +138,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_RECONNECT_MS     2000u
 /** @brief WebSocket 空闲 ping 间隔，维持长连接可用性。 */
 #define APP_INTERCOM_WS_PING_MS          15000u
-/** @brief WebSocket socket 读取超时，避免任务永久卡住无法感知断网。 */
-#define APP_INTERCOM_WS_RECV_TIMEOUT_MS  500u
+/** @brief WebSocket 握手响应超时，公网/热点链路下 500ms 过短。 */
+#define APP_INTERCOM_WS_HANDSHAKE_TIMEOUT_MS 5000u
+/** @brief WebSocket 运行态读取超时，避免任务永久卡住无法感知断网。 */
+#define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
 /** @brief WebSocket 下行队列容量，32 包约 640ms。满时丢最旧包防止播放历史积压。 */
@@ -309,8 +311,8 @@ static volatile int s_ws_force_reconnect = 0;
 static volatile int s_ws_reset_rx = 0;
 /** @brief WebSocket 下行队列互斥锁。 */
 static osal_mutex_t s_ws_rx_mutex = NULL;
-/** @brief WebSocket binary 下行队列，保存完整 WTK1 包。 */
-static app_intercom_ws_rx_frame_t s_ws_rx_ring[APP_INTERCOM_WS_RX_QUEUE_LEN];
+/** @brief WebSocket binary 下行队列，保存完整 WTK1 包，运行时分配到 PSRAM。 */
+static app_intercom_ws_rx_frame_t *s_ws_rx_ring = NULL;
 /** @brief WebSocket 下行队列写位置。 */
 static uint8_t s_ws_rx_head = 0u;
 /** @brief WebSocket 下行队列读位置。 */
@@ -578,14 +580,26 @@ static int app_intercom_wait_udp_ready(uint32_t timeout_ms)
 
 static int app_intercom_ws_rx_init(void)
 {
-    if (s_ws_rx_mutex != NULL) {
-        return 0;
+    if (s_ws_rx_ring == NULL) {
+        size_t bytes = sizeof(app_intercom_ws_rx_frame_t) * APP_INTERCOM_WS_RX_QUEUE_LEN;
+        s_ws_rx_ring = (app_intercom_ws_rx_frame_t *)heap_caps_malloc(bytes,
+                                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_ws_rx_ring == NULL) {
+            APP_LOGE(TAG,
+                     "WebSocket 下行队列 PSRAM 分配失败, bytes=%u, psram_free=%u, internal_largest=%u",
+                     (unsigned int)bytes,
+                     (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            return -1;
+        }
     }
 
-    s_ws_rx_mutex = osal_mutex_create();
     if (s_ws_rx_mutex == NULL) {
-        APP_LOGE(TAG, "WebSocket 下行队列初始化失败");
-        return -1;
+        s_ws_rx_mutex = osal_mutex_create();
+        if (s_ws_rx_mutex == NULL) {
+            APP_LOGE(TAG, "WebSocket 下行队列初始化失败");
+            return -2;
+        }
     }
     return 0;
 }
@@ -608,6 +622,7 @@ static void app_intercom_ws_rx_push(const uint8_t *data, uint16_t len)
     if (data == NULL ||
         len < APP_INTERCOM_PACKET_HEADER_LEN ||
         len > APP_INTERCOM_PACKET_MAX_BYTES ||
+        s_ws_rx_ring == NULL ||
         s_ws_rx_mutex == NULL) {
         return;
     }
@@ -642,7 +657,7 @@ static void app_intercom_ws_rx_push(const uint8_t *data, uint16_t len)
 
 static int app_intercom_ws_rx_pop(uint8_t *out, uint16_t *out_len)
 {
-    if (out == NULL || out_len == NULL || s_ws_rx_mutex == NULL) {
+    if (out == NULL || out_len == NULL || s_ws_rx_ring == NULL || s_ws_rx_mutex == NULL) {
         return -1;
     }
 
@@ -728,6 +743,16 @@ static int app_intercom_ws_drain_payload(int sock, uint64_t len)
     return 0;
 }
 
+static int app_intercom_ws_set_recv_timeout(int sock, uint32_t timeout_ms)
+{
+    struct timeval tv = {
+        .tv_sec = (long)(timeout_ms / 1000u),
+        .tv_usec = (long)((timeout_ms % 1000u) * 1000u),
+    };
+
+    return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 0 : -1;
+}
+
 static int app_intercom_ws_send_control_frame(int sock,
                                               uint8_t opcode,
                                               const uint8_t *payload,
@@ -776,11 +801,7 @@ static int app_intercom_ws_connect_socket(void)
         return -2;
     }
 
-    struct timeval tv = {
-        .tv_sec = (long)(APP_INTERCOM_WS_RECV_TIMEOUT_MS / 1000u),
-        .tv_usec = (long)((APP_INTERCOM_WS_RECV_TIMEOUT_MS % 1000u) * 1000u),
-    };
-    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)app_intercom_ws_set_recv_timeout(sock, APP_INTERCOM_WS_HANDSHAKE_TIMEOUT_MS);
 
     int ret = connect(sock, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
@@ -965,6 +986,7 @@ static void app_intercom_ws_task(void *arg)
             osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
             continue;
         }
+        (void)app_intercom_ws_set_recv_timeout(sock, APP_INTERCOM_WS_RECV_TIMEOUT_MS);
 
         s_ws_connected = 1;
         s_ws_reset_rx = 0;
