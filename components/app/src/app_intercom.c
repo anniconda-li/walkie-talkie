@@ -39,6 +39,7 @@
 #include "app_business.h"
 #include "app_config.h"
 #include "osal_mutex.h"
+#include "osal_queue.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
@@ -82,6 +83,14 @@ static const char *TAG = "app_intercom";
 
 /** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     8192u
+/** @brief PTT WebSocket 发送任务栈大小，发送与采集分离，避免弱网阻塞麦克风采集。 */
+#define APP_INTERCOM_PTT_TX_TASK_STACK  6144u
+/** @brief PTT 发送队列长度，8 包约 160ms；满时丢旧帧，不阻塞采集。 */
+#define APP_INTERCOM_PTT_TX_QUEUE_LEN   8u
+/** @brief PTT 松手后等待发送队列排空的最长时间，超过则丢弃尾部旧帧。 */
+#define APP_INTERCOM_PTT_TX_DRAIN_MS    300u
+/** @brief PTT 发送队列排空等待步进。 */
+#define APP_INTERCOM_PTT_TX_DRAIN_STEP_MS 10u
 /** @brief WebSocket 播放解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
 #define APP_INTERCOM_RX_TASK_STACK      10240u
 /** @brief WebSocket 心跳任务栈大小。 */
@@ -211,6 +220,11 @@ typedef struct {
     uint8_t data[APP_INTERCOM_PACKET_MAX_BYTES];   /**< 完整 WTK1 包字节。 */
 } app_intercom_ws_rx_frame_t;
 
+typedef struct {
+    uint16_t samples;                              /**< 本帧有效 PCM 样本数。 */
+    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 待发送的 20ms PCM 包。 */
+} app_intercom_ptt_audio_msg_t;
+
 /* ==========================================================================
  * 全局状态变量
  * ========================================================================== */
@@ -218,6 +232,18 @@ typedef struct {
 /** @brief PTT 发送任务句柄，优先级 6（高于 biz_ai），
  *  确保 PTT 实时音频采集不被 AI 任务抢占。 */
 static osal_task_t s_ptt_task = NULL;
+
+/** @brief PTT WebSocket 发送任务句柄，消费 s_ptt_tx_queue 中的音频帧。 */
+static osal_task_t s_ptt_tx_task = NULL;
+
+/** @brief PTT 音频发送队列，采集任务写入，发送任务消费。 */
+static osal_queue_t s_ptt_tx_queue = NULL;
+
+/** @brief PTT 发送任务统计，由采集任务在一次 PTT 结束后读取。 */
+static volatile uint32_t s_ptt_tx_send_ok = 0u;
+static volatile uint32_t s_ptt_tx_send_fail = 0u;
+static volatile int s_ptt_tx_last_send_ret = 0;
+static volatile int s_ptt_tx_busy = 0;
 
 /** @brief 心跳/重连任务句柄，网络切换后用于立即唤醒重连。 */
 static osal_task_t s_heartbeat_task = NULL;
@@ -425,7 +451,8 @@ static uint16_t app_intercom_build_packet(uint8_t *out,
     out[4] = type;
     out[5] = APP_INTERCOM_PACKET_HEADER_LEN;
     app_intercom_write_u16(&out[6], (uint16_t)s_current_channel);
-    app_intercom_write_u32(&out[8], s_packet_seq++);
+    uint32_t seq = __atomic_fetch_add(&s_packet_seq, 1u, __ATOMIC_RELAXED);
+    app_intercom_write_u32(&out[8], seq);
     app_intercom_write_u32(&out[12], osal_get_tick_ms());
     /* 设备名固定 16 字节，短名后面补 0，便于服务器原样转发和客户端比较。 */
     memset(&out[16], 0, APP_INTERCOM_DEVICE_FIELD_LEN);
@@ -2092,6 +2119,106 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
     return app_intercom_send_packet_transport(packet, packet_len, APP_INTERCOM_PKT_AUDIO);
 }
 
+static void app_intercom_ptt_tx_stats_reset(void)
+{
+    s_ptt_tx_send_ok = 0u;
+    s_ptt_tx_send_fail = 0u;
+    s_ptt_tx_last_send_ret = 0;
+}
+
+static uint32_t app_intercom_ptt_tx_queue_clear(void)
+{
+    if (s_ptt_tx_queue == NULL) {
+        return 0u;
+    }
+
+    uint32_t dropped = 0u;
+    app_intercom_ptt_audio_msg_t msg;
+    while (osal_queue_recv(s_ptt_tx_queue, &msg, OSAL_WAIT_NONE) == 0) {
+        dropped++;
+    }
+    return dropped;
+}
+
+static void app_intercom_ptt_tx_wait_drain(uint32_t timeout_ms)
+{
+    if (s_ptt_tx_queue == NULL) {
+        return;
+    }
+
+    uint32_t start = osal_get_tick_ms();
+    while ((osal_queue_get_count(s_ptt_tx_queue) > 0u || s_ptt_tx_busy != 0) &&
+           (uint32_t)(osal_get_tick_ms() - start) < timeout_ms) {
+        osal_delay_ms(APP_INTERCOM_PTT_TX_DRAIN_STEP_MS);
+    }
+}
+
+static int app_intercom_ptt_tx_enqueue(const int16_t *pcm,
+                                       uint16_t samples,
+                                       uint32_t *drop_count)
+{
+    if (s_ptt_tx_queue == NULL ||
+        pcm == NULL ||
+        samples == 0u ||
+        samples > APP_INTERCOM_PACKET_SAMPLES) {
+        return -1;
+    }
+
+    app_intercom_ptt_audio_msg_t msg = {
+        .samples = samples,
+    };
+    memcpy(msg.pcm, pcm, (size_t)samples * sizeof(int16_t));
+
+    if (osal_queue_send(s_ptt_tx_queue, &msg, OSAL_WAIT_NONE) == 0) {
+        return 0;
+    }
+
+    app_intercom_ptt_audio_msg_t dropped_msg;
+    if (osal_queue_recv(s_ptt_tx_queue, &dropped_msg, OSAL_WAIT_NONE) == 0) {
+        if (drop_count != NULL) {
+            (*drop_count)++;
+        }
+    }
+
+    if (osal_queue_send(s_ptt_tx_queue, &msg, OSAL_WAIT_NONE) == 0) {
+        return 1;
+    }
+
+    if (drop_count != NULL) {
+        (*drop_count)++;
+    }
+    return -2;
+}
+
+static void app_intercom_ptt_tx_task(void *arg)
+{
+    (void)arg;
+    app_intercom_ptt_audio_msg_t msg;
+    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];
+
+    while (1) {
+        if (osal_queue_recv(s_ptt_tx_queue, &msg, OSAL_WAIT_FOREVER) != 0) {
+            continue;
+        }
+
+        if (app_intercom_tx_ready() == 0) {
+            s_ptt_tx_send_fail++;
+            s_ptt_tx_last_send_ret = -10;
+            continue;
+        }
+
+        s_ptt_tx_busy = 1;
+        int ret = app_intercom_send_audio_packet(packet, msg.pcm, msg.samples);
+        s_ptt_tx_busy = 0;
+        if (ret == 0) {
+            s_ptt_tx_send_ok++;
+        } else {
+            s_ptt_tx_send_fail++;
+            s_ptt_tx_last_send_ret = ret;
+        }
+    }
+}
+
 /* ==========================================================================
  * WebSocket 接收播放任务
  * ========================================================================== */
@@ -2196,13 +2323,11 @@ static void app_intercom_rx_task(void *arg)
  * 3. 发送 PTT_START 控制包（通知服务器和同频道其他人）
  * 4. 循环（while (s_ptt_active)）：
  *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
- *    b. 按 1 帧为一个 20ms PCM 包
- *    c. app_intercom_build_packet(packet, AUDIO, pcm, 640)
- *    d. 通过 WebSocket binary frame 发给服务器
- *    e. 服务器收到后原样转发给同频道所有其他客户端
- * 5. 用户松手 → s_ptt_active = 0 → 退出循环
- * 6. 发送 PTT_STOP 控制包
- * 7. 打印发送统计（成功/失败帧数）
+ *    b. 按 1 帧为一个 20ms PCM 包放入发送队列
+ *    c. biz_ptt_tx 独立消费队列并通过 WebSocket binary frame 发给服务器
+ * 5. 队列满时丢弃旧帧，保证采集不被弱网 WebSocket 写入阻塞
+ * 6. 用户松手 → s_ptt_active = 0 → 退出循环，短暂等待队列排空后发 PTT_STOP
+ * 7. 打印采集/入队/发送统计
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
@@ -2217,7 +2342,6 @@ static void app_intercom_ptt_task(void *arg)
     (void)arg;
     int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
     int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES];    /* PCM 发送包缓冲 */
-    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
         (void)osal_task_notify_take(OSAL_WAIT_FOREVER);
@@ -2235,14 +2359,19 @@ static void app_intercom_ptt_task(void *arg)
         }
 
         /* PTT 期间按固定 20ms PCM 包发送，不做编解码和重传。 */
+        app_intercom_ptt_tx_stats_reset();
+        uint32_t stale_dropped = app_intercom_ptt_tx_queue_clear();
+        if (stale_dropped > 0u) {
+            APP_LOGW(TAG, "PTT 发送队列清理旧帧, drop=%u", (unsigned int)stale_dropped);
+        }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
         uint32_t read_fail = 0u;
-        uint32_t send_ok = 0u;
-        uint32_t send_fail = 0u;
+        uint32_t queue_ok = 0u;
+        uint32_t queue_drop = stale_dropped;
+        uint32_t queue_fail = 0u;
         int last_read_ret = 0;
-        int last_send_ret = 0;
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
@@ -2264,12 +2393,11 @@ static void app_intercom_ptt_task(void *arg)
                         continue;
                     }
 
-                    int send_ret = app_intercom_send_audio_packet(packet, tx_pcm, tx_samples);
-                    if (send_ret == 0) {
-                        send_ok++;
+                    int enqueue_ret = app_intercom_ptt_tx_enqueue(tx_pcm, tx_samples, &queue_drop);
+                    if (enqueue_ret >= 0) {
+                        queue_ok++;
                     } else {
-                        send_fail++;
-                        last_send_ret = send_ret;
+                        queue_fail++;
                     }
                     tx_samples = 0u;
                 }
@@ -2279,24 +2407,34 @@ static void app_intercom_ptt_task(void *arg)
             }
         }
         if (tx_samples > 0u) {
-            int send_ret = app_intercom_send_audio_packet(packet, tx_pcm, tx_samples);
-            if (send_ret == 0) {
-                send_ok++;
+            int enqueue_ret = app_intercom_ptt_tx_enqueue(tx_pcm, tx_samples, &queue_drop);
+            if (enqueue_ret >= 0) {
+                queue_ok++;
             } else {
-                send_fail++;
-                last_send_ret = send_ret;
+                queue_fail++;
             }
+        }
+
+        app_intercom_ptt_tx_wait_drain(APP_INTERCOM_PTT_TX_DRAIN_MS);
+        uint32_t tail_dropped = app_intercom_ptt_tx_queue_clear();
+        if (tail_dropped > 0u) {
+            queue_drop += tail_dropped;
+            APP_LOGW(TAG, "PTT 松手后丢弃未及时发送的尾帧, drop=%u", (unsigned int)tail_dropped);
         }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
         APP_LOGI(TAG,
-                 "PTT 发送统计: read_ok=%u, read_fail=%u, send_ok=%u, send_fail=%u, "
+                 "PTT 发送统计: read_ok=%u, read_fail=%u, queue_ok=%u, queue_drop=%u, "
+                 "queue_fail=%u, send_ok=%u, send_fail=%u, "
                  "last_read=%d, last_send=%d",
                  (unsigned int)read_ok,
                  (unsigned int)read_fail,
-                 (unsigned int)send_ok,
-                 (unsigned int)send_fail,
+                 (unsigned int)queue_ok,
+                 (unsigned int)queue_drop,
+                 (unsigned int)queue_fail,
+                 (unsigned int)s_ptt_tx_send_ok,
+                 (unsigned int)s_ptt_tx_send_fail,
                  last_read_ret,
-                 last_send_ret);
+                 s_ptt_tx_last_send_ret);
         app_business_audio_session_end();
     }
 }
@@ -2309,7 +2447,8 @@ static void app_intercom_ptt_task(void *arg)
  * @brief 启动对讲模块（开机时由 app_business_start 调用）。
  *
  * ## 创建的任务
- * - biz_ptt（优先级 6, 栈 8192）—— PTT 发送
+ * - biz_ptt（优先级 6, 栈 8192）—— PTT 音频采集和入队
+ * - biz_ptt_tx（优先级 5, 栈 6144）—— PTT WebSocket 音频发送
  * - biz_ws_rx（优先级 5, 栈 8192）—— WebSocket 长连接读包
  * - biz_ws_play（优先级 5, 栈 10240）—— WebSocket 包解析和播放
  * - biz_heartbeat（优先级 4, 栈 6144）—— WebSocket 心跳
@@ -2325,6 +2464,26 @@ int app_intercom_start(void)
     int ret = 0;
     if (service_network_is_ready() != 1) {
         APP_LOGI(TAG, "WebSocket 对讲等待网络就绪后连接");
+    }
+
+    if (s_ptt_tx_queue == NULL) {
+        s_ptt_tx_queue = osal_queue_create(APP_INTERCOM_PTT_TX_QUEUE_LEN,
+                                           sizeof(app_intercom_ptt_audio_msg_t));
+        if (s_ptt_tx_queue == NULL) {
+            APP_LOGE(TAG, "PTT 发送队列创建失败");
+            return -1;
+        }
+    }
+
+    ret = osal_task_create("biz_ptt_tx",
+                           app_intercom_ptt_tx_task,
+                           NULL,
+                           APP_INTERCOM_PTT_TX_TASK_STACK,
+                           5u,
+                           &s_ptt_tx_task);
+    if (ret != 0) {
+        APP_LOGE(TAG, "PTT 发送任务启动失败, ret=%d", ret);
+        return ret;
     }
 
     ret = osal_task_create("biz_ptt",
