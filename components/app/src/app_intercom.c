@@ -2014,8 +2014,8 @@ static void app_intercom_rx_task(void *arg)
         }
         app_intercom_ws_rx_stats_log(osal_get_tick_ms());
 
-        if (ws_drained == 0u && s_rx_jitter_playing == 0u) {
-            osal_delay_ms(5u);
+        if (ws_drained == 0u) {
+            osal_delay_ms(s_rx_jitter_playing != 0u ? 1u : 5u);
         }
         app_intercom_jitter_play_tick();
         app_intercom_rx_stop_if_idle();
