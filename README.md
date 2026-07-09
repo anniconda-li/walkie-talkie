@@ -1,6 +1,6 @@
 # Walkie Talkie V1
 
-ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、UDP 实时对讲、AI 语音问答、相机上传、音频录放、LCD/触摸 UI 和状态监控。
+ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、WebSocket 实时对讲、AI 语音问答、相机上传、音频录放、LCD/触摸 UI 和状态监控。
 
 ## 项目结构
 
@@ -8,18 +8,18 @@ ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、UDP 实时对�
 - `components/wdriver/`: 板级外设基础封装，包括 I2C、I2S、SPI、UART 和引脚配置。
 - `components/device/`: 具体设备驱动，包括 WiFi、ML307C、LCD、触摸、相机、电池、麦克风和功放/codec。
 - `components/service/`: 面向业务的能力抽象，包括网络、音频、屏幕、相机和电池服务。
-- `components/app/`: 业务层，包括 UDP 对讲、AI 问答、相机业务、网络切换、UI 和状态监控。
+- `components/app/`: 业务层，包括 WebSocket 对讲、AI 问答、相机业务、网络切换、UI 和状态监控。
 - `components/osal/`: FreeRTOS 任务、队列、互斥锁、堆和日志的轻量封装。
-- `tools/wifi_net_test_server.py`: 局域网测试服务，提供 UDP 对讲测试、AI WAV 分片协议和 JPEG 上传接口。
+- `tools/wifi_net_test_server.py`: 局域网测试服务，提供对讲测试、AI WAV 分片协议和 JPEG 上传接口。
 
 ## 关键配置
 
 主要业务配置集中在 `components/app/inc/app_config.h`：
 
 - `APP_BUSINESS_DEVICE_NAME`: 设备名，默认 `walkie-01`。
-- `APP_BUSINESS_SERVER_HOST`: UDP 对讲服务器地址。
-- `APP_BUSINESS_UDP_PORT`: UDP 对讲端口，默认 `9000`。
-- `APP_BUSINESS_HTTP_BASE_URL`: FastAPI 业务服务根地址，例如 `http://<PC_LAN_IP>:8000`。
+- `APP_BUSINESS_SERVER_HOST`: 业务服务器主机地址。
+- `APP_BUSINESS_WS_PORT`: WebSocket 对讲服务端口，当前 `18081`。
+- `APP_BUSINESS_HTTP_BASE_URL`: AI/相机 HTTP 业务服务根地址，当前 `http://139.129.17.67:18080`。
 - `APP_AI_UPLOAD_CHUNK_BYTES`: AI 请求音频上传分片大小，当前 `8192` 字节。
 - `APP_AI_REPLY_CHUNK_BYTES`: AI 回复音频拉取分片大小，当前 `32768` 字节。
 - `AUTO_PLAY_REPLY_AUDIO`: AI 回复语音是否自动播放，默认 `0`，即文本先显示、语音按钮手动播放。
@@ -29,7 +29,7 @@ ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、UDP 实时对�
 
 板级引脚和外设开关集中在 `components/wdriver/inc/wdriver_config.h`。当前默认音频后端为 `INMP441 + MAX98357A`，WiFi 网络方案下默认不初始化 ML307C UART。
 
-网络后端由 service 装配层选择并暴露为统一接口。WiFi 和 ML307C 都通过 `service_network` 向 app 层提供 UDP、TCP 和 HTTP POST 能力。
+网络后端由 service 装配层选择并暴露为统一接口。WiFi 和 ML307C 都通过 `service_network` 向 app 层提供 TCP、HTTP POST 和兼容 UDP 能力；当前对讲业务固定走 WebSocket。
 
 ## AI 语音链路
 
@@ -261,11 +261,11 @@ Content-Type: application/json
 
 校验通过后，从 `data` chunk 中解析 PCM，并通过预缓冲队列连续播放。
 
-## UDP 对讲
+## WebSocket 对讲
 
-UDP 对讲使用 `WTK1` 自定义包。测试服务会记录设备注册、频道切换、PTT start/stop 和音频包；单设备测试时，服务端会把同设备音频包改写为 `server-echo` 后回发，避免客户端因设备名相同而丢弃。
+WebSocket 对讲使用 `WTK1` 自定义包作为 binary frame payload。对讲服务独立于 AI/相机 HTTP 服务，当前端口为 `APP_BUSINESS_WS_PORT`，默认 `18081`；AI/相机 HTTP 仍使用 `APP_BUSINESS_HTTP_BASE_URL`，当前为 `18080`。
 
-业务层的 UDP 对讲路径在 `components/app/src/app_intercom.c`，音频帧为：
+业务层的 WebSocket 对讲路径在 `components/app/src/app_intercom.c`，音频帧为：
 
 - 16000 Hz
 - 16-bit PCM
@@ -308,20 +308,19 @@ py -3.11 -m venv .venv
 启动默认测试服务：
 
 ```powershell
-.\.venv\Scripts\python.exe tools\wifi_net_test_server.py --host 0.0.0.0 --http-port 8000 --udp-port 9000
+.\.venv\Scripts\python.exe tools\wifi_net_test_server.py --host 0.0.0.0 --http-port 8000
 ```
 
 测试 AI 长回复和非 44 字节 `data` 起点：
 
 ```powershell
-.\.venv\Scripts\python.exe tools\wifi_net_test_server.py --host 0.0.0.0 --http-port 8000 --udp-port 9000 --ai-reply-repeat 5 --ai-reply-extra-chunk
+.\.venv\Scripts\python.exe tools\wifi_net_test_server.py --host 0.0.0.0 --http-port 8000 --ai-reply-repeat 5 --ai-reply-extra-chunk
 ```
 
 参数：
 
-- `--host`: HTTP/UDP 绑定地址，默认 `0.0.0.0`。
+- `--host`: HTTP 绑定地址，默认 `0.0.0.0`。
 - `--http-port`: FastAPI HTTP 端口，默认 `8000`。
-- `--udp-port`: UDP 对讲端口，默认 `9000`。
 - `--wav-save-dir`: 保存收到的 AI 请求 WAV。
 - `--jpg-save-dir`: 保存收到的相机 JPEG。
 - `--ai-reply-repeat`: 将上传 WAV 的 PCM 重复 N 次作为回复，用于测试长回复边拉边播。
@@ -332,6 +331,7 @@ py -3.11 -m venv .venv
 ```c
 #define APP_BUSINESS_SERVER_HOST   "192.168.1.100"
 #define APP_BUSINESS_HTTP_BASE_URL "http://192.168.1.100:8000"
+#define APP_BUSINESS_WS_PORT       18081
 ```
 
 ## 常见联调问题
@@ -341,4 +341,4 @@ py -3.11 -m venv .venv
 - WAV 解析失败：确认回复为 PCM 16kHz、mono、16-bit，并且存在合法 `fmt ` 和 `data` chunk。
 - ML307C HTTP 失败：确认单片 body 不超过对应的上传/拉取分片大小，URL 和 header 没有超过 AT 命令缓冲限制。
 - 相机上传失败：确认 body 是完整 JPEG，且 `Content-Type` 包含 `image/jpeg` 或 `image/jpg`。
-- UDP 没有回音：确认设备和测试服务在同一局域网，端口为 `9000`，防火墙允许 UDP 入站。
+- WebSocket 对讲未连接：确认对讲服务监听 `APP_BUSINESS_WS_PORT`，路由为 `/intercom/ws`，且设备已获取 IP。

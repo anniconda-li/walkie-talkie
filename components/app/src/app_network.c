@@ -22,17 +22,23 @@ static const char *TAG = "app_network";
 #define APP_NETWORK_NVS_MODE           "mode"
 #define APP_NETWORK_NVS_WIFI_SSID      "wifi_ssid"
 #define APP_NETWORK_NVS_WIFI_PASSWORD  "wifi_pwd"
-#define APP_NETWORK_WIFI_CONNECT_MS    15000u
+#define APP_NETWORK_WIFI_CONNECT_MS    12000u
+#define APP_NETWORK_BOOT_WIFI_CONNECT_MS 6000u
 #define APP_NETWORK_FAKE_4G_CONNECT_MS 22000u
-#define APP_NETWORK_WIFI_RETRY_COUNT   3u
+#define APP_NETWORK_WIFI_RETRY_COUNT   2u
+#define APP_NETWORK_BOOT_WIFI_RETRY_COUNT 1u
 #define APP_NETWORK_FAKE_4G_RETRY_COUNT 5u
 #define APP_NETWORK_RETRY_DELAY_MS     1200u
 #define APP_NETWORK_MONITOR_MS         10000u
+#define APP_NETWORK_CANCEL_WAIT_MS     1800u
+#define APP_NETWORK_CANCEL_POLL_MS     50u
 #define APP_NETWORK_FAKE_4G_SSID       "14"
 #define APP_NETWORK_FAKE_4G_PASSWORD   "12345678"
 
 static volatile int s_started = 0;
 static volatile int s_switching = 0;
+static volatile int s_auto_connecting = 0;
+static volatile int s_auto_connect_cancel = 0;
 static app_network_mode_t s_mode = APP_NETWORK_MODE_NONE;
 static osal_mutex_t s_lock = NULL;
 
@@ -73,6 +79,23 @@ static void app_network_end_switch(void)
     }
 }
 
+static int app_network_cancel_auto_connect_and_wait(uint32_t wait_ms)
+{
+    if (!s_auto_connecting) {
+        return 0;
+    }
+
+    s_auto_connect_cancel = 1;
+    (void)d_wifi_cancel_connect();
+
+    uint32_t start = osal_get_tick_ms();
+    while (s_auto_connecting && (osal_get_tick_ms() - start) < wait_ms) {
+        osal_delay_ms(APP_NETWORK_CANCEL_POLL_MS);
+    }
+
+    return s_auto_connecting ? -1 : 0;
+}
+
 static void app_network_set_mode(app_network_mode_t mode)
 {
     if (app_network_lock() == 0) {
@@ -100,7 +123,8 @@ static int app_network_ensure_wifi_service(void)
 static int app_network_connect_sta_with_retry(const char *ssid,
                                               const char *password,
                                               uint32_t timeout_ms,
-                                              uint32_t retry_count)
+                                              uint32_t retry_count,
+                                              volatile int *cancel_flag)
 {
     int ret = -1;
 
@@ -109,11 +133,20 @@ static int app_network_connect_sta_with_retry(const char *ssid,
     }
 
     for (uint32_t attempt = 0u; attempt < retry_count; attempt++) {
+        if (cancel_flag != NULL && *cancel_flag) {
+            return -7;
+        }
         (void)d_wifi_disconnect();
         osal_delay_ms(300u);
+        if (cancel_flag != NULL && *cancel_flag) {
+            return -7;
+        }
         ret = d_wifi_connect(ssid, password, timeout_ms);
         if (ret == 0) {
             return 0;
+        }
+        if (cancel_flag != NULL && *cancel_flag) {
+            return -7;
         }
 
         APP_LOGW(TAG,
@@ -204,6 +237,7 @@ int app_network_scan_wifi(app_network_wifi_ap_t *items, size_t max, size_t *coun
     if (items == NULL || count == NULL || max == 0u || max > UINT16_MAX) {
         return -1;
     }
+    (void)app_network_cancel_auto_connect_and_wait(APP_NETWORK_CANCEL_WAIT_MS);
 
     d_wifi_ap_record_t records[max];
     uint16_t scan_count = 0;
@@ -231,6 +265,8 @@ int app_network_connect_wifi(const char *ssid, const char *password)
         return -1;
     }
 
+    (void)app_network_cancel_auto_connect_and_wait(APP_NETWORK_CANCEL_WAIT_MS);
+
     ret = app_network_begin_switch();
     if (ret != 0) {
         return ret;
@@ -241,7 +277,8 @@ int app_network_connect_wifi(const char *ssid, const char *password)
     ret = app_network_connect_sta_with_retry(ssid,
                                              password,
                                              APP_NETWORK_WIFI_CONNECT_MS,
-                                             APP_NETWORK_WIFI_RETRY_COUNT);
+                                             APP_NETWORK_WIFI_RETRY_COUNT,
+                                             NULL);
     if (ret != 0) {
         APP_LOGW(TAG, "WiFi 连接失败, ssid=%s, ret=%d", ssid != NULL ? ssid : "", ret);
         (void)service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
@@ -264,6 +301,8 @@ int app_network_connect_wifi(const char *ssid, const char *password)
 
 int app_network_enter_wifi_scan_mode(void)
 {
+    (void)app_network_cancel_auto_connect_and_wait(APP_NETWORK_CANCEL_WAIT_MS);
+
     int ret = app_network_begin_switch();
     if (ret != 0) {
         return ret;
@@ -285,6 +324,8 @@ int app_network_enter_wifi_scan_mode(void)
 
 int app_network_select_4g(void)
 {
+    (void)app_network_cancel_auto_connect_and_wait(APP_NETWORK_CANCEL_WAIT_MS);
+
     int ret = app_network_begin_switch();
     if (ret != 0) {
         return ret;
@@ -309,7 +350,8 @@ int app_network_select_4g(void)
     ret = app_network_connect_sta_with_retry(APP_NETWORK_FAKE_4G_SSID,
                                              APP_NETWORK_FAKE_4G_PASSWORD,
                                              APP_NETWORK_FAKE_4G_CONNECT_MS,
-                                             APP_NETWORK_FAKE_4G_RETRY_COUNT);
+                                             APP_NETWORK_FAKE_4G_RETRY_COUNT,
+                                             NULL);
     if (ret != 0) {
         APP_LOGW(TAG, "伪 4G WiFi 连接失败, ssid=%s, ret=%d", APP_NETWORK_FAKE_4G_SSID, ret);
         (void)d_wifi_disconnect();
@@ -406,10 +448,31 @@ static void app_network_task(void *arg)
     char password[65];
     int load_ret = app_network_load_wifi(ssid, sizeof(ssid), password, sizeof(password));
     if (load_ret == 0) {
-        int ret = app_network_connect_wifi(ssid, password);
-        if (ret != 0) {
+        s_auto_connecting = 1;
+        s_auto_connect_cancel = 0;
+        int ret = app_network_begin_switch();
+        if (ret == 0) {
+            ret = app_network_connect_sta_with_retry(ssid,
+                                                     password,
+                                                     APP_NETWORK_BOOT_WIFI_CONNECT_MS,
+                                                     APP_NETWORK_BOOT_WIFI_RETRY_COUNT,
+                                                     &s_auto_connect_cancel);
+            if (ret == 0 && !s_auto_connect_cancel) {
+                ret = service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
+                if (ret == 0) {
+                    app_network_set_mode(APP_NETWORK_MODE_WIFI);
+                    app_intercom_network_changed();
+                    APP_LOGI(TAG, "开机自动连接上次 WLAN 成功, ssid=%s", ssid);
+                }
+            }
+            app_network_end_switch();
+        }
+        if (s_auto_connect_cancel) {
+            APP_LOGI(TAG, "开机自动连接已被用户操作取消");
+        } else if (ret != 0) {
             APP_LOGW(TAG, "开机自动连接上次 WLAN 失败, ssid=%s, ret=%d", ssid, ret);
         }
+        s_auto_connecting = 0;
     } else {
         APP_LOGI(TAG, "开机未找到已保存 WLAN，等待用户扫描选择");
     }
