@@ -39,7 +39,6 @@
 #include "app_business.h"
 #include "app_config.h"
 #include "osal_mutex.h"
-#include "osal_queue.h"
 #include "osal_task.h"
 #include "service_audio.h"
 #include "service_network.h"
@@ -77,14 +76,6 @@ static const char *TAG = "app_intercom";
 
 /** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     8192u
-/** @brief PTT WebSocket 发送任务栈大小，发送与采集分离，避免弱网阻塞麦克风采集。 */
-#define APP_INTERCOM_PTT_TX_TASK_STACK  6144u
-/** @brief PTT 发送队列长度，8 包约 160ms；满时丢旧帧，不阻塞采集。 */
-#define APP_INTERCOM_PTT_TX_QUEUE_LEN   8u
-/** @brief PTT 松手后等待发送队列排空的最长时间，超过则丢弃尾部旧帧。 */
-#define APP_INTERCOM_PTT_TX_DRAIN_MS    300u
-/** @brief PTT 发送队列排空等待步进。 */
-#define APP_INTERCOM_PTT_TX_DRAIN_STEP_MS 10u
 /** @brief WebSocket 播放解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
 #define APP_INTERCOM_RX_TASK_STACK      10240u
 /** @brief WebSocket 心跳任务栈大小。 */
@@ -143,16 +134,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
 /** @brief WebSocket 发送超时，兼顾公网抖动和 PTT 任务阻塞上限。 */
 #define APP_INTERCOM_WS_SEND_TIMEOUT_MS  200u
-/** @brief WebSocket 音频发送互斥等待时间，拿不到锁即丢弃本帧。 */
+/** @brief WebSocket 发送互斥等待时间。 */
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
-/** @brief WebSocket 控制包发送互斥等待时间，PTT_START/STOP 等控制包比音频更重要。 */
-#define APP_INTERCOM_WS_CONTROL_LOCK_MS  80u
-/** @brief 连续背压达到该次数后认为连接业务不可用，主动重连。 */
-#define APP_INTERCOM_WS_BACKPRESSURE_LIMIT 4u
-/** @brief 背压连续计数窗口，超过窗口后重新累计。 */
-#define APP_INTERCOM_WS_BACKPRESSURE_WINDOW_MS 1000u
-/** @brief 背压触发重连日志节流。 */
-#define APP_INTERCOM_WS_BACKPRESSURE_LOG_MS 1000u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
 /** @brief WebSocket 下行队列容量，128 包约 2.56s，放在 PSRAM 中吸收播放任务短时阻塞。 */
@@ -172,14 +155,6 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_OPCODE_CLOSE     0x8u
 #define APP_INTERCOM_WS_OPCODE_PING      0x9u
 #define APP_INTERCOM_WS_OPCODE_PONG      0xau
-
-#define APP_INTERCOM_WS_SEND_INVALID     (-1)
-#define APP_INTERCOM_WS_SEND_LOCK_BUSY   (-2)
-#define APP_INTERCOM_WS_SEND_NOT_READY   (-3)
-#define APP_INTERCOM_WS_SEND_BACKPRESSURE (-4)
-#define APP_INTERCOM_WS_SEND_CLOSED      (-5)
-#define APP_INTERCOM_WS_SEND_NET_DOWN    (-6)
-#define APP_INTERCOM_WS_SEND_ERROR       (-7)
 
 /** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
@@ -220,11 +195,6 @@ typedef struct {
     uint8_t data[APP_INTERCOM_PACKET_MAX_BYTES];   /**< 完整 WTK1 包字节。 */
 } app_intercom_ws_rx_frame_t;
 
-typedef struct {
-    uint16_t samples;                              /**< 本帧有效 PCM 样本数。 */
-    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 待发送的 20ms PCM 包。 */
-} app_intercom_ptt_audio_msg_t;
-
 /* ==========================================================================
  * 全局状态变量
  * ========================================================================== */
@@ -232,18 +202,6 @@ typedef struct {
 /** @brief PTT 发送任务句柄，优先级 6（高于 biz_ai），
  *  确保 PTT 实时音频采集不被 AI 任务抢占。 */
 static osal_task_t s_ptt_task = NULL;
-
-/** @brief PTT WebSocket 发送任务句柄，消费 s_ptt_tx_queue 中的音频帧。 */
-static osal_task_t s_ptt_tx_task = NULL;
-
-/** @brief PTT 音频发送队列，采集任务写入，发送任务消费。 */
-static osal_queue_t s_ptt_tx_queue = NULL;
-
-/** @brief PTT 发送任务统计，由采集任务在一次 PTT 结束后读取。 */
-static volatile uint32_t s_ptt_tx_send_ok = 0u;
-static volatile uint32_t s_ptt_tx_send_fail = 0u;
-static volatile int s_ptt_tx_last_send_ret = 0;
-static volatile int s_ptt_tx_busy = 0;
 
 /** @brief 心跳/重连任务句柄，网络切换后用于立即唤醒重连。 */
 static osal_task_t s_heartbeat_task = NULL;
@@ -357,12 +315,6 @@ static uint32_t s_ws_tx_stat_audio = 0u;
 static uint32_t s_ws_tx_stat_control = 0u;
 static uint32_t s_ws_tx_stat_bytes = 0u;
 static uint32_t s_ws_tx_stat_fail = 0u;
-/** @brief 连续 WebSocket AUDIO 发送背压次数，用于识别“假连接”。 */
-static uint32_t s_ws_tx_backpressure_count = 0u;
-/** @brief 本轮连续背压开始时间。 */
-static uint32_t s_ws_tx_backpressure_first_ms = 0u;
-/** @brief 背压触发重连日志节流时间。 */
-static uint32_t s_ws_tx_backpressure_log_ms = 0u;
 /** @brief WebSocket RX 任务弹出包时的临时缓冲。 */
 static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 
@@ -739,38 +691,10 @@ static int app_intercom_ws_send_all(int sock, const uint8_t *data, size_t len)
         if (ret < 0 && errno == EINTR) {
             continue;
         }
-        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return sent == 0u ?
-                   APP_INTERCOM_WS_SEND_BACKPRESSURE :
-                   APP_INTERCOM_WS_SEND_ERROR;
-        }
-        if (service_network_is_ready() != 1) {
-            return APP_INTERCOM_WS_SEND_NET_DOWN;
-        }
-        if (ret == 0) {
-            return APP_INTERCOM_WS_SEND_CLOSED;
-        }
-        if (ret < 0 &&
-            (errno == ECONNRESET ||
-             errno == ENOTCONN ||
-             errno == EPIPE ||
-             errno == ECONNABORTED ||
-             errno == ETIMEDOUT)) {
-            return sent == 0u ?
-                   APP_INTERCOM_WS_SEND_BACKPRESSURE :
-                   APP_INTERCOM_WS_SEND_CLOSED;
-        }
-        return APP_INTERCOM_WS_SEND_ERROR;
+        return -1;
     }
 
     return 0;
-}
-
-static int app_intercom_ws_send_result_is_hard(int ret)
-{
-    return (ret == APP_INTERCOM_WS_SEND_CLOSED ||
-            ret == APP_INTERCOM_WS_SEND_NET_DOWN ||
-            ret == APP_INTERCOM_WS_SEND_ERROR) ? 1 : 0;
 }
 
 static int app_intercom_ws_recv_exact(int sock, uint8_t *buf, size_t len, int allow_idle)
@@ -867,8 +791,7 @@ static void app_intercom_ws_tx_stats_log(uint32_t now)
 static int app_intercom_ws_send_frame(int sock,
                                       uint8_t opcode,
                                       const uint8_t *payload,
-                                      uint16_t payload_len,
-                                      uint32_t lock_timeout_ms)
+                                      uint16_t payload_len)
 {
     uint8_t frame[2u + 2u + 4u + APP_INTERCOM_PACKET_MAX_BYTES];
     uint8_t mask[4];
@@ -878,16 +801,16 @@ static int app_intercom_ws_send_frame(int sock,
     if (payload_len > APP_INTERCOM_PACKET_MAX_BYTES ||
         (payload_len > 0u && payload == NULL) ||
         s_ws_tx_mutex == NULL) {
-        return APP_INTERCOM_WS_SEND_INVALID;
+        return -1;
     }
 
-    if (osal_mutex_lock(s_ws_tx_mutex, lock_timeout_ms) != 0) {
-        return APP_INTERCOM_WS_SEND_LOCK_BUSY;
+    if (osal_mutex_lock(s_ws_tx_mutex, APP_INTERCOM_WS_TX_LOCK_MS) != 0) {
+        return -2;
     }
     if (sock < 0 ||
         (s_ws_connected == 0 && opcode != APP_INTERCOM_WS_OPCODE_CLOSE)) {
         osal_mutex_unlock(s_ws_tx_mutex);
-        return APP_INTERCOM_WS_SEND_NOT_READY;
+        return -3;
     }
 
     mask[0] = (uint8_t)(seed & 0xffu);
@@ -923,51 +846,7 @@ static int app_intercom_ws_send_control_frame(int sock,
     return app_intercom_ws_send_frame(sock,
                                       opcode,
                                       payload,
-                                      payload_len,
-                                      APP_INTERCOM_WS_CONTROL_LOCK_MS);
-}
-
-static void app_intercom_ws_mark_reconnect(void)
-{
-    s_ws_connected = 0;
-    s_ws_force_reconnect = 1;
-    if (s_ws_tx_mutex != NULL &&
-        osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
-        s_ws_sock = -1;
-        osal_mutex_unlock(s_ws_tx_mutex);
-    }
-    if (s_ws_task != NULL) {
-        (void)osal_task_notify_give(s_ws_task);
-    }
-}
-
-static void app_intercom_ws_backpressure_reset(void)
-{
-    s_ws_tx_backpressure_count = 0u;
-    s_ws_tx_backpressure_first_ms = 0u;
-}
-
-static void app_intercom_ws_note_backpressure(uint32_t now)
-{
-    if (s_ws_tx_backpressure_first_ms == 0u ||
-        (uint32_t)(now - s_ws_tx_backpressure_first_ms) > APP_INTERCOM_WS_BACKPRESSURE_WINDOW_MS) {
-        s_ws_tx_backpressure_first_ms = now;
-        s_ws_tx_backpressure_count = 0u;
-    }
-
-    s_ws_tx_backpressure_count++;
-    if (s_ws_tx_backpressure_count < APP_INTERCOM_WS_BACKPRESSURE_LIMIT) {
-        return;
-    }
-
-    if ((uint32_t)(now - s_ws_tx_backpressure_log_ms) >= APP_INTERCOM_WS_BACKPRESSURE_LOG_MS) {
-        APP_LOGW(TAG,
-                 "WebSocket 对讲连续发送背压, count=%u, 触发重连",
-                 (unsigned int)s_ws_tx_backpressure_count);
-        s_ws_tx_backpressure_log_ms = now;
-    }
-    app_intercom_ws_backpressure_reset();
-    app_intercom_ws_mark_reconnect();
+                                      payload_len);
 }
 
 static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t len)
@@ -982,22 +861,19 @@ static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t le
 
     int sock = s_ws_sock;
     if (sock < 0) {
-        return APP_INTERCOM_WS_SEND_NOT_READY;
+        return -2;
     }
 
-    uint32_t lock_timeout_ms = packet[4] == APP_INTERCOM_PKT_AUDIO ?
-                               APP_INTERCOM_WS_TX_LOCK_MS :
-                               APP_INTERCOM_WS_CONTROL_LOCK_MS;
     int ret = app_intercom_ws_send_frame(sock,
                                          APP_INTERCOM_WS_OPCODE_BINARY,
                                          packet,
-                                         len,
-                                         lock_timeout_ms);
+                                         len);
     if (ret != 0) {
-        if (app_intercom_ws_send_result_is_hard(ret) != 0) {
-            app_intercom_ws_mark_reconnect();
+        s_ws_force_reconnect = 1;
+        if (s_ws_task != NULL) {
+            (void)osal_task_notify_give(s_ws_task);
         }
-        return ret;
+        return -3;
     }
 
     return 0;
@@ -1014,7 +890,6 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
     uint32_t now = osal_get_tick_ms();
     int ws_ret = app_intercom_ws_send_binary_packet(packet, len);
     if (ws_ret == 0) {
-        app_intercom_ws_backpressure_reset();
         if (type == APP_INTERCOM_PKT_AUDIO) {
             s_ws_tx_stat_audio++;
         } else {
@@ -1025,24 +900,8 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
         return 0;
     }
 
-    if (APP_INTERCOM_USE_WS_UPLINK != 0) {
+    if (APP_INTERCOM_USE_WS_UPLINK != 0 && s_ws_connected != 0) {
         s_ws_tx_stat_fail++;
-    }
-    if (type == APP_INTERCOM_PKT_AUDIO &&
-        ws_ret == APP_INTERCOM_WS_SEND_BACKPRESSURE &&
-        s_ws_connected != 0) {
-        app_intercom_ws_note_backpressure(now);
-    } else if (type != APP_INTERCOM_PKT_AUDIO &&
-               APP_INTERCOM_USE_WS_UPLINK != 0 &&
-               type != APP_INTERCOM_PKT_HEARTBEAT &&
-               ws_ret != APP_INTERCOM_WS_SEND_NOT_READY) {
-        if (s_ws_connected != 0) {
-            APP_LOGW(TAG,
-                     "WebSocket 控制包发送失败, type=%u, ret=%d, 触发重连",
-                     (unsigned int)type,
-                     ws_ret);
-        }
-        app_intercom_ws_mark_reconnect();
     }
 
     app_intercom_ws_tx_stats_log(now);
@@ -1204,13 +1063,10 @@ static int app_intercom_ws_recv_frame(int sock, uint8_t *payload, uint16_t *payl
     }
 
     if (opcode == APP_INTERCOM_WS_OPCODE_PING) {
-        int pong_ret = app_intercom_ws_send_control_frame(sock,
-                                                          APP_INTERCOM_WS_OPCODE_PONG,
-                                                          payload,
-                                                          (uint8_t)frame_len);
-        if (app_intercom_ws_send_result_is_hard(pong_ret) != 0) {
-            return -7;
-        }
+        (void)app_intercom_ws_send_control_frame(sock,
+                                                 APP_INTERCOM_WS_OPCODE_PONG,
+                                                 payload,
+                                                 (uint8_t)frame_len);
         return 1;
     }
     if (opcode == APP_INTERCOM_WS_OPCODE_PONG ||
@@ -1281,7 +1137,6 @@ static void app_intercom_ws_task(void *arg)
         }
         s_ws_connected = 1;
         s_ws_reset_rx = 0;
-        app_intercom_ws_backpressure_reset();
         app_intercom_ws_rx_clear();
         APP_LOGI(TAG,
                  "WebSocket 对讲已连接: ws://%s:%d%s?device=%s",
@@ -1312,7 +1167,7 @@ static void app_intercom_ws_task(void *arg)
                                                                   APP_INTERCOM_WS_OPCODE_PING,
                                                                   ping_payload,
                                                                   (uint8_t)sizeof(ping_payload));
-                if (app_intercom_ws_send_result_is_hard(ping_ret) != 0) {
+                if (ping_ret != 0) {
                     break;
                 }
                 last_ping_ms = now;
@@ -1337,7 +1192,6 @@ static void app_intercom_ws_task(void *arg)
         close(sock);
         s_ws_force_reconnect = 0;
         s_ws_reset_rx = 1;
-        app_intercom_ws_backpressure_reset();
         app_intercom_ws_rx_clear();
         APP_LOGW(TAG, "WebSocket 对讲断开，准备重连");
         (void)osal_task_notify_take(reconnect_delay_ms);
@@ -2006,106 +1860,6 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
     return app_intercom_send_packet_transport(packet, packet_len, APP_INTERCOM_PKT_AUDIO);
 }
 
-static void app_intercom_ptt_tx_stats_reset(void)
-{
-    s_ptt_tx_send_ok = 0u;
-    s_ptt_tx_send_fail = 0u;
-    s_ptt_tx_last_send_ret = 0;
-}
-
-static uint32_t app_intercom_ptt_tx_queue_clear(void)
-{
-    if (s_ptt_tx_queue == NULL) {
-        return 0u;
-    }
-
-    uint32_t dropped = 0u;
-    app_intercom_ptt_audio_msg_t msg;
-    while (osal_queue_recv(s_ptt_tx_queue, &msg, OSAL_WAIT_NONE) == 0) {
-        dropped++;
-    }
-    return dropped;
-}
-
-static void app_intercom_ptt_tx_wait_drain(uint32_t timeout_ms)
-{
-    if (s_ptt_tx_queue == NULL) {
-        return;
-    }
-
-    uint32_t start = osal_get_tick_ms();
-    while ((osal_queue_get_count(s_ptt_tx_queue) > 0u || s_ptt_tx_busy != 0) &&
-           (uint32_t)(osal_get_tick_ms() - start) < timeout_ms) {
-        osal_delay_ms(APP_INTERCOM_PTT_TX_DRAIN_STEP_MS);
-    }
-}
-
-static int app_intercom_ptt_tx_enqueue(const int16_t *pcm,
-                                       uint16_t samples,
-                                       uint32_t *drop_count)
-{
-    if (s_ptt_tx_queue == NULL ||
-        pcm == NULL ||
-        samples == 0u ||
-        samples > APP_INTERCOM_PACKET_SAMPLES) {
-        return -1;
-    }
-
-    app_intercom_ptt_audio_msg_t msg = {
-        .samples = samples,
-    };
-    memcpy(msg.pcm, pcm, (size_t)samples * sizeof(int16_t));
-
-    if (osal_queue_send(s_ptt_tx_queue, &msg, OSAL_WAIT_NONE) == 0) {
-        return 0;
-    }
-
-    app_intercom_ptt_audio_msg_t dropped_msg;
-    if (osal_queue_recv(s_ptt_tx_queue, &dropped_msg, OSAL_WAIT_NONE) == 0) {
-        if (drop_count != NULL) {
-            (*drop_count)++;
-        }
-    }
-
-    if (osal_queue_send(s_ptt_tx_queue, &msg, OSAL_WAIT_NONE) == 0) {
-        return 1;
-    }
-
-    if (drop_count != NULL) {
-        (*drop_count)++;
-    }
-    return -2;
-}
-
-static void app_intercom_ptt_tx_task(void *arg)
-{
-    (void)arg;
-    app_intercom_ptt_audio_msg_t msg;
-    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];
-
-    while (1) {
-        if (osal_queue_recv(s_ptt_tx_queue, &msg, OSAL_WAIT_FOREVER) != 0) {
-            continue;
-        }
-
-        if (app_intercom_tx_ready() == 0) {
-            s_ptt_tx_send_fail++;
-            s_ptt_tx_last_send_ret = -10;
-            continue;
-        }
-
-        s_ptt_tx_busy = 1;
-        int ret = app_intercom_send_audio_packet(packet, msg.pcm, msg.samples);
-        s_ptt_tx_busy = 0;
-        if (ret == 0) {
-            s_ptt_tx_send_ok++;
-        } else {
-            s_ptt_tx_send_fail++;
-            s_ptt_tx_last_send_ret = ret;
-        }
-    }
-}
-
 /* ==========================================================================
  * WebSocket 接收播放任务
  * ========================================================================== */
@@ -2206,11 +1960,12 @@ static void app_intercom_rx_task(void *arg)
  * 3. 发送 PTT_START 控制包（通知服务器和同频道其他人）
  * 4. 循环（while (s_ptt_active)）：
  *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
- *    b. 按 1 帧为一个 20ms PCM 包放入发送队列
- *    c. biz_ptt_tx 独立消费队列并通过 WebSocket binary frame 发给服务器
- * 5. 队列满时丢弃旧帧，保证采集不被弱网 WebSocket 写入阻塞
- * 6. 用户松手 → s_ptt_active = 0 → 退出循环，短暂等待队列排空后发 PTT_STOP
- * 7. 打印采集/入队/发送统计
+ *    b. 按 1 帧为一个 20ms PCM 包
+ *    c. app_intercom_build_packet(packet, AUDIO, pcm, 640)
+ *    d. WebSocket binary frame 发给服务器
+ * 5. 用户松手 → s_ptt_active = 0 → 退出循环
+ * 6. 发送 PTT_STOP 控制包
+ * 7. 打印发送统计
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
@@ -2225,6 +1980,7 @@ static void app_intercom_ptt_task(void *arg)
     (void)arg;
     int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
     int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES];    /* PCM 发送包缓冲 */
+    uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
         (void)osal_task_notify_take(OSAL_WAIT_FOREVER);
@@ -2241,20 +1997,14 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        /* PTT 期间按固定 20ms PCM 包发送，不做编解码和重传。 */
-        app_intercom_ptt_tx_stats_reset();
-        uint32_t stale_dropped = app_intercom_ptt_tx_queue_clear();
-        if (stale_dropped > 0u) {
-            APP_LOGW(TAG, "PTT 发送队列清理旧帧, drop=%u", (unsigned int)stale_dropped);
-        }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
         uint32_t read_fail = 0u;
-        uint32_t queue_ok = 0u;
-        uint32_t queue_drop = stale_dropped;
-        uint32_t queue_fail = 0u;
+        uint32_t send_ok = 0u;
+        uint32_t send_fail = 0u;
         int last_read_ret = 0;
+        int last_send_ret = 0;
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
@@ -2276,11 +2026,12 @@ static void app_intercom_ptt_task(void *arg)
                         continue;
                     }
 
-                    int enqueue_ret = app_intercom_ptt_tx_enqueue(tx_pcm, tx_samples, &queue_drop);
-                    if (enqueue_ret >= 0) {
-                        queue_ok++;
+                    int send_ret = app_intercom_send_audio_packet(packet, tx_pcm, tx_samples);
+                    if (send_ret == 0) {
+                        send_ok++;
                     } else {
-                        queue_fail++;
+                        send_fail++;
+                        last_send_ret = send_ret;
                     }
                     tx_samples = 0u;
                 }
@@ -2290,34 +2041,25 @@ static void app_intercom_ptt_task(void *arg)
             }
         }
         if (tx_samples > 0u) {
-            int enqueue_ret = app_intercom_ptt_tx_enqueue(tx_pcm, tx_samples, &queue_drop);
-            if (enqueue_ret >= 0) {
-                queue_ok++;
+            int send_ret = app_intercom_send_audio_packet(packet, tx_pcm, tx_samples);
+            if (send_ret == 0) {
+                send_ok++;
             } else {
-                queue_fail++;
+                send_fail++;
+                last_send_ret = send_ret;
             }
         }
 
-        app_intercom_ptt_tx_wait_drain(APP_INTERCOM_PTT_TX_DRAIN_MS);
-        uint32_t tail_dropped = app_intercom_ptt_tx_queue_clear();
-        if (tail_dropped > 0u) {
-            queue_drop += tail_dropped;
-            APP_LOGW(TAG, "PTT 松手后丢弃未及时发送的尾帧, drop=%u", (unsigned int)tail_dropped);
-        }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
         APP_LOGI(TAG,
-                 "PTT 发送统计: read_ok=%u, read_fail=%u, queue_ok=%u, queue_drop=%u, "
-                 "queue_fail=%u, send_ok=%u, send_fail=%u, "
+                 "PTT 发送统计: read_ok=%u, read_fail=%u, send_ok=%u, send_fail=%u, "
                  "last_read=%d, last_send=%d",
                  (unsigned int)read_ok,
                  (unsigned int)read_fail,
-                 (unsigned int)queue_ok,
-                 (unsigned int)queue_drop,
-                 (unsigned int)queue_fail,
-                 (unsigned int)s_ptt_tx_send_ok,
-                 (unsigned int)s_ptt_tx_send_fail,
+                 (unsigned int)send_ok,
+                 (unsigned int)send_fail,
                  last_read_ret,
-                 s_ptt_tx_last_send_ret);
+                 last_send_ret);
         app_business_audio_session_end();
     }
 }
@@ -2330,8 +2072,7 @@ static void app_intercom_ptt_task(void *arg)
  * @brief 启动对讲模块（开机时由 app_business_start 调用）。
  *
  * ## 创建的任务
- * - biz_ptt（优先级 6, 栈 8192）—— PTT 音频采集和入队
- * - biz_ptt_tx（优先级 5, 栈 6144）—— PTT WebSocket 音频发送
+ * - biz_ptt（优先级 6, 栈 8192）—— PTT 采集和 WebSocket 发送
  * - biz_ws_rx（优先级 5, 栈 8192）—— WebSocket 长连接读包
  * - biz_ws_play（优先级 5, 栈 10240）—— WebSocket 包解析和播放
  * - biz_heartbeat（优先级 4, 栈 6144）—— WebSocket 心跳
@@ -2347,26 +2088,6 @@ int app_intercom_start(void)
     int ret = 0;
     if (service_network_is_ready() != 1) {
         APP_LOGI(TAG, "WebSocket 对讲等待网络就绪后连接");
-    }
-
-    if (s_ptt_tx_queue == NULL) {
-        s_ptt_tx_queue = osal_queue_create(APP_INTERCOM_PTT_TX_QUEUE_LEN,
-                                           sizeof(app_intercom_ptt_audio_msg_t));
-        if (s_ptt_tx_queue == NULL) {
-            APP_LOGE(TAG, "PTT 发送队列创建失败");
-            return -1;
-        }
-    }
-
-    ret = osal_task_create("biz_ptt_tx",
-                           app_intercom_ptt_tx_task,
-                           NULL,
-                           APP_INTERCOM_PTT_TX_TASK_STACK,
-                           5u,
-                           &s_ptt_tx_task);
-    if (ret != 0) {
-        APP_LOGE(TAG, "PTT 发送任务启动失败, ret=%d", ret);
-        return ret;
     }
 
     ret = osal_task_create("biz_ptt",
@@ -2481,7 +2202,6 @@ void app_intercom_network_changed(void)
     }
     s_ws_force_reconnect = 1;
     s_ws_reset_rx = 1;
-    app_intercom_ws_backpressure_reset();
     app_intercom_ws_rx_clear();
     if (s_ws_task != NULL) {
         (void)osal_task_notify_give(s_ws_task);
