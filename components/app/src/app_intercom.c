@@ -147,6 +147,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
 /** @brief WebSocket 控制包发送互斥等待时间，PTT_START/STOP 等控制包比音频更重要。 */
 #define APP_INTERCOM_WS_CONTROL_LOCK_MS  80u
+/** @brief AUDIO 写 socket 前最多等待可写的时间，超时则不写入并丢帧。 */
+#define APP_INTERCOM_WS_AUDIO_WRITABLE_MS 5u
+/** @brief 控制帧写 socket 前最多等待可写的时间。 */
+#define APP_INTERCOM_WS_CONTROL_WRITABLE_MS 100u
 /** @brief 连续背压达到该次数后认为连接业务不可用，主动重连。 */
 #define APP_INTERCOM_WS_BACKPRESSURE_LIMIT 4u
 /** @brief 背压连续计数窗口，超过窗口后重新累计。 */
@@ -740,7 +744,9 @@ static int app_intercom_ws_send_all(int sock, const uint8_t *data, size_t len)
             continue;
         }
         if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return APP_INTERCOM_WS_SEND_BACKPRESSURE;
+            return sent == 0u ?
+                   APP_INTERCOM_WS_SEND_BACKPRESSURE :
+                   APP_INTERCOM_WS_SEND_ERROR;
         }
         if (service_network_is_ready() != 1) {
             return APP_INTERCOM_WS_SEND_NET_DOWN;
@@ -754,12 +760,42 @@ static int app_intercom_ws_send_all(int sock, const uint8_t *data, size_t len)
              errno == EPIPE ||
              errno == ECONNABORTED ||
              errno == ETIMEDOUT)) {
-            return APP_INTERCOM_WS_SEND_CLOSED;
+            return sent == 0u ?
+                   APP_INTERCOM_WS_SEND_BACKPRESSURE :
+                   APP_INTERCOM_WS_SEND_CLOSED;
         }
         return APP_INTERCOM_WS_SEND_ERROR;
     }
 
     return 0;
+}
+
+static int app_intercom_ws_wait_writable(int sock, uint32_t timeout_ms)
+{
+    if (sock < 0) {
+        return APP_INTERCOM_WS_SEND_NOT_READY;
+    }
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+
+    struct timeval tv = {
+        .tv_sec = (long)(timeout_ms / 1000u),
+        .tv_usec = (long)((timeout_ms % 1000u) * 1000u),
+    };
+
+    int ret = select(sock + 1, NULL, &wfds, NULL, &tv);
+    if (ret > 0 && FD_ISSET(sock, &wfds)) {
+        return 0;
+    }
+    if (ret == 0 || errno == EINTR) {
+        return APP_INTERCOM_WS_SEND_BACKPRESSURE;
+    }
+    if (service_network_is_ready() != 1) {
+        return APP_INTERCOM_WS_SEND_NET_DOWN;
+    }
+    return APP_INTERCOM_WS_SEND_ERROR;
 }
 
 static int app_intercom_ws_send_result_is_hard(int ret)
@@ -864,7 +900,8 @@ static int app_intercom_ws_send_frame(int sock,
                                       uint8_t opcode,
                                       const uint8_t *payload,
                                       uint16_t payload_len,
-                                      uint32_t lock_timeout_ms)
+                                      uint32_t lock_timeout_ms,
+                                      uint32_t writable_timeout_ms)
 {
     uint8_t frame[2u + 2u + 4u + APP_INTERCOM_PACKET_MAX_BYTES];
     uint8_t mask[4];
@@ -884,6 +921,12 @@ static int app_intercom_ws_send_frame(int sock,
         (s_ws_connected == 0 && opcode != APP_INTERCOM_WS_OPCODE_CLOSE)) {
         osal_mutex_unlock(s_ws_tx_mutex);
         return APP_INTERCOM_WS_SEND_NOT_READY;
+    }
+
+    int ret = app_intercom_ws_wait_writable(sock, writable_timeout_ms);
+    if (ret != 0) {
+        osal_mutex_unlock(s_ws_tx_mutex);
+        return ret;
     }
 
     mask[0] = (uint8_t)(seed & 0xffu);
@@ -906,7 +949,7 @@ static int app_intercom_ws_send_frame(int sock,
         frame[pos + i] = payload[i] ^ mask[i % 4u];
     }
 
-    int ret = app_intercom_ws_send_all(sock, frame, (size_t)(pos + payload_len));
+    ret = app_intercom_ws_send_all(sock, frame, (size_t)(pos + payload_len));
     osal_mutex_unlock(s_ws_tx_mutex);
     return ret;
 }
@@ -920,7 +963,8 @@ static int app_intercom_ws_send_control_frame(int sock,
                                       opcode,
                                       payload,
                                       payload_len,
-                                      APP_INTERCOM_WS_CONTROL_LOCK_MS);
+                                      APP_INTERCOM_WS_CONTROL_LOCK_MS,
+                                      APP_INTERCOM_WS_CONTROL_WRITABLE_MS);
 }
 
 static void app_intercom_ws_mark_reconnect(void)
@@ -988,7 +1032,10 @@ static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t le
                                          APP_INTERCOM_WS_OPCODE_BINARY,
                                          packet,
                                          len,
-                                         lock_timeout_ms);
+                                         lock_timeout_ms,
+                                         packet[4] == APP_INTERCOM_PKT_AUDIO ?
+                                         APP_INTERCOM_WS_AUDIO_WRITABLE_MS :
+                                         APP_INTERCOM_WS_CONTROL_WRITABLE_MS);
     if (ret != 0) {
         if (app_intercom_ws_send_result_is_hard(ret) != 0) {
             app_intercom_ws_mark_reconnect();
@@ -1030,6 +1077,7 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
         app_intercom_ws_note_backpressure(now);
     } else if (type != APP_INTERCOM_PKT_AUDIO &&
                APP_INTERCOM_USE_WS_UPLINK != 0 &&
+               type != APP_INTERCOM_PKT_HEARTBEAT &&
                ws_ret != APP_INTERCOM_WS_SEND_NOT_READY) {
         if (s_ws_connected != 0) {
             APP_LOGW(TAG,
