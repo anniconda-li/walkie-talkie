@@ -141,12 +141,18 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_HANDSHAKE_TIMEOUT_MS 5000u
 /** @brief WebSocket 运行态读取超时，避免任务永久卡住无法感知断网。 */
 #define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
-/** @brief WebSocket 发送超时，弱网背压时尽快丢实时音频帧而不是堆积。 */
-#define APP_INTERCOM_WS_SEND_TIMEOUT_MS  40u
+/** @brief WebSocket 发送超时，兼顾公网抖动和 PTT 任务阻塞上限。 */
+#define APP_INTERCOM_WS_SEND_TIMEOUT_MS  200u
 /** @brief WebSocket 音频发送互斥等待时间，拿不到锁即丢弃本帧。 */
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
 /** @brief WebSocket 控制包发送互斥等待时间，PTT_START/STOP 等控制包比音频更重要。 */
 #define APP_INTERCOM_WS_CONTROL_LOCK_MS  80u
+/** @brief 连续背压达到该次数后认为连接业务不可用，主动重连。 */
+#define APP_INTERCOM_WS_BACKPRESSURE_LIMIT 4u
+/** @brief 背压连续计数窗口，超过窗口后重新累计。 */
+#define APP_INTERCOM_WS_BACKPRESSURE_WINDOW_MS 1000u
+/** @brief 背压触发重连日志节流。 */
+#define APP_INTERCOM_WS_BACKPRESSURE_LOG_MS 1000u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
 /** @brief WebSocket 下行队列容量，128 包约 2.56s，放在 PSRAM 中吸收播放任务短时阻塞。 */
@@ -351,6 +357,12 @@ static uint32_t s_ws_tx_stat_audio = 0u;
 static uint32_t s_ws_tx_stat_control = 0u;
 static uint32_t s_ws_tx_stat_bytes = 0u;
 static uint32_t s_ws_tx_stat_fail = 0u;
+/** @brief 连续 WebSocket AUDIO 发送背压次数，用于识别“假连接”。 */
+static uint32_t s_ws_tx_backpressure_count = 0u;
+/** @brief 本轮连续背压开始时间。 */
+static uint32_t s_ws_tx_backpressure_first_ms = 0u;
+/** @brief 背压触发重连日志节流时间。 */
+static uint32_t s_ws_tx_backpressure_log_ms = 0u;
 /** @brief WebSocket RX 任务弹出包时的临时缓冲。 */
 static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 
@@ -925,6 +937,35 @@ static void app_intercom_ws_mark_reconnect(void)
     }
 }
 
+static void app_intercom_ws_backpressure_reset(void)
+{
+    s_ws_tx_backpressure_count = 0u;
+    s_ws_tx_backpressure_first_ms = 0u;
+}
+
+static void app_intercom_ws_note_backpressure(uint32_t now)
+{
+    if (s_ws_tx_backpressure_first_ms == 0u ||
+        (uint32_t)(now - s_ws_tx_backpressure_first_ms) > APP_INTERCOM_WS_BACKPRESSURE_WINDOW_MS) {
+        s_ws_tx_backpressure_first_ms = now;
+        s_ws_tx_backpressure_count = 0u;
+    }
+
+    s_ws_tx_backpressure_count++;
+    if (s_ws_tx_backpressure_count < APP_INTERCOM_WS_BACKPRESSURE_LIMIT) {
+        return;
+    }
+
+    if ((uint32_t)(now - s_ws_tx_backpressure_log_ms) >= APP_INTERCOM_WS_BACKPRESSURE_LOG_MS) {
+        APP_LOGW(TAG,
+                 "WebSocket 对讲连续发送背压, count=%u, 触发重连",
+                 (unsigned int)s_ws_tx_backpressure_count);
+        s_ws_tx_backpressure_log_ms = now;
+    }
+    app_intercom_ws_backpressure_reset();
+    app_intercom_ws_mark_reconnect();
+}
+
 static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t len)
 {
     if (APP_INTERCOM_USE_WS_UPLINK == 0 ||
@@ -969,6 +1010,7 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
     uint32_t now = osal_get_tick_ms();
     int ws_ret = app_intercom_ws_send_binary_packet(packet, len);
     if (ws_ret == 0) {
+        app_intercom_ws_backpressure_reset();
         if (type == APP_INTERCOM_PKT_AUDIO) {
             s_ws_tx_stat_audio++;
         } else {
@@ -979,8 +1021,23 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
         return 0;
     }
 
-    if (APP_INTERCOM_USE_WS_UPLINK != 0 && s_ws_connected != 0) {
+    if (APP_INTERCOM_USE_WS_UPLINK != 0) {
         s_ws_tx_stat_fail++;
+    }
+    if (type == APP_INTERCOM_PKT_AUDIO &&
+        ws_ret == APP_INTERCOM_WS_SEND_BACKPRESSURE &&
+        s_ws_connected != 0) {
+        app_intercom_ws_note_backpressure(now);
+    } else if (type != APP_INTERCOM_PKT_AUDIO &&
+               APP_INTERCOM_USE_WS_UPLINK != 0 &&
+               ws_ret != APP_INTERCOM_WS_SEND_NOT_READY) {
+        if (s_ws_connected != 0) {
+            APP_LOGW(TAG,
+                     "WebSocket 控制包发送失败, type=%u, ret=%d, 触发重连",
+                     (unsigned int)type,
+                     ws_ret);
+        }
+        app_intercom_ws_mark_reconnect();
     }
 
     app_intercom_ws_tx_stats_log(now);
@@ -1219,6 +1276,7 @@ static void app_intercom_ws_task(void *arg)
         }
         s_ws_connected = 1;
         s_ws_reset_rx = 0;
+        app_intercom_ws_backpressure_reset();
         app_intercom_ws_rx_clear();
         APP_LOGI(TAG,
                  "WebSocket 对讲已连接: ws://%s:%d%s?device=%s",
@@ -1274,6 +1332,7 @@ static void app_intercom_ws_task(void *arg)
         close(sock);
         s_ws_force_reconnect = 0;
         s_ws_reset_rx = 1;
+        app_intercom_ws_backpressure_reset();
         app_intercom_ws_rx_clear();
         APP_LOGW(TAG, "WebSocket 对讲断开，准备重连");
         (void)osal_task_notify_take(reconnect_delay_ms);
@@ -2417,6 +2476,7 @@ void app_intercom_network_changed(void)
     }
     s_ws_force_reconnect = 1;
     s_ws_reset_rx = 1;
+    app_intercom_ws_backpressure_reset();
     app_intercom_ws_rx_clear();
     if (s_ws_task != NULL) {
         (void)osal_task_notify_give(s_ws_task);
