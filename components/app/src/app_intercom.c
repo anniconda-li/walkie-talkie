@@ -141,10 +141,12 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_HANDSHAKE_TIMEOUT_MS 5000u
 /** @brief WebSocket 运行态读取超时，避免任务永久卡住无法感知断网。 */
 #define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
-/** @brief WebSocket 发送超时，避免 PTT 任务在弱网 TCP 写入中长期阻塞。 */
-#define APP_INTERCOM_WS_SEND_TIMEOUT_MS  200u
-/** @brief WebSocket 发送互斥等待时间，拿不到锁即丢弃本帧。 */
+/** @brief WebSocket 发送超时，弱网背压时尽快丢实时音频帧而不是堆积。 */
+#define APP_INTERCOM_WS_SEND_TIMEOUT_MS  40u
+/** @brief WebSocket 音频发送互斥等待时间，拿不到锁即丢弃本帧。 */
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
+/** @brief WebSocket 控制包发送互斥等待时间，PTT_START/STOP 等控制包比音频更重要。 */
+#define APP_INTERCOM_WS_CONTROL_LOCK_MS  80u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
 /** @brief WebSocket 下行队列容量，128 包约 2.56s，放在 PSRAM 中吸收播放任务短时阻塞。 */
@@ -164,6 +166,14 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_OPCODE_CLOSE     0x8u
 #define APP_INTERCOM_WS_OPCODE_PING      0x9u
 #define APP_INTERCOM_WS_OPCODE_PONG      0xau
+
+#define APP_INTERCOM_WS_SEND_INVALID     (-1)
+#define APP_INTERCOM_WS_SEND_LOCK_BUSY   (-2)
+#define APP_INTERCOM_WS_SEND_NOT_READY   (-3)
+#define APP_INTERCOM_WS_SEND_BACKPRESSURE (-4)
+#define APP_INTERCOM_WS_SEND_CLOSED      (-5)
+#define APP_INTERCOM_WS_SEND_NET_DOWN    (-6)
+#define APP_INTERCOM_WS_SEND_ERROR       (-7)
 
 /** @brief 自定义应用层协议包类型枚举。 */
 typedef enum {
@@ -717,10 +727,34 @@ static int app_intercom_ws_send_all(int sock, const uint8_t *data, size_t len)
         if (ret < 0 && errno == EINTR) {
             continue;
         }
-        return -1;
+        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return APP_INTERCOM_WS_SEND_BACKPRESSURE;
+        }
+        if (service_network_is_ready() != 1) {
+            return APP_INTERCOM_WS_SEND_NET_DOWN;
+        }
+        if (ret == 0) {
+            return APP_INTERCOM_WS_SEND_CLOSED;
+        }
+        if (ret < 0 &&
+            (errno == ECONNRESET ||
+             errno == ENOTCONN ||
+             errno == EPIPE ||
+             errno == ECONNABORTED ||
+             errno == ETIMEDOUT)) {
+            return APP_INTERCOM_WS_SEND_CLOSED;
+        }
+        return APP_INTERCOM_WS_SEND_ERROR;
     }
 
     return 0;
+}
+
+static int app_intercom_ws_send_result_is_hard(int ret)
+{
+    return (ret == APP_INTERCOM_WS_SEND_CLOSED ||
+            ret == APP_INTERCOM_WS_SEND_NET_DOWN ||
+            ret == APP_INTERCOM_WS_SEND_ERROR) ? 1 : 0;
 }
 
 static int app_intercom_ws_recv_exact(int sock, uint8_t *buf, size_t len, int allow_idle)
@@ -817,7 +851,8 @@ static void app_intercom_ws_tx_stats_log(uint32_t now)
 static int app_intercom_ws_send_frame(int sock,
                                       uint8_t opcode,
                                       const uint8_t *payload,
-                                      uint16_t payload_len)
+                                      uint16_t payload_len,
+                                      uint32_t lock_timeout_ms)
 {
     uint8_t frame[2u + 2u + 4u + APP_INTERCOM_PACKET_MAX_BYTES];
     uint8_t mask[4];
@@ -827,16 +862,16 @@ static int app_intercom_ws_send_frame(int sock,
     if (payload_len > APP_INTERCOM_PACKET_MAX_BYTES ||
         (payload_len > 0u && payload == NULL) ||
         s_ws_tx_mutex == NULL) {
-        return -1;
+        return APP_INTERCOM_WS_SEND_INVALID;
     }
 
-    if (osal_mutex_lock(s_ws_tx_mutex, APP_INTERCOM_WS_TX_LOCK_MS) != 0) {
-        return -2;
+    if (osal_mutex_lock(s_ws_tx_mutex, lock_timeout_ms) != 0) {
+        return APP_INTERCOM_WS_SEND_LOCK_BUSY;
     }
     if (sock < 0 ||
         (s_ws_connected == 0 && opcode != APP_INTERCOM_WS_OPCODE_CLOSE)) {
         osal_mutex_unlock(s_ws_tx_mutex);
-        return -3;
+        return APP_INTERCOM_WS_SEND_NOT_READY;
     }
 
     mask[0] = (uint8_t)(seed & 0xffu);
@@ -869,7 +904,25 @@ static int app_intercom_ws_send_control_frame(int sock,
                                               const uint8_t *payload,
                                               uint8_t payload_len)
 {
-    return app_intercom_ws_send_frame(sock, opcode, payload, payload_len);
+    return app_intercom_ws_send_frame(sock,
+                                      opcode,
+                                      payload,
+                                      payload_len,
+                                      APP_INTERCOM_WS_CONTROL_LOCK_MS);
+}
+
+static void app_intercom_ws_mark_reconnect(void)
+{
+    s_ws_connected = 0;
+    s_ws_force_reconnect = 1;
+    if (s_ws_tx_mutex != NULL &&
+        osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_ws_sock = -1;
+        osal_mutex_unlock(s_ws_tx_mutex);
+    }
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
 }
 
 static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t len)
@@ -884,16 +937,22 @@ static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t le
 
     int sock = s_ws_sock;
     if (sock < 0) {
-        return -2;
+        return APP_INTERCOM_WS_SEND_NOT_READY;
     }
 
+    uint32_t lock_timeout_ms = packet[4] == APP_INTERCOM_PKT_AUDIO ?
+                               APP_INTERCOM_WS_TX_LOCK_MS :
+                               APP_INTERCOM_WS_CONTROL_LOCK_MS;
     int ret = app_intercom_ws_send_frame(sock,
                                          APP_INTERCOM_WS_OPCODE_BINARY,
                                          packet,
-                                         len);
+                                         len,
+                                         lock_timeout_ms);
     if (ret != 0) {
-        s_ws_force_reconnect = 1;
-        return -3;
+        if (app_intercom_ws_send_result_is_hard(ret) != 0) {
+            app_intercom_ws_mark_reconnect();
+        }
+        return ret;
     }
 
     return 0;
@@ -1083,10 +1142,13 @@ static int app_intercom_ws_recv_frame(int sock, uint8_t *payload, uint16_t *payl
     }
 
     if (opcode == APP_INTERCOM_WS_OPCODE_PING) {
-        (void)app_intercom_ws_send_control_frame(sock,
-                                                 APP_INTERCOM_WS_OPCODE_PONG,
-                                                 payload,
-                                                 (uint8_t)frame_len);
+        int pong_ret = app_intercom_ws_send_control_frame(sock,
+                                                          APP_INTERCOM_WS_OPCODE_PONG,
+                                                          payload,
+                                                          (uint8_t)frame_len);
+        if (app_intercom_ws_send_result_is_hard(pong_ret) != 0) {
+            return -7;
+        }
         return 1;
     }
     if (opcode == APP_INTERCOM_WS_OPCODE_PONG ||
@@ -1183,10 +1245,11 @@ static void app_intercom_ws_task(void *arg)
             uint32_t now = osal_get_tick_ms();
             if ((uint32_t)(now - last_ping_ms) >= APP_INTERCOM_WS_PING_MS) {
                 uint8_t ping_payload[2] = {'w', 's'};
-                if (app_intercom_ws_send_control_frame(sock,
-                                                       APP_INTERCOM_WS_OPCODE_PING,
-                                                       ping_payload,
-                                                       (uint8_t)sizeof(ping_payload)) != 0) {
+                int ping_ret = app_intercom_ws_send_control_frame(sock,
+                                                                  APP_INTERCOM_WS_OPCODE_PING,
+                                                                  ping_payload,
+                                                                  (uint8_t)sizeof(ping_payload));
+                if (app_intercom_ws_send_result_is_hard(ping_ret) != 0) {
                     break;
                 }
                 last_ping_ms = now;
@@ -1194,6 +1257,12 @@ static void app_intercom_ws_task(void *arg)
             app_intercom_ws_rx_stats_log(now);
         }
 
+        if (service_network_is_ready() == 1 && ret != -5) {
+            (void)app_intercom_ws_send_control_frame(sock,
+                                                     APP_INTERCOM_WS_OPCODE_CLOSE,
+                                                     NULL,
+                                                     0u);
+        }
         s_ws_connected = 0;
         if (s_ws_tx_mutex != NULL &&
             osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
