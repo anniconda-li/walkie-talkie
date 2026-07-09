@@ -1,6 +1,6 @@
 /**
  * @file app_intercom.c
- * @brief UDP 实时对讲业务——PTT 发送、UDP 接收和心跳保持。
+ * @brief WebSocket 实时对讲业务——PTT 发送、WebSocket 接收和心跳保持。
  *
  * ## 业务流程概述
  *
@@ -9,17 +9,17 @@
  * 2. 检查音频会话是否被 AI 占用 → 若空闲则置 s_ptt_active = 1
  * 3. notify_give(biz_ptt) → 唤醒 PTT 任务
  * 4. PTT 任务抢占音频会话锁 → 发 PTT_START 控制包
- * 5. 循环：读麦克风 320 samples(20ms) → 封装协议头 → UDP 发送
+ * 5. 循环：读麦克风 320 samples(20ms) → 封装 WTK1 binary 包 → WebSocket 发送
  * 6. 用户松手 → s_ptt_active = 0 → 循环退出 → 发 PTT_STOP
  * 7. 释放音频会话锁 → notify_take 阻塞等待下次
  *
- * ### UDP 接收（biz_udp_rx 任务，优先级 5）
- * 1. 轮询网络下行数据（80ms 超时）
- * 2. 按 WTK1 魔数定位完整包 → 解析 → 若为音频包且非本机 → 播放
+ * ### WebSocket 接收（biz_ws_rx + biz_ws_play 任务）
+ * 1. biz_ws_rx 维护长连接并读取 binary frame
+ * 2. biz_ws_play 消费 WTK1 包 → 解析 → 若为音频包且非本机 → 播放
  *
  * ### 心跳（biz_heartbeat 任务，优先级 4）
- * 1. 空闲时每 3 秒发一次 HEARTBEAT 包
- * 2. 检测到网络断开后自动重建 UDP 通道
+ * 1. 空闲且 WebSocket 已连接时每 3 秒发一次 HEARTBEAT 包
+ * 2. 网络断开时等待网络恢复，由 WebSocket 任务重建长连接
  *
  * ## 自定义应用层协议（基于 WTK1 魔数）
  * ```
@@ -57,7 +57,7 @@
 
 static const char *TAG = "app_intercom";
 
-/** @brief 对讲应用层协议魔数，用于在 UDP 下行字节流中定位包头。 */
+/** @brief 对讲应用层协议魔数，作为 WebSocket binary payload 的包头。 */
 #define APP_INTERCOM_PACKET_MAGIC       "WTK1"
 /** @brief 协议头中设备名字段固定长度，短设备名使用 0 填充。 */
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
@@ -82,25 +82,21 @@ static const char *TAG = "app_intercom";
 
 /** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
 #define APP_INTERCOM_PTT_TASK_STACK     8192u
-/** @brief UDP 接收解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
+/** @brief WebSocket 播放解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
 #define APP_INTERCOM_RX_TASK_STACK      10240u
-/** @brief 心跳和 UDP 重连任务栈大小。 */
+/** @brief WebSocket 心跳任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    6144u
-/** @brief PTT 开始采集前等待 UDP 就绪的最长时间。 */
-#define APP_INTERCOM_PTT_WAIT_UDP_MS    15000u
-/** @brief PTT 等待 UDP 就绪时的轮询间隔。 */
+/** @brief PTT 开始采集前等待 WebSocket 就绪的最长时间。 */
+#define APP_INTERCOM_PTT_WAIT_WS_MS     8000u
+/** @brief PTT 等待 WebSocket 就绪时的轮询间隔。 */
 #define APP_INTERCOM_PTT_WAIT_STEP_MS   100u
-/** @brief 空闲 UDP 心跳间隔，用于保持接收端 NAT/UDP 映射活跃。 */
+/** @brief 空闲 WebSocket 心跳间隔，用于保持服务端在线状态。 */
 #define APP_INTERCOM_HEARTBEAT_IDLE_MS  3000u
 /** @brief 音频忙时不发心跳，只用该间隔继续检查状态。 */
 #define APP_INTERCOM_HEARTBEAT_BUSY_MS  500u
-/** @brief UDP 接收播放空闲关闭时间，延长以避免弱网短断流导致功放反复开关。 */
+/** @brief 接收播放空闲关闭时间，延长以避免弱网短断流导致功放反复开关。 */
 #define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 500u
-/** @brief UDP 接收空闲轮询超时。 */
-#define APP_INTERCOM_RX_READ_IDLE_TIMEOUT_MS 20u
-/** @brief UDP 接收播放中轮询超时，避免网络读取阻塞播放节奏。 */
-#define APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS 4u
-/** @brief UDP 对讲固定音频包时长。 */
+/** @brief 对讲固定音频包时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      (20u * APP_INTERCOM_PACKET_FRAMES)
 /** @brief jitter buffer 容量，64 包约 1280ms，用延迟换弱网播放连续性。 */
 #define APP_INTERCOM_JITTER_FRAME_COUNT  64u
@@ -140,8 +136,12 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_NACK_LOG_INTERVAL_MS 1000u
 /** @brief WebSocket 下行接收任务栈大小，只做 TCP/WebSocket 读包和入队。 */
 #define APP_INTERCOM_WS_TASK_STACK       8192u
-/** @brief WebSocket 断线后的重连间隔，单位 ms。 */
+/** @brief WebSocket 断线后的初始重连间隔，单位 ms。 */
 #define APP_INTERCOM_WS_RECONNECT_MS     2000u
+/** @brief WebSocket 建连失败后的最大退避间隔，单位 ms。 */
+#define APP_INTERCOM_WS_RECONNECT_MAX_MS 15000u
+/** @brief 网络未就绪时 WebSocket 任务的检查间隔，单位 ms。 */
+#define APP_INTERCOM_WS_NO_NET_RECHECK_MS 3000u
 /** @brief WebSocket 空闲 ping 间隔，维持长连接可用性。 */
 #define APP_INTERCOM_WS_PING_MS          15000u
 /** @brief WebSocket 握手响应超时，公网/热点链路下 500ms 过短。 */
@@ -150,7 +150,7 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
 /** @brief WebSocket 发送超时，避免 PTT 任务在弱网 TCP 写入中长期阻塞。 */
 #define APP_INTERCOM_WS_SEND_TIMEOUT_MS  200u
-/** @brief WebSocket 发送互斥等待时间，拿不到锁即回退 UDP。 */
+/** @brief WebSocket 发送互斥等待时间，拿不到锁即丢弃本帧。 */
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
@@ -229,21 +229,19 @@ static osal_task_t s_ws_task = NULL;
 
 /** @brief 对讲模块是否已启动。 */
 static volatile int s_started = 0;
-/** @brief UDP 接收侧是否已打开本地播放输出。 */
+/** @brief 接收侧是否已打开本地播放输出。 */
 static int s_rx_playback_active = 0;
-/** @brief UDP 接收侧最近一次成功播放音频帧的时间。 */
+/** @brief 接收侧最近一次成功播放音频帧的时间。 */
 static uint32_t s_rx_last_audio_ms = 0u;
-/** @brief UDP 接收侧播放统计日志节流时间。 */
+/** @brief 接收侧播放统计日志节流时间。 */
 static uint32_t s_rx_play_log_ms = 0u;
-/** @brief UDP 接收解析缓冲，放在静态区避免挤占 biz_udp_rx 任务栈。 */
-static uint8_t s_rx_buf[APP_INTERCOM_PACKET_MAX_BYTES * 2u];
-/** @brief UDP 接收播放 PCM 缓冲，单任务独占使用。 */
+/** @brief 接收播放 PCM 缓冲，单任务独占使用。 */
 static int16_t s_rx_pcm[APP_INTERCOM_PACKET_SAMPLES];
-/** @brief UDP 接收上一帧 PCM，用于缺包补偿。 */
+/** @brief 接收上一帧 PCM，用于缺包补偿。 */
 static int16_t s_rx_last_pcm[APP_INTERCOM_PACKET_SAMPLES];
-/** @brief FEC 恢复出的 PCM payload 临时缓冲，单 UDP RX 任务独占。 */
+/** @brief FEC 恢复出的 PCM payload 临时缓冲，接收任务独占。 */
 static uint8_t s_rx_fec_pcm[APP_INTERCOM_AUDIO_PAYLOAD_BYTES];
-/** @brief UDP 接收 jitter buffer。 */
+/** @brief 接收 jitter buffer。 */
 static app_intercom_jitter_frame_t s_rx_jitter[APP_INTERCOM_JITTER_FRAME_COUNT];
 /** @brief jitter buffer 当前语音流来源设备名。 */
 static char s_rx_jitter_device[APP_INTERCOM_DEVICE_FIELD_LEN + 1u];
@@ -265,35 +263,35 @@ static uint8_t s_rx_jitter_ending = 0u;
 static uint8_t s_rx_jitter_target_start = APP_INTERCOM_JITTER_START_FRAMES;
 /** @brief 连续稳定播放帧数，用于恢复低延迟水位。 */
 static uint16_t s_rx_jitter_stable_frames = 0u;
-/** @brief UDP RX 统计日志节流时间。 */
+/** @brief RX 统计日志节流时间。 */
 static uint32_t s_rx_stat_log_ms = 0u;
-/** @brief UDP RX 缺口跳帧日志节流时间。 */
+/** @brief RX 缺口跳帧日志节流时间。 */
 static uint32_t s_rx_gap_log_ms = 0u;
-/** @brief UDP RX 最近收到的音频序列号。 */
+/** @brief RX 最近收到的音频序列号。 */
 static uint32_t s_rx_stat_last_seq = 0u;
-/** @brief UDP RX 是否已有上一帧序列号。 */
+/** @brief RX 是否已有上一帧序列号。 */
 static uint8_t s_rx_stat_has_last_seq = 0u;
-/** @brief UDP RX 本统计窗口收到的音频包数。 */
+/** @brief RX 本统计窗口收到的音频包数。 */
 static uint32_t s_rx_stat_audio = 0u;
-/** @brief UDP RX 本统计窗口发生的序列缺口次数。 */
+/** @brief RX 本统计窗口发生的序列缺口次数。 */
 static uint32_t s_rx_stat_gap_events = 0u;
-/** @brief UDP RX 本统计窗口累计缺失的序列帧数。 */
+/** @brief RX 本统计窗口累计缺失的序列帧数。 */
 static uint32_t s_rx_stat_gap_frames = 0u;
-/** @brief UDP RX 本统计窗口收到但已晚于播放位置的包数。 */
+/** @brief RX 本统计窗口收到但已晚于播放位置的包数。 */
 static uint32_t s_rx_stat_late = 0u;
-/** @brief UDP RX 本统计窗口重复包数。 */
+/** @brief RX 本统计窗口重复包数。 */
 static uint32_t s_rx_stat_duplicate = 0u;
-/** @brief UDP RX 本统计窗口覆盖 jitter 槽位的次数。 */
+/** @brief RX 本统计窗口覆盖 jitter 槽位的次数。 */
 static uint32_t s_rx_stat_overwrite = 0u;
-/** @brief UDP RX 本统计窗口太超前导致播放指针前移的次数。 */
+/** @brief RX 本统计窗口太超前导致播放指针前移的次数。 */
 static uint32_t s_rx_stat_far_ahead = 0u;
-/** @brief UDP RX 本统计窗口发送 NACK 请求次数。 */
+/** @brief RX 本统计窗口发送 NACK 请求次数。 */
 static uint32_t s_rx_stat_nack = 0u;
-/** @brief UDP RX 本统计窗口收到的 FEC 包数。 */
+/** @brief RX 本统计窗口收到的 FEC 包数。 */
 static uint32_t s_rx_stat_fec = 0u;
-/** @brief UDP RX 本统计窗口通过 FEC 恢复的 AUDIO 包数。 */
+/** @brief RX 本统计窗口通过 FEC 恢复的 AUDIO 包数。 */
 static uint32_t s_rx_stat_fec_recovered = 0u;
-/** @brief UDP RX 本统计窗口无法使用的 FEC 包数。 */
+/** @brief RX 本统计窗口无法使用的 FEC 包数。 */
 static uint32_t s_rx_stat_fec_skip = 0u;
 /** @brief 最近一次 NACK 请求的来源设备名，用于节流重复请求。 */
 static char s_rx_last_nack_device[APP_INTERCOM_DEVICE_FIELD_LEN + 1u];
@@ -305,11 +303,6 @@ static uint32_t s_rx_last_nack_ms = 0u;
 static uint32_t s_rx_nack_log_ms = 0u;
 /** @brief FEC 恢复日志节流时间。 */
 static uint32_t s_rx_fec_log_ms = 0u;
-
-/** @brief UDP 通道是否已连接就绪。
- *  由心跳任务在网络恢复后设置，PTT 发送前不检查此标志——即使 UDP 未就绪也尝试发送，
- *  底层 driver 会返回错误但不阻塞。 */
-static volatile int s_udp_ready = 0;
 
 /** @brief 当前是否处于 PTT 按下状态。
  *  PTT 任务在 while(s_ptt_active) 循环中采集+发送，此标志为 0 时退出循环。 */
@@ -359,14 +352,13 @@ static uint32_t s_ws_tx_stat_log_ms = 0u;
 static uint32_t s_ws_tx_stat_audio = 0u;
 static uint32_t s_ws_tx_stat_control = 0u;
 static uint32_t s_ws_tx_stat_bytes = 0u;
-static uint32_t s_ws_tx_stat_udp_fallback = 0u;
 static uint32_t s_ws_tx_stat_fail = 0u;
-/** @brief WebSocket RX 任务弹出包时的临时缓冲，避免覆盖 UDP 半包缓冲。 */
+/** @brief WebSocket RX 任务弹出包时的临时缓冲。 */
 static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 
-/** @brief 全局 UDP 包序列号，每发一个包自增 1。
+/** @brief 全局 WTK1 包序列号，每发一个包自增 1。
  *  用于服务器端去重和排序。 */
-static uint32_t s_udp_seq = 0u;
+static uint32_t s_packet_seq = 0u;
 
 /* ==========================================================================
  * 协议编解码
@@ -435,7 +427,7 @@ static uint16_t app_intercom_build_packet(uint8_t *out,
     out[4] = type;
     out[5] = APP_INTERCOM_PACKET_HEADER_LEN;
     app_intercom_write_u16(&out[6], (uint16_t)s_current_channel);
-    app_intercom_write_u32(&out[8], s_udp_seq++);
+    app_intercom_write_u32(&out[8], s_packet_seq++);
     app_intercom_write_u32(&out[12], osal_get_tick_ms());
     /* 设备名固定 16 字节，短名后面补 0，便于服务器原样转发和客户端比较。 */
     memset(&out[16], 0, APP_INTERCOM_DEVICE_FIELD_LEN);
@@ -519,7 +511,7 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
  * @brief 发送无 payload 的控制包（注册/频道/PTT_START/PTT_STOP/心跳）。
  *
  * @param type 包类型。
- * @return 成功返回 0；UDP 未就绪返回 -1。
+ * @return 成功返回 0；WebSocket 未就绪返回负值。
  */
 static int app_intercom_send_control(uint8_t type)
 {
@@ -541,9 +533,7 @@ static int app_intercom_send_nack(const char *source_device,
     uint8_t payload[APP_INTERCOM_NACK_PAYLOAD_LEN];
     uint8_t packet[APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_NACK_PAYLOAD_LEN];
 
-    if (!s_udp_ready ||
-        s_ws_connected != 0 ||
-        source_device == NULL ||
+    if (source_device == NULL ||
         source_device[0] == '\0' ||
         count == 0u) {
         return -1;
@@ -567,12 +557,12 @@ static int app_intercom_send_nack(const char *source_device,
         return -2;
     }
 
-    int ret = service_network_udp_send(packet, len);
+    int ret = app_intercom_send_packet_transport(packet, len, APP_INTERCOM_PKT_NACK);
     if (ret == 0) {
         s_rx_stat_nack++;
         if ((uint32_t)(now - s_rx_nack_log_ms) >= APP_INTERCOM_NACK_LOG_INTERVAL_MS) {
             APP_LOGI(TAG,
-                     "UDP NACK请求: source=%s, ch=%u, start=%u, count=%u",
+                     "WebSocket NACK请求: source=%s, ch=%u, start=%u, count=%u",
                      source_device,
                      (unsigned int)s_current_channel,
                      (unsigned int)start_seq,
@@ -583,39 +573,23 @@ static int app_intercom_send_nack(const char *source_device,
     return ret;
 }
 
-static void app_intercom_reconnect_udp_if_ready(void)
-{
-    if (s_udp_ready) {
-        return;
-    }
-    int ready = service_network_is_ready();
-    if (ready != 1) {
-        APP_LOGW(TAG, "UDP 对讲通道暂不可重连, network_ready=%d", ready);
-        return;
-    }
-
-    int ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
-    if (ret == 0) {
-        s_udp_ready = 1;
-        APP_LOGI(TAG, "UDP 对讲通道已连接");
-        (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
-        (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
-    } else {
-        APP_LOGW(TAG, "UDP 对讲通道重连失败, ret=%d", ret);
-    }
-}
-
 static int app_intercom_tx_ready(void)
 {
-    return (s_ws_connected != 0 || s_udp_ready != 0) ? 1 : 0;
+    return s_ws_connected != 0 ? 1 : 0;
 }
 
 static int app_intercom_wait_tx_ready(uint32_t timeout_ms)
 {
     uint32_t start = osal_get_tick_ms();
 
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
+
     while (s_ptt_active && app_intercom_tx_ready() == 0 && (osal_get_tick_ms() - start) < timeout_ms) {
-        app_intercom_reconnect_udp_if_ready();
+        if (service_network_is_ready() != 1) {
+            return -1;
+        }
         if (app_intercom_tx_ready() != 0) {
             return 0;
         }
@@ -880,17 +854,15 @@ static void app_intercom_ws_tx_stats_log(uint32_t now)
     }
     if (s_ws_tx_stat_audio == 0u &&
         s_ws_tx_stat_control == 0u &&
-        s_ws_tx_stat_udp_fallback == 0u &&
         s_ws_tx_stat_fail == 0u) {
         return;
     }
 
     APP_LOGI(TAG,
-             "WS TX统计: audio=%u control=%u bytes=%u fallback_udp=%u fail=%u connected=%d",
+             "WS TX统计: audio=%u control=%u bytes=%u fail=%u connected=%d",
              (unsigned int)s_ws_tx_stat_audio,
              (unsigned int)s_ws_tx_stat_control,
              (unsigned int)s_ws_tx_stat_bytes,
-             (unsigned int)s_ws_tx_stat_udp_fallback,
              (unsigned int)s_ws_tx_stat_fail,
              s_ws_connected);
 
@@ -898,7 +870,6 @@ static void app_intercom_ws_tx_stats_log(uint32_t now)
     s_ws_tx_stat_audio = 0u;
     s_ws_tx_stat_control = 0u;
     s_ws_tx_stat_bytes = 0u;
-    s_ws_tx_stat_udp_fallback = 0u;
     s_ws_tx_stat_fail = 0u;
 }
 
@@ -1010,18 +981,6 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
 
     if (APP_INTERCOM_USE_WS_UPLINK != 0 && s_ws_connected != 0) {
         s_ws_tx_stat_fail++;
-    }
-
-    if (s_udp_ready) {
-        int udp_ret = service_network_udp_send(packet, len);
-        if (udp_ret == 0) {
-            if (APP_INTERCOM_USE_WS_UPLINK != 0) {
-                s_ws_tx_stat_udp_fallback++;
-                app_intercom_ws_tx_stats_log(now);
-            }
-            return 0;
-        }
-        return udp_ret;
     }
 
     app_intercom_ws_tx_stats_log(now);
@@ -1206,6 +1165,7 @@ static void app_intercom_ws_task(void *arg)
 {
     (void)arg;
     uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];
+    uint32_t reconnect_delay_ms = APP_INTERCOM_WS_RECONNECT_MS;
 
     while (1) {
         if (service_network_is_ready() != 1) {
@@ -1220,7 +1180,8 @@ static void app_intercom_ws_task(void *arg)
                 app_intercom_ws_rx_clear();
             }
             s_ws_force_reconnect = 0;
-            osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
+            reconnect_delay_ms = APP_INTERCOM_WS_RECONNECT_MS;
+            (void)osal_task_notify_take(APP_INTERCOM_WS_NO_NET_RECHECK_MS);
             continue;
         }
 
@@ -1228,7 +1189,10 @@ static void app_intercom_ws_task(void *arg)
         int sock = app_intercom_ws_connect_socket();
         if (sock < 0) {
             APP_LOGW(TAG, "WebSocket 对讲连接失败, ret=%d", sock);
-            osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
+            (void)osal_task_notify_take(reconnect_delay_ms);
+            reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
+                                 reconnect_delay_ms * 2u :
+                                 APP_INTERCOM_WS_RECONNECT_MAX_MS;
             continue;
         }
 
@@ -1236,10 +1200,14 @@ static void app_intercom_ws_task(void *arg)
         if (ret != 0) {
             APP_LOGW(TAG, "WebSocket 对讲握手失败, ret=%d", ret);
             close(sock);
-            osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
+            (void)osal_task_notify_take(reconnect_delay_ms);
+            reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
+                                 reconnect_delay_ms * 2u :
+                                 APP_INTERCOM_WS_RECONNECT_MAX_MS;
             continue;
         }
         (void)app_intercom_ws_set_recv_timeout(sock, APP_INTERCOM_WS_RECV_TIMEOUT_MS);
+        reconnect_delay_ms = APP_INTERCOM_WS_RECONNECT_MS;
 
         if (s_ws_tx_mutex != NULL &&
             osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
@@ -1298,7 +1266,10 @@ static void app_intercom_ws_task(void *arg)
         s_ws_reset_rx = 1;
         app_intercom_ws_rx_clear();
         APP_LOGW(TAG, "WebSocket 对讲断开，准备重连");
-        osal_delay_ms(APP_INTERCOM_WS_RECONNECT_MS);
+        (void)osal_task_notify_take(reconnect_delay_ms);
+        reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
+                             reconnect_delay_ms * 2u :
+                             APP_INTERCOM_WS_RECONNECT_MAX_MS;
     }
 }
 
@@ -1894,7 +1865,7 @@ static void app_intercom_handle_fec_packet(const app_intercom_packet_view_t *vie
         s_rx_stat_fec_recovered++;
         if ((uint32_t)(now - s_rx_fec_log_ms) >= APP_INTERCOM_NACK_LOG_INTERVAL_MS) {
             APP_LOGI(TAG,
-                     "UDP FEC恢复: source=%s, base=%u, seq=%u, count=%u",
+                     "FEC恢复: source=%s, base=%u, seq=%u, count=%u",
                      view->device,
                      (unsigned int)base_seq,
                      (unsigned int)missing_seq,
@@ -1948,13 +1919,6 @@ static void app_intercom_jitter_fade_in_pcm(int16_t *pcm, uint16_t samples)
     for (uint32_t i = 0u; i < fade_samples; i++) {
         pcm[i] = (int16_t)(((int32_t)pcm[i] * (int32_t)(i + 1u)) / (int32_t)fade_samples);
     }
-}
-
-static uint32_t app_intercom_rx_read_timeout_ms(void)
-{
-    return s_rx_jitter_playing != 0u ?
-           APP_INTERCOM_RX_READ_ACTIVE_TIMEOUT_MS :
-           APP_INTERCOM_RX_READ_IDLE_TIMEOUT_MS;
 }
 
 static void app_intercom_jitter_play_tick(void)
@@ -2114,36 +2078,29 @@ static void app_intercom_jitter_play_tick(void)
 }
 
 /* ==========================================================================
- * 心跳任务 —— 保持服务器在线状态 + 断线自动重连
+ * 心跳任务 —— 保持服务器在线状态
  * ========================================================================== */
 
 /**
  * @brief 心跳任务入口。
  *
  * ## 功能
- * 1. 启动时发送 REGISTER + CHANNEL 包（注册设备到服务器）
+ * 1. WebSocket 已连接后由连接任务发送 REGISTER + CHANNEL 包
  * 2. 空闲时每 3 秒发送 HEARTBEAT 保活
- * 3. 检测网络后端 ready 后自动重连 UDP
- * 4. 重连后重新发送 REGISTER + CHANNEL，恢复在线状态
+ * 3. 网络断开时不主动建连，等待 WebSocket 任务在网络恢复后重连
  *
  * ## 重连机制
  * - 网络切换或 PTT 按下时通过 notify 立即唤醒心跳任务
- * - 心跳任务空闲时每 3s 兜底检查 service_network_is_ready() 和 s_udp_ready
  * - 正在发送或播放音频时不发 heartbeat，避免和音频包抢链路
- * - 若网络已恢复但 UDP 通道未建立 → 调用 service_network_udp_connect() 重建
  *
  * @param arg 未使用。
  */
 static void app_intercom_heartbeat_task(void *arg)
 {
     (void)arg;
-    (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
-    (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
     while (1) {
-        /* 网络恢复后在后台重建 UDP 通道，并重新上报设备和频道。 */
-        app_intercom_reconnect_udp_if_ready();
-        if (app_intercom_audio_busy() == 0) {
+        if (app_intercom_tx_ready() && app_intercom_audio_busy() == 0) {
             (void)app_intercom_send_control(APP_INTERCOM_PKT_HEARTBEAT);
             (void)osal_task_notify_take(APP_INTERCOM_HEARTBEAT_IDLE_MS);
         } else {
@@ -2173,11 +2130,11 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
 }
 
 /* ==========================================================================
- * UDP 接收任务
+ * WebSocket 接收播放任务
  * ========================================================================== */
 
 /**
- * @brief 处理接收到的单帧完整 UDP 包。
+ * @brief 处理接收到的单帧完整 WTK1 包。
  *
  * ## 过滤规则
  * 1. 包频道 != 当前频道 → 忽略（不同频道的人说话听不到）
@@ -2190,7 +2147,7 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
  * @param packet 完整包数据。
  * @param len    包长度。
  */
-static int app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
+static int app_intercom_handle_packet(const uint8_t *packet, uint16_t len)
 {
     app_intercom_packet_view_t view;
     if (app_intercom_parse_packet(packet, len, &view) != 0) {
@@ -2207,8 +2164,7 @@ static int app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
         app_intercom_jitter_enqueue(&view);
         return 1;
     } else if (view.type == APP_INTERCOM_PKT_AUDIO_FEC &&
-               view.payload_len > 0u &&
-               s_ws_connected == 0) {
+               view.payload_len > 0u) {
         app_intercom_handle_fec_packet(&view);
         return 2;
     } else if (view.type == APP_INTERCOM_PKT_PTT_STOP) {
@@ -2222,29 +2178,16 @@ static int app_intercom_handle_udp_packet(const uint8_t *packet, uint16_t len)
 }
 
 /**
- * @brief UDP 接收任务入口。
+ * @brief WebSocket 接收播放任务入口。
  *
- * ## 粘包/半包处理
- * UDP 下行数据可能粘包或半包：
- * - 粘包：一次 read 可能返回多个完整包
- * - 半包：一个完整包可能跨两次 read
- *
- * ## 处理策略
- * 1. 维护一个内部接收缓冲区 rx[最大包长 × 2]
- * 2. 每次读取追加到 used 之后
- * 3. 从 pos 开始扫描 WTK1 魔数
- * 4. 找到魔数 → 解析头长度和 payload 长度 → 判断是否完整包
- * 5. 完整包 → 调用 handle_udp_packet() → pos 后移
- * 6. 半包 → break 等待下次读取
- * 7. 非魔数字节 → pos++ 继续扫描
- * 8. 消费完后 memmove 剩余数据到缓冲区头部
+ * WebSocket 读任务已经按 binary frame 投递完整 WTK1 包，本任务只负责解析、
+ * jitter buffer 和音频播放节奏。
  *
  * @param arg 未使用。
  */
-static void app_intercom_udp_rx_task(void *arg)
+static void app_intercom_rx_task(void *arg)
 {
     (void)arg;
-    uint16_t used = 0u;
 
     while (1) {
         app_intercom_jitter_play_tick();
@@ -2253,13 +2196,12 @@ static void app_intercom_udp_rx_task(void *arg)
             s_ws_reset_rx = 0;
             app_intercom_rx_stop_playback();
             app_intercom_jitter_clear();
-            used = 0u;
         }
 
         uint16_t ws_packet_len = 0u;
         uint8_t ws_drained = 0u;
         while (app_intercom_ws_rx_pop(s_ws_rx_packet_buf, &ws_packet_len) == 0) {
-            int handled = app_intercom_handle_udp_packet(s_ws_rx_packet_buf, ws_packet_len);
+            int handled = app_intercom_handle_packet(s_ws_rx_packet_buf, ws_packet_len);
             if (handled < 0) {
                 s_ws_rx_stat_parse_drop++;
             } else if (handled == 3) {
@@ -2269,52 +2211,8 @@ static void app_intercom_udp_rx_task(void *arg)
         }
         app_intercom_ws_rx_stats_log(osal_get_tick_ms());
 
-        if (s_ws_connected != 0) {
-            if (ws_drained == 0u && s_rx_jitter_playing == 0u) {
-                osal_delay_ms(5u);
-            }
-            app_intercom_jitter_play_tick();
-            app_intercom_rx_stop_if_idle();
-            continue;
-        }
-
-        int ret = service_network_read_downlink(&s_rx_buf[used],
-                                                (uint16_t)(sizeof(s_rx_buf) - used),
-                                                app_intercom_rx_read_timeout_ms());
-        if (ret > 0) {
-            used = (uint16_t)(used + ret);
-            uint16_t pos = 0u;
-            /* 下行数据可能跨多次读取，保留半包并只消费完整 WTK1 包。 */
-            while ((pos + APP_INTERCOM_PACKET_HEADER_LEN) <= used) {
-                if (memcmp(&s_rx_buf[pos], APP_INTERCOM_PACKET_MAGIC, 4u) != 0) {
-                    pos++;
-                    continue;
-                }
-
-                uint8_t header_len = s_rx_buf[pos + 5u];
-                uint16_t payload_len = (uint16_t)s_rx_buf[pos + 32u] | ((uint16_t)s_rx_buf[pos + 33u] << 8);
-                uint16_t packet_len = (uint16_t)(header_len + payload_len);
-                if (header_len != APP_INTERCOM_PACKET_HEADER_LEN || packet_len > APP_INTERCOM_PACKET_MAX_BYTES) {
-                    pos++;
-                    continue;
-                }
-                if ((pos + packet_len) > used) {
-                    break;
-                }
-
-                (void)app_intercom_handle_udp_packet(&s_rx_buf[pos], packet_len);
-                pos = (uint16_t)(pos + packet_len);
-            }
-
-            if (pos > 0u) {
-                memmove(s_rx_buf, &s_rx_buf[pos], used - pos);
-                used = (uint16_t)(used - pos);
-            }
-            if (used >= sizeof(s_rx_buf)) {
-                used = 0u;
-            }
-        } else if (ret < 0 || s_rx_jitter_playing == 0u) {
-            osal_delay_ms(10u);
+        if (ws_drained == 0u && s_rx_jitter_playing == 0u) {
+            osal_delay_ms(5u);
         }
         app_intercom_jitter_play_tick();
         app_intercom_rx_stop_if_idle();
@@ -2337,7 +2235,7 @@ static void app_intercom_udp_rx_task(void *arg)
  *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
  *    b. 按 1 帧为一个 20ms PCM 包
  *    c. app_intercom_build_packet(packet, AUDIO, pcm, 640)
- *    d. service_network_udp_send(packet, len) —— 发给服务器
+ *    d. 通过 WebSocket binary frame 发给服务器
  *    e. 服务器收到后原样转发给同频道所有其他客户端
  * 5. 用户松手 → s_ptt_active = 0 → 退出循环
  * 6. 发送 PTT_STOP 控制包
@@ -2364,7 +2262,7 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        if (app_intercom_wait_tx_ready(APP_INTERCOM_PTT_WAIT_UDP_MS) != 0) {
+        if (app_intercom_wait_tx_ready(APP_INTERCOM_PTT_WAIT_WS_MS) != 0) {
             APP_LOGW(TAG, "PTT 放弃发送: 对讲上行通道未就绪");
             continue;
         }
@@ -2449,10 +2347,9 @@ static void app_intercom_ptt_task(void *arg)
  *
  * ## 创建的任务
  * - biz_ptt（优先级 6, 栈 8192）—— PTT 发送
- * - biz_udp_rx（优先级 5, 栈 10240）—— UDP 接收
- * - biz_heartbeat（优先级 4, 栈 6144）—— 心跳 + 重连
- *
- * 同时尝试首次 UDP 连接。
+ * - biz_ws_rx（优先级 5, 栈 8192）—— WebSocket 长连接读包
+ * - biz_ws_play（优先级 5, 栈 10240）—— WebSocket 包解析和播放
+ * - biz_heartbeat（优先级 4, 栈 6144）—— WebSocket 心跳
  *
  * @return 成功返回 0；失败返回负值。
  */
@@ -2463,15 +2360,8 @@ int app_intercom_start(void)
     }
 
     int ret = 0;
-    if (service_network_is_ready() == 1) {
-        ret = service_network_udp_connect(APP_BUSINESS_SERVER_HOST, APP_BUSINESS_UDP_PORT);
-        if (ret != 0) {
-            APP_LOGW(TAG, "UDP 对讲通道初始化失败, ret=%d", ret);
-        } else {
-            s_udp_ready = 1;
-        }
-    } else {
-        APP_LOGI(TAG, "UDP 对讲通道等待网络就绪后连接");
+    if (service_network_is_ready() != 1) {
+        APP_LOGI(TAG, "WebSocket 对讲等待网络就绪后连接");
     }
 
     ret = osal_task_create("biz_ptt",
@@ -2487,17 +2377,18 @@ int app_intercom_start(void)
 
     ret = app_intercom_start_ws_downlink_task();
     if (ret != 0) {
-        APP_LOGW(TAG, "WebSocket 对讲任务暂未启动, ret=%d", ret);
+        APP_LOGE(TAG, "WebSocket 对讲任务启动失败, ret=%d", ret);
+        return ret;
     }
 
-    ret = osal_task_create("biz_udp_rx",
-                           app_intercom_udp_rx_task,
+    ret = osal_task_create("biz_ws_play",
+                           app_intercom_rx_task,
                            NULL,
                            APP_INTERCOM_RX_TASK_STACK,
                            5u,
                            NULL);
     if (ret != 0) {
-        APP_LOGE(TAG, "UDP 接收任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "WebSocket 接收播放任务启动失败, ret=%d", ret);
         return ret;
     }
 
@@ -2512,10 +2403,6 @@ int app_intercom_start(void)
         return ret;
     }
 
-    if (!s_udp_ready && s_heartbeat_task != NULL) {
-        (void)osal_task_notify_give(s_heartbeat_task);
-    }
-
     s_started = 1;
     return 0;
 }
@@ -2524,7 +2411,7 @@ int app_intercom_start(void)
  * @brief 切换对讲频道。
  *
  * 更新 s_current_channel → 立即发送 CHANNEL 控制包通知服务器。
- * 之后收到的 UDP 音频包只有匹配当前频道的才会被播放。
+ * 之后收到的 WebSocket 音频包只有匹配当前频道的才会被播放。
  *
  * @param channel 新频道号（1-32），非法值会被钳位到默认频道。
  */
@@ -2555,13 +2442,13 @@ void app_intercom_set_channel(int32_t channel)
 void app_intercom_ptt_start(int32_t channel)
 {
     s_current_channel = channel > 0 ? channel : s_current_channel;
-    if (!s_udp_ready && s_heartbeat_task != NULL) {
-        (void)osal_task_notify_give(s_heartbeat_task);
-    }
     if (app_business_audio_session_is_busy()) {
         return;
     }
 
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
     s_ptt_active = 1;
     if (s_ptt_task != NULL) {
         (void)osal_task_notify_give(s_ptt_task);
@@ -2581,7 +2468,6 @@ void app_intercom_ptt_stop(void)
 
 void app_intercom_network_changed(void)
 {
-    s_udp_ready = 0;
     s_ws_connected = 0;
     if (s_ws_tx_mutex != NULL &&
         osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
@@ -2591,6 +2477,9 @@ void app_intercom_network_changed(void)
     s_ws_force_reconnect = 1;
     s_ws_reset_rx = 1;
     app_intercom_ws_rx_clear();
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
     if (s_heartbeat_task != NULL) {
         (void)osal_task_notify_give(s_heartbeat_task);
     }

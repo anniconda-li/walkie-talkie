@@ -16,7 +16,7 @@ extern "C" {
  * @brief 启动 app 层业务控制器。
  *
  * service 和 UI 初始化已经在 main 阶段完成，本接口只注册 UI 回调，
- * 并启动状态监听、UDP 对讲、AI 语音问答和相机业务任务。
+ * 并启动状态监听、WebSocket 对讲、AI 语音问答和相机业务任务。
  *
  * @return 成功返回 0；失败返回负值。
  */

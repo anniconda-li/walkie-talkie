@@ -40,17 +40,15 @@ extern "C" {
 #define APP_DEVICE_ID                   "walkie-01"
 /** @brief 兼容旧业务命名，统一指向 APP_DEVICE_ID。 */
 #define APP_BUSINESS_DEVICE_NAME        APP_DEVICE_ID
-/** @brief UDP 对讲服务器地址，与 AI HTTP 服务使用同一台公网服务器。 */
+/** @brief 业务服务器地址，AI HTTP 和对讲 WebSocket 使用同一公网主机。 */
 #define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
-/** @brief UDP 对讲服务器端口。 */
-#define APP_BUSINESS_UDP_PORT           19000
-/** @brief WebSocket 对讲端口，独立于 AI/相机 HTTP 18080，避免长连接抢占业务接口。 */
+/** @brief WebSocket 对讲端口，独立于 AI/相机 HTTP 18080。 */
 #define APP_BUSINESS_WS_PORT            18081
 /** @brief WebSocket 对讲下行路由，设备会追加 device query。 */
 #define APP_BUSINESS_WS_ROUTE_INTERCOM  "/intercom/ws"
-/** @brief 是否启用 WebSocket 下行实验模式。 */
+/** @brief 对讲下行固定使用 WebSocket。 */
 #define APP_INTERCOM_USE_WS_DOWNLINK    1
-/** @brief 是否启用 WebSocket 上行实验模式；发送失败时仍回退 UDP。 */
+/** @brief 对讲上行固定使用 WebSocket，不再回退 UDP。 */
 #define APP_INTERCOM_USE_WS_UPLINK      1
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
 #define APP_BUSINESS_HTTP_BASE_URL      "http://139.129.17.67:18080"
@@ -121,9 +119,9 @@ extern "C" {
 #define APP_BUSINESS_AUDIO_BITS         16u
 /** @brief 业务统一 PCM 声道数，固定单声道。 */
 #define APP_BUSINESS_AUDIO_CHANNELS     1u
-/** @brief UDP 对讲单包 20ms PCM 样本数。 */
+/** @brief 对讲单包 20ms PCM 样本数。 */
 #define APP_BUSINESS_FRAME_SAMPLES      320u
-/** @brief UDP 对讲单包 PCM 字节数。 */
+/** @brief 对讲单包 PCM 字节数。 */
 #define APP_BUSINESS_FRAME_BYTES        (APP_BUSINESS_FRAME_SAMPLES * sizeof(int16_t))
 /** @brief AI 单次录音最长时长，单位 ms。 */
 #define APP_BUSINESS_AI_MAX_MS          60000u

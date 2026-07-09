@@ -610,7 +610,7 @@ static void app_business_register_ui_callbacks(void)
  * 1. 创建音频会话互斥锁
  * 2. 注册 UI→业务回调（必须在 app 模块启动前完成，否则开机后用户操作可能丢失）
  * 3. 启动状态监控（电池 1s + 信号 3s 轮询任务）
- * 4. 启动对讲模块（UDP 连接 + PTT/RX/心跳三个任务）
+ * 4. 启动对讲模块（WebSocket 连接 + PTT/RX/心跳任务）
  * 5. 启动 AI 语音模块（biz_ai 任务 + WAV 缓冲区分配）
  * 6. 启动相机业务模块
  *
@@ -678,10 +678,11 @@ int app_business_start(void)
     }
 
     s_started = 1;
-    APP_LOGI(TAG, "业务启动完成, device=%s, server=%s:%d, channel=%d",
+    APP_LOGI(TAG, "业务启动完成, device=%s, ai=%s, intercom_ws=%s:%d, channel=%d",
              APP_DEVICE_ID,
+             APP_BUSINESS_HTTP_BASE_URL,
              APP_BUSINESS_SERVER_HOST,
-             APP_BUSINESS_UDP_PORT,
+             APP_BUSINESS_WS_PORT,
              APP_BUSINESS_DEFAULT_CHANNEL);
     return 0;
 }

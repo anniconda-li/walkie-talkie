@@ -65,6 +65,16 @@ int d_wifi_scan(d_wifi_ap_record_t *records, uint16_t max_records, uint16_t *cou
 int d_wifi_connect(const char *ssid, const char *password, uint32_t timeout_ms);
 
 /**
+ * @brief 取消正在等待结果的 WiFi 连接。
+ *
+ * 用于用户进入 WLAN 扫描或手动切换网络时打断开机自动连接，避免扫描/连接
+ * 被后台等待 IP 的流程长时间阻塞。
+ *
+ * @return 成功返回 0。
+ */
+int d_wifi_cancel_connect(void);
+
+/**
  * @brief 初始化 WiFi STA 并等待联网完成。
  *
  * @param[in] cfg WiFi 初始化配置。

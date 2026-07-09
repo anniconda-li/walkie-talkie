@@ -40,6 +40,9 @@ static volatile int s_wifi_got_ip = 0;
 /** @brief 最近一次 STA 断开原因。 */
 static volatile int s_wifi_disconnect_reason = 0;
 
+/** @brief WiFi 连接取消代数，等待 IP 时用于快速打断旧连接。 */
+static volatile uint32_t s_wifi_connect_epoch = 0u;
+
 /** @brief UDP socket 句柄。 */
 static int s_udp_sock = -1;
 
@@ -111,10 +114,13 @@ static int device_wifi_reason_to_connect_error(int reason)
     }
 }
 
-static int device_wifi_wait_ip(uint32_t timeout_ms)
+static int device_wifi_wait_ip(uint32_t timeout_ms, uint32_t connect_epoch)
 {
     uint32_t start = osal_get_tick_ms();
     while ((osal_get_tick_ms() - start) < timeout_ms) {
+        if (connect_epoch != s_wifi_connect_epoch) {
+            return -7;
+        }
         if (s_wifi_got_ip) {
             return 0;
         }
@@ -182,6 +188,8 @@ int d_wifi_prepare(void)
     ret = esp_wifi_set_ps(WIFI_PS_NONE);
     if (ret != 0) {
         D_LOGW(TAG, "WiFi 关闭省电模式失败, ret=%d", ret);
+    } else {
+        D_LOGI(TAG, "WiFi 省电模式已关闭，使用性能优先模式");
     }
 
     s_wifi_prepared = 1;
@@ -243,6 +251,7 @@ int d_wifi_connect(const char *ssid, const char *password, uint32_t timeout_ms)
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
     wifi_cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
+    uint32_t connect_epoch = ++s_wifi_connect_epoch;
     (void)esp_wifi_disconnect();
     osal_delay_ms(150u);
     s_wifi_got_ip = 0;
@@ -255,8 +264,20 @@ int d_wifi_connect(const char *ssid, const char *password, uint32_t timeout_ms)
         return device_wifi_err_to_int(ret);
     }
 
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
     D_LOGI(TAG, "WiFi STA 开始连接, ssid=%s", ssid);
-    return device_wifi_wait_ip(timeout_ms == 0u ? DEVICE_WIFI_CONNECT_TIMEOUT_MS : timeout_ms);
+    return device_wifi_wait_ip(timeout_ms == 0u ? DEVICE_WIFI_CONNECT_TIMEOUT_MS : timeout_ms,
+                               connect_epoch);
+}
+
+int d_wifi_cancel_connect(void)
+{
+    s_wifi_connect_epoch++;
+    s_wifi_got_ip = 0;
+    if (s_wifi_started) {
+        (void)esp_wifi_disconnect();
+    }
+    return 0;
 }
 
 /**
