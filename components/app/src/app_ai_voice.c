@@ -159,6 +159,15 @@ static int app_ai_voice_is_audio_fetch_allowed(const char *session)
     return state == APP_AI_STATE_DOWNLOADING_AUDIO || state == APP_AI_STATE_PLAYING_AUDIO;
 }
 
+static int app_ai_voice_can_start_recording_now(void)
+{
+    app_ai_voice_state_t state = s_ai_state;
+    return state == APP_AI_STATE_IDLE ||
+           state == APP_AI_STATE_AUDIO_READY ||
+           state == APP_AI_STATE_CANCELED ||
+           state == APP_AI_STATE_FAILED;
+}
+
 /* ==========================================================================
  * WAV 格式辅助函数
  * ========================================================================== */
@@ -1708,12 +1717,12 @@ static uint32_t app_ai_voice_record_to_wav_buffer(void)
  * 5. 创建服务器 session，按 APP_AI_UPLOAD_CHUNK_BYTES 分片上传请求 WAV
  * 6. finish 后轮询 result_info，拿到回复 WAV 总长度
  * 7. 按 APP_AI_REPLY_CHUNK_BYTES 拉取 result_chunk，边解析 WAV 边播放 PCM，播放后丢弃分片
- * 8. 调用 app_business_audio_session_end() 释放音频会话锁
+ * 8. 录音结束后立即释放音频会话，后续 HTTP 上传/轮询不再阻塞 PTT
  * 9. 回到步骤 1，等待下一次录音完成
  *
  * ## 错误处理
- * - 任何步骤失败都通过 app_business_audio_session_end() 释放锁
- * - 不会因为单次失败导致锁泄漏或任务死锁
+ * - 录音采集结束后立即释放锁，后续任一步骤失败都不会影响 PTT 抢占音频
+ * - AI 回复手动播放会重新申请音频会话，和 PTT 继续互斥
  *
  * ## 内存策略
  * - 请求 WAV 使用 s_ai_wav_buf；录音 PCM 直接写到 WAV data 区，不经过 service 缓冲
@@ -1731,6 +1740,10 @@ static void app_ai_voice_task(void *arg)
 
         app_ai_voice_set_state(APP_AI_STATE_RECORDING);
         uint32_t samples_total = app_ai_voice_record_to_wav_buffer();
+        app_business_audio_session_end();
+        APP_LOGI(TAG,
+                 "AI 录音采集结束，已释放音频会话, samples=%u",
+                 (unsigned int)samples_total);
         if (app_ai_voice_is_cancel_requested()) {
             (void)app_ui_set_ai_waiting(0);
             (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
@@ -1738,14 +1751,12 @@ static void app_ai_voice_task(void *arg)
             app_ai_voice_set_current_session(NULL);
             app_ai_voice_set_state(APP_AI_STATE_CANCELED);
             s_ai_cancel_requested = 0;
-            app_business_audio_session_end();
             continue;
         }
         if (samples_total == 0u) {
             (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
             (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
             app_ai_voice_set_state(APP_AI_STATE_FAILED);
-            app_business_audio_session_end();
             continue;
         }
 
@@ -1753,7 +1764,6 @@ static void app_ai_voice_task(void *arg)
             (void)app_ui_set_ai_message(UI_TEXT_AI_NO_NETWORK);
             (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
             app_ai_voice_set_state(APP_AI_STATE_FAILED);
-            app_business_audio_session_end();
             continue;
         }
 
@@ -1819,25 +1829,31 @@ static void app_ai_voice_task(void *arg)
                 } else {
                     app_ai_voice_set_state(APP_AI_STATE_AUDIO_READY);
 #if AUTO_PLAY_REPLY_AUDIO
-                    app_ai_voice_set_state(APP_AI_STATE_DOWNLOADING_AUDIO);
-                    ret = app_ai_voice_play_result_chunks(session, reply_len);
-                    if (ret == 0) {
-                        APP_LOGI("AI-UI", "play done");
-                        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
-                    } else if (ret == APP_AI_PLAY_STOPPED_RET) {
-                        APP_LOGI("AI-UI", "play stopped");
-                        s_reply_stop_requested = 0;
-                        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
-                        app_ai_voice_set_state(APP_AI_STATE_AUDIO_READY);
-                    } else if (ret == APP_AI_CANCELED_RET) {
-                        (void)app_ui_set_ai_waiting(0);
-                        (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
-                        app_ai_voice_clear_reply_state();
-                        app_ai_voice_set_state(APP_AI_STATE_CANCELED);
+                    if (app_business_audio_session_try_begin() != 0) {
+                        APP_LOGW(TAG, "AI 自动播放跳过: 音频会话占用中");
+                        ret = 0;
                     } else {
-                        (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
-                        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
-                        app_ai_voice_set_state(APP_AI_STATE_FAILED);
+                        app_ai_voice_set_state(APP_AI_STATE_DOWNLOADING_AUDIO);
+                        ret = app_ai_voice_play_result_chunks(session, reply_len);
+                        if (ret == 0) {
+                            APP_LOGI("AI-UI", "play done");
+                            (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+                        } else if (ret == APP_AI_PLAY_STOPPED_RET) {
+                            APP_LOGI("AI-UI", "play stopped");
+                            s_reply_stop_requested = 0;
+                            (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+                            app_ai_voice_set_state(APP_AI_STATE_AUDIO_READY);
+                        } else if (ret == APP_AI_CANCELED_RET) {
+                            (void)app_ui_set_ai_waiting(0);
+                            (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
+                            app_ai_voice_clear_reply_state();
+                            app_ai_voice_set_state(APP_AI_STATE_CANCELED);
+                        } else {
+                            (void)app_ui_set_ai_message(UI_TEXT_AI_REPLY_FAILED);
+                            (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+                            app_ai_voice_set_state(APP_AI_STATE_FAILED);
+                        }
+                        app_business_audio_session_end();
                     }
 #else
                     ret = 0;
@@ -1859,8 +1875,7 @@ static void app_ai_voice_task(void *arg)
             app_ai_voice_set_state(APP_AI_STATE_FAILED);
         }
 
-        /* 步骤 8：无论成功失败都释放音频会话锁 */
-        app_business_audio_session_end();
+        /* 录音结束时已经释放音频会话；HTTP 和文本等待阶段不能继续占用 PTT。 */
         if (app_ai_voice_is_cancel_requested()) {
             app_ai_voice_set_current_session(NULL);
             s_ai_cancel_requested = 0;
@@ -1966,6 +1981,10 @@ void app_ai_voice_record_start(void)
     }
     if (s_ai_state == APP_AI_STATE_CANCELING) {
         APP_LOGW(TAG, "AI 录音开始忽略: 正在取消当前会话");
+        return;
+    }
+    if (!app_ai_voice_can_start_recording_now()) {
+        APP_LOGW(TAG, "AI 录音开始忽略: 当前会话处理中, state=%d", (int)s_ai_state);
         return;
     }
     if (s_ai_recording) {
