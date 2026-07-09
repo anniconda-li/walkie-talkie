@@ -17,7 +17,8 @@ static TickType_t osal_mutex_timeout_to_ticks(uint32_t timeout_ms)
         return 0;
     }
 
-    return pdMS_TO_TICKS(timeout_ms);
+    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
+    return ticks > 0 ? ticks : 1;
 }
 
 osal_mutex_t osal_mutex_create(void)

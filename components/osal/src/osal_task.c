@@ -22,7 +22,8 @@ static TickType_t osal_task_timeout_to_ticks(uint32_t timeout_ms)
         return 0;
     }
 
-    return pdMS_TO_TICKS(timeout_ms);
+    TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
+    return ticks > 0 ? ticks : 1;
 }
 
 /**
@@ -32,7 +33,13 @@ static TickType_t osal_task_timeout_to_ticks(uint32_t timeout_ms)
  */
 void osal_delay_ms(uint32_t ms)
 {
-    vTaskDelay(pdMS_TO_TICKS(ms));
+    if (ms == 0u) {
+        taskYIELD();
+        return;
+    }
+
+    TickType_t ticks = pdMS_TO_TICKS(ms);
+    vTaskDelay(ticks > 0 ? ticks : 1);
 }
 
 /**
