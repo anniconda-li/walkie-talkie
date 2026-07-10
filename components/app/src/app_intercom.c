@@ -38,6 +38,7 @@
 
 #include "app_business.h"
 #include "app_config.h"
+#include "app_ui.h"
 #include "osal_mutex.h"
 #include "osal_task.h"
 #include "service_audio.h"
@@ -95,6 +96,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_PTT_WAIT_WS_MS     8000u
 /** @brief PTT 等待 WebSocket 就绪时的轮询间隔。 */
 #define APP_INTERCOM_PTT_WAIT_STEP_MS   100u
+/** @brief PTT 发送中断线后单次等待链路恢复的最长时间。 */
+#define APP_INTERCOM_PTT_RECOVER_WAIT_MS 5000u
+/** @brief PTT 恢复等待超过该时间后再提示 UI，避免短抖动闪屏。 */
+#define APP_INTERCOM_PTT_RECOVER_UI_MS 1000u
 /** @brief 空闲 WebSocket 心跳间隔，用于保持服务端在线状态。 */
 #define APP_INTERCOM_HEARTBEAT_IDLE_MS  3000u
 /** @brief 音频忙时不发心跳，只用该间隔继续检查状态。 */
@@ -782,7 +787,7 @@ static int app_intercom_send_control(uint8_t type)
 
 static int app_intercom_tx_ready(void)
 {
-    return s_ws_connected != 0 ? 1 : 0;
+    return (s_ws_connected != 0 && s_ws_force_reconnect == 0) ? 1 : 0;
 }
 
 static int app_intercom_wait_tx_ready(uint32_t timeout_ms)
@@ -804,6 +809,94 @@ static int app_intercom_wait_tx_ready(uint32_t timeout_ms)
     }
 
     return app_intercom_tx_ready() != 0 ? 0 : -1;
+}
+
+static int app_intercom_ptt_recover_link(uint32_t timeout_ms, int *last_send_ret)
+{
+    uint32_t start = osal_get_tick_ms();
+    uint8_t ui_recovering = 0u;
+
+    APP_LOGW(TAG,
+             "intercom_ptt event=recover_start device=%s ch=%d wait_ms=%u connected=%d",
+             APP_DEVICE_ID,
+             (int)s_current_channel,
+             (unsigned int)timeout_ms,
+             s_ws_connected);
+
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
+
+    while (s_ptt_active && (uint32_t)(osal_get_tick_ms() - start) < timeout_ms) {
+        uint32_t elapsed_ms = (uint32_t)(osal_get_tick_ms() - start);
+        if (ui_recovering == 0u && elapsed_ms >= APP_INTERCOM_PTT_RECOVER_UI_MS) {
+            (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_RECOVERING);
+            ui_recovering = 1u;
+        }
+
+        if (service_network_is_ready() == 1 && app_intercom_tx_ready() != 0) {
+            int ret = app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
+            if (ret == 0) {
+                (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_TALKING);
+                APP_LOGI(TAG,
+                         "intercom_ptt event=recover_ok device=%s ch=%d dur_ms=%u",
+                         APP_DEVICE_ID,
+                         (int)s_current_channel,
+                         (unsigned int)(osal_get_tick_ms() - start));
+                return 0;
+            }
+            if (last_send_ret != NULL) {
+                *last_send_ret = ret;
+            }
+            if (s_ws_task != NULL) {
+                (void)osal_task_notify_give(s_ws_task);
+            }
+        }
+        osal_delay_ms(APP_INTERCOM_PTT_WAIT_STEP_MS);
+    }
+
+    APP_LOGW(TAG,
+             "intercom_ptt event=recover_fail device=%s ch=%d dur_ms=%u connected=%d active=%d",
+             APP_DEVICE_ID,
+             (int)s_current_channel,
+             (unsigned int)(osal_get_tick_ms() - start),
+             s_ws_connected,
+             s_ptt_active);
+    return -1;
+}
+
+static int app_intercom_ptt_wait_recovered(int *last_send_ret,
+                                           uint32_t *recover_count,
+                                           uint32_t *recover_ok,
+                                           uint32_t *recover_fail)
+{
+    while (s_ptt_active) {
+        if (recover_count != NULL) {
+            (*recover_count)++;
+        }
+
+        int ret = app_intercom_ptt_recover_link(APP_INTERCOM_PTT_RECOVER_WAIT_MS,
+                                                last_send_ret);
+        if (ret == 0) {
+            if (recover_ok != NULL) {
+                (*recover_ok)++;
+            }
+            return 0;
+        }
+
+        if (!s_ptt_active) {
+            return -1;
+        }
+
+        if (recover_fail != NULL) {
+            (*recover_fail)++;
+        }
+        if (service_network_is_ready() != 1) {
+            osal_delay_ms(APP_INTERCOM_WS_NO_NET_RECHECK_MS);
+        }
+    }
+
+    return -1;
 }
 
 static int app_intercom_ws_rx_init(void)
@@ -2595,6 +2688,9 @@ static void app_intercom_ptt_task(void *arg)
                      (int)s_current_channel,
                      (unsigned int)APP_INTERCOM_PTT_WAIT_WS_MS,
                      s_ws_connected);
+            if (s_ptt_active) {
+                (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_FAILED);
+            }
             continue;
         }
 
@@ -2602,21 +2698,40 @@ static void app_intercom_ptt_task(void *arg)
             continue;
         }
 
-        (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
+        uint16_t tx_samples = 0u;
+        uint32_t read_ok = 0u;
+        uint32_t read_fail = 0u;
+        uint32_t send_ok = 0u;
+        uint32_t send_fail = 0u;
+        uint32_t recover_count = 0u;
+        uint32_t recover_ok = 0u;
+        uint32_t recover_fail = 0u;
+        int last_read_ret = 0;
+        int last_send_ret = 0;
+
+        int start_ret = app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
+        if (start_ret != 0) {
+            last_send_ret = start_ret;
+            if (app_intercom_ptt_wait_recovered(&last_send_ret,
+                                                &recover_count,
+                                                &recover_ok,
+                                                &recover_fail) != 0) {
+                (void)app_ui_set_intercom_state(s_ptt_active ?
+                                                APP_UI_INTERCOM_STATE_FAILED :
+                                                APP_UI_INTERCOM_STATE_IDLE);
+                app_business_audio_session_end();
+                continue;
+            }
+        }
+
         uint32_t ptt_start_ms = osal_get_tick_ms();
+        (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_TALKING);
         APP_LOGI(TAG,
                  "intercom_ptt event=start device=%s ch=%d codec=%s connected=%d",
                  APP_DEVICE_ID,
                  (int)s_current_channel,
                  APP_INTERCOM_AUDIO_ADPCM_ENABLE != 0u ? "adpcm" : "pcm",
                  s_ws_connected);
-        uint16_t tx_samples = 0u;
-        uint32_t read_ok = 0u;
-        uint32_t read_fail = 0u;
-        uint32_t send_ok = 0u;
-        uint32_t send_fail = 0u;
-        int last_read_ret = 0;
-        int last_send_ret = 0;
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
             if (samples > 0) {
@@ -2644,6 +2759,13 @@ static void app_intercom_ptt_task(void *arg)
                     } else {
                         send_fail++;
                         last_send_ret = send_ret;
+                        tx_samples = 0u;
+                        if (app_intercom_ptt_wait_recovered(&last_send_ret,
+                                                            &recover_count,
+                                                            &recover_ok,
+                                                            &recover_fail) != 0) {
+                            break;
+                        }
                     }
                     tx_samples = 0u;
                 }
@@ -2665,7 +2787,8 @@ static void app_intercom_ptt_task(void *arg)
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
         APP_LOGI(TAG,
                  "intercom_ptt event=stop device=%s ch=%d dur_ms=%u read_ok=%u "
-                 "read_fail=%u send_ok=%u send_fail=%u last_read=%d last_send=%d",
+                 "read_fail=%u send_ok=%u send_fail=%u recover=%u recover_ok=%u "
+                 "recover_fail=%u last_read=%d last_send=%d",
                  APP_DEVICE_ID,
                  (int)s_current_channel,
                  (unsigned int)(osal_get_tick_ms() - ptt_start_ms),
@@ -2673,8 +2796,12 @@ static void app_intercom_ptt_task(void *arg)
                  (unsigned int)read_fail,
                  (unsigned int)send_ok,
                  (unsigned int)send_fail,
+                 (unsigned int)recover_count,
+                 (unsigned int)recover_ok,
+                 (unsigned int)recover_fail,
                  last_read_ret,
                  last_send_ret);
+        (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
         app_business_audio_session_end();
     }
 }

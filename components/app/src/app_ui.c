@@ -185,8 +185,17 @@ int app_ui_toggle_screen_on(void)
 
 int app_ui_set_intercom_state(int state)
 {
-    (void)state;
-    return s_ui_created ? 0 : -1;
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(50) != 0) {
+        return 0;
+    }
+
+    ui_event_set_intercom_state(state);
+    service_screen_unlock();
+    return 0;
 }
 
 int app_ui_set_record_state(int state)
