@@ -31,7 +31,7 @@
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，可按多个 20ms 帧聚合）
+ * Byte 34+:  payload（AUDIO 默认为每包独立 IMA ADPCM block，兼容老 PCM payload）
  * ```
  */
 #include "app_intercom.h"
@@ -67,10 +67,21 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_PACKET_FRAMES      1u
 /** @brief 单个 AUDIO 包最大 PCM 样本数。 */
 #define APP_INTERCOM_PACKET_SAMPLES     (APP_BUSINESS_FRAME_SAMPLES * APP_INTERCOM_PACKET_FRAMES)
-/** @brief 单个 AUDIO 包 payload，当前为 20ms PCM 字节数。 */
+/** @brief 单个 AUDIO 包原始 PCM 字节数，ADPCM 编码前使用。 */
 #define APP_INTERCOM_AUDIO_PAYLOAD_BYTES (APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t))
-/** @brief 单个 WTK1 包最大 payload，WebSocket/TCP 模式只承载 AUDIO PCM。 */
-#define APP_INTERCOM_PACKET_MAX_PAYLOAD  APP_INTERCOM_AUDIO_PAYLOAD_BYTES
+/** @brief 设备端对讲默认启用每包独立 ADPCM，降低 WebSocket 上行码率。 */
+#define APP_INTERCOM_AUDIO_ADPCM_ENABLE  1u
+/** @brief ADPCM AUDIO payload 魔数，标记后续为每包独立 IMA ADPCM block。 */
+#define APP_INTERCOM_ADPCM_MAGIC         "ADP1"
+/** @brief ADPCM payload 头：magic(4) + samples(2) + predictor(2) + step_index(1) + reserved(1)。 */
+#define APP_INTERCOM_ADPCM_HEADER_LEN    10u
+/** @brief ADPCM 最大 nibble 数据长度，不包含 block 头。 */
+#define APP_INTERCOM_ADPCM_MAX_DATA_BYTES (((APP_INTERCOM_PACKET_SAMPLES - 1u) + 1u) / 2u)
+/** @brief ADPCM AUDIO 最大 payload 长度。 */
+#define APP_INTERCOM_ADPCM_MAX_PAYLOAD   (APP_INTERCOM_ADPCM_HEADER_LEN + APP_INTERCOM_ADPCM_MAX_DATA_BYTES)
+/** @brief 单个 WTK1 包最大 payload，兼容 PCM 和 ADPCM。 */
+#define APP_INTERCOM_PACKET_MAX_PAYLOAD  ((APP_INTERCOM_AUDIO_PAYLOAD_BYTES > APP_INTERCOM_ADPCM_MAX_PAYLOAD) ? \
+                                          APP_INTERCOM_AUDIO_PAYLOAD_BYTES : APP_INTERCOM_ADPCM_MAX_PAYLOAD)
 /** @brief 单个 WTK1 包最大总长度，包含固定头和最大业务 payload。 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
 
@@ -406,6 +417,236 @@ static uint32_t app_intercom_read_u32(const uint8_t *buf)
            ((uint32_t)buf[1] << 8) |
            ((uint32_t)buf[2] << 16) |
            ((uint32_t)buf[3] << 24);
+}
+
+static const int16_t s_ima_step_table[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+    19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+    130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+    337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+};
+
+static const int8_t s_ima_index_table[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8,
+    -1, -1, -1, -1, 2, 4, 6, 8,
+};
+
+static int16_t app_intercom_clip_i16(int32_t value)
+{
+    if (value > 32767) {
+        return 32767;
+    }
+    if (value < -32768) {
+        return -32768;
+    }
+    return (int16_t)value;
+}
+
+static uint8_t app_intercom_adpcm_choose_step_index(const int16_t *pcm, uint16_t samples)
+{
+    if (pcm == NULL || samples < 2u) {
+        return 0u;
+    }
+
+    uint16_t scan = samples > 32u ? 32u : samples;
+    uint32_t sum_delta = 0u;
+    for (uint16_t i = 1u; i < scan; i++) {
+        int32_t delta = (int32_t)pcm[i] - (int32_t)pcm[i - 1u];
+        sum_delta += (uint32_t)(delta < 0 ? -delta : delta);
+    }
+
+    uint32_t avg_delta = sum_delta / (uint32_t)(scan - 1u);
+    uint32_t target_step = avg_delta == 0u ? 7u : (avg_delta * 2u);
+    for (uint8_t i = 0u; i < 88u; i++) {
+        if ((uint32_t)s_ima_step_table[i] >= target_step) {
+            return i;
+        }
+    }
+    return 88u;
+}
+
+static uint8_t app_intercom_adpcm_encode_nibble(int16_t sample,
+                                                int32_t *predictor,
+                                                uint8_t *step_index)
+{
+    int32_t step = s_ima_step_table[*step_index];
+    int32_t diff = (int32_t)sample - *predictor;
+    uint8_t nibble = 0u;
+    if (diff < 0) {
+        nibble = 8u;
+        diff = -diff;
+    }
+
+    int32_t temp_step = step;
+    if (diff >= temp_step) {
+        nibble |= 4u;
+        diff -= temp_step;
+    }
+    temp_step >>= 1;
+    if (diff >= temp_step) {
+        nibble |= 2u;
+        diff -= temp_step;
+    }
+    temp_step >>= 1;
+    if (diff >= temp_step) {
+        nibble |= 1u;
+    }
+
+    int32_t delta = step >> 3;
+    if ((nibble & 4u) != 0u) {
+        delta += step;
+    }
+    if ((nibble & 2u) != 0u) {
+        delta += step >> 1;
+    }
+    if ((nibble & 1u) != 0u) {
+        delta += step >> 2;
+    }
+    if ((nibble & 8u) != 0u) {
+        *predictor -= delta;
+    } else {
+        *predictor += delta;
+    }
+    *predictor = app_intercom_clip_i16(*predictor);
+
+    int32_t next_index = (int32_t)(*step_index) + s_ima_index_table[nibble & 0x0fu];
+    if (next_index < 0) {
+        next_index = 0;
+    } else if (next_index > 88) {
+        next_index = 88;
+    }
+    *step_index = (uint8_t)next_index;
+    return (uint8_t)(nibble & 0x0fu);
+}
+
+static int16_t app_intercom_adpcm_decode_nibble(uint8_t nibble,
+                                                int32_t *predictor,
+                                                uint8_t *step_index)
+{
+    int32_t step = s_ima_step_table[*step_index];
+    int32_t delta = step >> 3;
+    if ((nibble & 4u) != 0u) {
+        delta += step;
+    }
+    if ((nibble & 2u) != 0u) {
+        delta += step >> 1;
+    }
+    if ((nibble & 1u) != 0u) {
+        delta += step >> 2;
+    }
+
+    if ((nibble & 8u) != 0u) {
+        *predictor -= delta;
+    } else {
+        *predictor += delta;
+    }
+    *predictor = app_intercom_clip_i16(*predictor);
+
+    int32_t next_index = (int32_t)(*step_index) + s_ima_index_table[nibble & 0x0fu];
+    if (next_index < 0) {
+        next_index = 0;
+    } else if (next_index > 88) {
+        next_index = 88;
+    }
+    *step_index = (uint8_t)next_index;
+    return (int16_t)(*predictor);
+}
+
+static uint16_t app_intercom_adpcm_encode_payload(uint8_t *out,
+                                                  uint16_t out_cap,
+                                                  const int16_t *pcm,
+                                                  uint16_t samples)
+{
+    if (out == NULL || pcm == NULL || samples == 0u ||
+        samples > APP_INTERCOM_PACKET_SAMPLES ||
+        out_cap < APP_INTERCOM_ADPCM_HEADER_LEN) {
+        return 0u;
+    }
+
+    uint16_t data_bytes = (uint16_t)((samples - 1u + 1u) / 2u);
+    uint16_t need = (uint16_t)(APP_INTERCOM_ADPCM_HEADER_LEN + data_bytes);
+    if (need > out_cap) {
+        return 0u;
+    }
+
+    memcpy(&out[0], APP_INTERCOM_ADPCM_MAGIC, 4u);
+    app_intercom_write_u16(&out[4], samples);
+    app_intercom_write_u16(&out[6], (uint16_t)pcm[0]);
+    uint8_t step_index = app_intercom_adpcm_choose_step_index(pcm, samples);
+    out[8] = step_index;
+    out[9] = 0u;
+    if (data_bytes > 0u) {
+        memset(&out[APP_INTERCOM_ADPCM_HEADER_LEN], 0, data_bytes);
+    }
+
+    int32_t predictor = pcm[0];
+    uint16_t out_index = APP_INTERCOM_ADPCM_HEADER_LEN;
+    uint8_t high_nibble = 0u;
+    for (uint16_t i = 1u; i < samples; i++) {
+        uint8_t nibble = app_intercom_adpcm_encode_nibble(pcm[i], &predictor, &step_index);
+        if (high_nibble == 0u) {
+            out[out_index] = nibble;
+            high_nibble = 1u;
+        } else {
+            out[out_index] |= (uint8_t)(nibble << 4);
+            out_index++;
+            high_nibble = 0u;
+        }
+    }
+
+    return need;
+}
+
+static int app_intercom_adpcm_decode_payload(const uint8_t *payload,
+                                             uint16_t payload_len,
+                                             int16_t *pcm,
+                                             uint16_t max_samples,
+                                             uint16_t *out_samples)
+{
+    if (payload == NULL || pcm == NULL || out_samples == NULL ||
+        payload_len < APP_INTERCOM_ADPCM_HEADER_LEN ||
+        memcmp(payload, APP_INTERCOM_ADPCM_MAGIC, 4u) != 0) {
+        return -1;
+    }
+
+    uint16_t samples = app_intercom_read_u16(&payload[4]);
+    if (samples == 0u || samples > max_samples || samples > APP_INTERCOM_PACKET_SAMPLES) {
+        return -2;
+    }
+
+    uint16_t data_bytes = (uint16_t)((samples - 1u + 1u) / 2u);
+    if ((uint16_t)(APP_INTERCOM_ADPCM_HEADER_LEN + data_bytes) > payload_len) {
+        return -3;
+    }
+
+    int32_t predictor = (int16_t)app_intercom_read_u16(&payload[6]);
+    uint8_t step_index = payload[8];
+    if (step_index > 88u) {
+        return -4;
+    }
+
+    pcm[0] = (int16_t)predictor;
+    uint16_t sample_index = 1u;
+    for (uint16_t i = 0u; i < data_bytes && sample_index < samples; i++) {
+        uint8_t packed = payload[APP_INTERCOM_ADPCM_HEADER_LEN + i];
+        pcm[sample_index++] = app_intercom_adpcm_decode_nibble((uint8_t)(packed & 0x0fu),
+                                                               &predictor,
+                                                               &step_index);
+        if (sample_index >= samples) {
+            break;
+        }
+        pcm[sample_index++] = app_intercom_adpcm_decode_nibble((uint8_t)(packed >> 4),
+                                                               &predictor,
+                                                               &step_index);
+    }
+
+    *out_samples = samples;
+    return 0;
 }
 
 /**
@@ -1915,7 +2156,23 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
         return;
     }
 
-    uint16_t samples = (uint16_t)(view->payload_len / sizeof(int16_t));
+    int16_t decoded_pcm[APP_INTERCOM_PACKET_SAMPLES];
+    uint16_t samples = 0u;
+    if (view->payload_len >= APP_INTERCOM_ADPCM_HEADER_LEN &&
+        memcmp(view->payload, APP_INTERCOM_ADPCM_MAGIC, 4u) == 0) {
+        if (app_intercom_adpcm_decode_payload(view->payload,
+                                              view->payload_len,
+                                              decoded_pcm,
+                                              APP_INTERCOM_PACKET_SAMPLES,
+                                              &samples) != 0) {
+            s_ws_rx_stat_parse_drop++;
+            return;
+        }
+        app_intercom_jitter_enqueue_pcm(view, (const uint8_t *)decoded_pcm, samples);
+        return;
+    }
+
+    samples = (uint16_t)(view->payload_len / sizeof(int16_t));
     app_intercom_jitter_enqueue_pcm(view, view->payload, samples);
 }
 
@@ -2175,10 +2432,22 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
         return -1;
     }
 
+    uint8_t adpcm_payload[APP_INTERCOM_ADPCM_MAX_PAYLOAD];
+    const uint8_t *payload = (const uint8_t *)pcm;
     uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
+#if APP_INTERCOM_AUDIO_ADPCM_ENABLE
+    uint16_t adpcm_len = app_intercom_adpcm_encode_payload(adpcm_payload,
+                                                           (uint16_t)sizeof(adpcm_payload),
+                                                           pcm,
+                                                           samples);
+    if (adpcm_len > 0u) {
+        payload = adpcm_payload;
+        payload_len = adpcm_len;
+    }
+#endif
     uint16_t packet_len = app_intercom_build_packet(packet,
                                                     APP_INTERCOM_PKT_AUDIO,
-                                                    (const uint8_t *)pcm,
+                                                    payload,
                                                     payload_len);
     if (packet_len == 0u) {
         return -2;
@@ -2200,7 +2469,7 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
  * 3. 仅处理 PTT_START/AUDIO/PTT_STOP，其他类型忽略
  *
  * ## 播放
- * 如果是有效的音频包，将 PCM 放入 jitter buffer。
+ * 如果是有效的音频包，将其解码成 PCM 后放入 jitter buffer。
  *
  * @param packet 完整包数据。
  * @param len    包长度。
@@ -2301,7 +2570,7 @@ static void app_intercom_rx_task(void *arg)
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
- * - 每包当前 20ms (320 samples × 16bit = 640 字节)，服务器按 PCM 原样转发
+ * - 每包当前 20ms，默认编码成每包独立 ADPCM block，服务器只需原样转发 binary payload
  * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
  * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
  *
@@ -2336,9 +2605,10 @@ static void app_intercom_ptt_task(void *arg)
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
         uint32_t ptt_start_ms = osal_get_tick_ms();
         APP_LOGI(TAG,
-                 "intercom_ptt event=start device=%s ch=%d connected=%d",
+                 "intercom_ptt event=start device=%s ch=%d codec=%s connected=%d",
                  APP_DEVICE_ID,
                  (int)s_current_channel,
+                 APP_INTERCOM_AUDIO_ADPCM_ENABLE != 0u ? "adpcm" : "pcm",
                  s_ws_connected);
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
