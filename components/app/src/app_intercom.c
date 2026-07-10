@@ -146,6 +146,18 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_STAT_LOG_MS      1000u
 /** @brief WebSocket 上行统计日志周期。 */
 #define APP_INTERCOM_WS_TX_STAT_LOG_MS   1000u
+/** @brief 设备端对讲接收/播放聚合统计周期。 */
+#define APP_INTERCOM_RX_STAT_LOG_MS      1000u
+/** @brief 后端到设备的音频包到达间隔超过该值时计入轻微抖动。 */
+#define APP_INTERCOM_RX_INTERVAL_WARN_MS 40u
+/** @brief 后端到设备的音频包到达间隔超过该值时计入明显抖动。 */
+#define APP_INTERCOM_RX_INTERVAL_BAD_MS  80u
+/** @brief 后端到设备的音频包到达间隔超过该值时计入严重抖动。 */
+#define APP_INTERCOM_RX_INTERVAL_STALL_MS 200u
+/** @brief WebSocket 单次发送耗时超过该值时计入慢发送。 */
+#define APP_INTERCOM_TX_SEND_SLOW_MS     40u
+/** @brief 播放调度晚于计划超过该值时计入调度迟到。 */
+#define APP_INTERCOM_PLAY_LATE_MS        30u
 /** @brief RFC 示例 key；设备端只校验 101 状态，不依赖 key 的随机性。 */
 #define APP_INTERCOM_WS_CLIENT_KEY       "dGhlIHNhbXBsZSBub25jZQ=="
 
@@ -215,8 +227,6 @@ static volatile int s_started = 0;
 static int s_rx_playback_active = 0;
 /** @brief 接收侧最近一次成功播放音频帧的时间。 */
 static uint32_t s_rx_last_audio_ms = 0u;
-/** @brief 接收侧播放统计日志节流时间。 */
-static uint32_t s_rx_play_log_ms = 0u;
 /** @brief 接收播放 PCM 缓冲，单任务独占使用。 */
 static int16_t s_rx_pcm[APP_INTERCOM_PACKET_SAMPLES];
 /** @brief 接收上一帧 PCM，用于缺包补偿。 */
@@ -253,6 +263,12 @@ static uint32_t s_rx_stat_last_seq = 0u;
 static uint8_t s_rx_stat_has_last_seq = 0u;
 /** @brief RX 本统计窗口收到的音频包数。 */
 static uint32_t s_rx_stat_audio = 0u;
+/** @brief RX 本统计窗口收到的音频 payload 字节数。 */
+static uint32_t s_rx_stat_bytes = 0u;
+/** @brief RX 本统计窗口首个音频序列号。 */
+static uint32_t s_rx_stat_first_seq = 0u;
+/** @brief RX 本统计窗口是否已有首个音频序列号。 */
+static uint8_t s_rx_stat_has_first_seq = 0u;
 /** @brief RX 本统计窗口发生的序列缺口次数。 */
 static uint32_t s_rx_stat_gap_events = 0u;
 /** @brief RX 本统计窗口累计缺失的序列帧数。 */
@@ -265,6 +281,34 @@ static uint32_t s_rx_stat_duplicate = 0u;
 static uint32_t s_rx_stat_overwrite = 0u;
 /** @brief RX 本统计窗口太超前导致播放指针前移的次数。 */
 static uint32_t s_rx_stat_far_ahead = 0u;
+/** @brief RX 上一个音频包到达时间，用于估算后端/网络下行抖动。 */
+static uint32_t s_rx_stat_last_arrival_ms = 0u;
+/** @brief RX 本统计窗口音频包到达间隔样本数。 */
+static uint32_t s_rx_stat_interval_count = 0u;
+/** @brief RX 本统计窗口音频包到达间隔总和。 */
+static uint32_t s_rx_stat_interval_sum_ms = 0u;
+/** @brief RX 本统计窗口最大音频包到达间隔。 */
+static uint32_t s_rx_stat_interval_max_ms = 0u;
+/** @brief RX 本统计窗口到达间隔超过 40ms 的次数。 */
+static uint32_t s_rx_stat_interval_gt40 = 0u;
+/** @brief RX 本统计窗口到达间隔超过 80ms 的次数。 */
+static uint32_t s_rx_stat_interval_gt80 = 0u;
+/** @brief RX 本统计窗口到达间隔超过 200ms 的次数。 */
+static uint32_t s_rx_stat_interval_gt200 = 0u;
+/** @brief 接收播放聚合统计日志节流时间。 */
+static uint32_t s_rx_play_stat_log_ms = 0u;
+static uint32_t s_rx_play_stat_frames = 0u;
+static uint32_t s_rx_play_stat_real = 0u;
+static uint32_t s_rx_play_stat_plc = 0u;
+static uint32_t s_rx_play_stat_skip_events = 0u;
+static uint32_t s_rx_play_stat_skip_frames = 0u;
+static uint32_t s_rx_play_stat_fail = 0u;
+static uint32_t s_rx_play_stat_late = 0u;
+static uint32_t s_rx_play_stat_late_max_ms = 0u;
+static uint32_t s_rx_play_stat_write_max_ms = 0u;
+static uint8_t s_rx_play_stat_has_buf = 0u;
+static uint8_t s_rx_play_stat_buf_min = APP_INTERCOM_JITTER_FRAME_COUNT;
+static uint8_t s_rx_play_stat_buf_max = 0u;
 
 /** @brief 当前是否处于 PTT 按下状态。
  *  PTT 任务在 while(s_ptt_active) 循环中采集+发送，此标志为 0 时退出循环。 */
@@ -315,6 +359,8 @@ static uint32_t s_ws_tx_stat_audio = 0u;
 static uint32_t s_ws_tx_stat_control = 0u;
 static uint32_t s_ws_tx_stat_bytes = 0u;
 static uint32_t s_ws_tx_stat_fail = 0u;
+static uint32_t s_ws_tx_stat_send_slow = 0u;
+static uint32_t s_ws_tx_stat_send_max_ms = 0u;
 /** @brief WebSocket RX 任务弹出包时的临时缓冲。 */
 static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 
@@ -522,7 +568,7 @@ static int app_intercom_ws_rx_init(void)
                                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (s_ws_rx_ring == NULL) {
             APP_LOGE(TAG,
-                     "WebSocket 下行队列 PSRAM 分配失败, bytes=%u, psram_free=%u, internal_largest=%u",
+                     "intercom_ws_rx event=alloc_fail bytes=%u psram_free=%u internal_largest=%u",
                      (unsigned int)bytes,
                      (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                      (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
@@ -533,14 +579,14 @@ static int app_intercom_ws_rx_init(void)
     if (s_ws_rx_mutex == NULL) {
         s_ws_rx_mutex = osal_mutex_create();
         if (s_ws_rx_mutex == NULL) {
-            APP_LOGE(TAG, "WebSocket 下行队列初始化失败");
+            APP_LOGE(TAG, "intercom_ws_rx event=mutex_fail target=rx_queue");
             return -2;
         }
     }
     if (s_ws_tx_mutex == NULL) {
         s_ws_tx_mutex = osal_mutex_create();
         if (s_ws_tx_mutex == NULL) {
-            APP_LOGE(TAG, "WebSocket 发送锁初始化失败");
+            APP_LOGE(TAG, "intercom_ws event=mutex_fail target=tx");
             return -3;
         }
     }
@@ -577,7 +623,9 @@ static void app_intercom_ws_rx_stats_log(uint32_t now)
     }
 
     APP_LOGI(TAG,
-             "WS RX统计: recv=%u push=%u pop=%u drop_full=%u drop_lock=%u invalid=%u parse_drop=%u control=%u queue=%u max=%u connected=%d",
+             "intercom_ws_rx win_ms=%u recv=%u push=%u pop=%u drop_full=%u "
+             "drop_lock=%u invalid=%u parse_drop=%u control=%u q=%u q_max=%u connected=%d",
+             (unsigned int)APP_INTERCOM_WS_STAT_LOG_MS,
              (unsigned int)s_ws_rx_stat_recv,
              (unsigned int)s_ws_rx_stat_push,
              (unsigned int)s_ws_rx_stat_pop,
@@ -631,9 +679,10 @@ static int app_intercom_ws_rx_push(const uint8_t *data, uint16_t len)
         uint32_t now = osal_get_tick_ms();
         if ((uint32_t)(now - s_ws_rx_drop_log_ms) >= APP_INTERCOM_WS_DROP_LOG_MS) {
             APP_LOGW(TAG,
-                     "WebSocket 下行队列丢弃旧音频, drop=%u, queue=%u",
+                     "intercom_ws_rx event=drop_old drop_total=%u q=%u q_limit=%u",
                      (unsigned int)s_ws_rx_drop_count,
-                     (unsigned int)s_ws_rx_count);
+                     (unsigned int)s_ws_rx_count,
+                     (unsigned int)APP_INTERCOM_WS_RX_QUEUE_LEN);
             s_ws_rx_drop_log_ms = now;
         }
     }
@@ -769,16 +818,21 @@ static void app_intercom_ws_tx_stats_log(uint32_t now)
     }
     if (s_ws_tx_stat_audio == 0u &&
         s_ws_tx_stat_control == 0u &&
-        s_ws_tx_stat_fail == 0u) {
+        s_ws_tx_stat_fail == 0u &&
+        s_ws_tx_stat_send_slow == 0u) {
         return;
     }
 
     APP_LOGI(TAG,
-             "WS TX统计: audio=%u control=%u bytes=%u fail=%u connected=%d",
+             "intercom_ws_tx win_ms=%u audio=%u control=%u bytes=%u fail=%u "
+             "send_slow=%u send_max_ms=%u connected=%d",
+             (unsigned int)APP_INTERCOM_WS_TX_STAT_LOG_MS,
              (unsigned int)s_ws_tx_stat_audio,
              (unsigned int)s_ws_tx_stat_control,
              (unsigned int)s_ws_tx_stat_bytes,
              (unsigned int)s_ws_tx_stat_fail,
+             (unsigned int)s_ws_tx_stat_send_slow,
+             (unsigned int)s_ws_tx_stat_send_max_ms,
              s_ws_connected);
 
     s_ws_tx_stat_log_ms = now;
@@ -786,6 +840,8 @@ static void app_intercom_ws_tx_stats_log(uint32_t now)
     s_ws_tx_stat_control = 0u;
     s_ws_tx_stat_bytes = 0u;
     s_ws_tx_stat_fail = 0u;
+    s_ws_tx_stat_send_slow = 0u;
+    s_ws_tx_stat_send_max_ms = 0u;
 }
 
 static int app_intercom_ws_send_frame(int sock,
@@ -887,8 +943,16 @@ static int app_intercom_send_packet_transport(const uint8_t *packet,
         return -1;
     }
 
-    uint32_t now = osal_get_tick_ms();
+    uint32_t send_start_ms = osal_get_tick_ms();
     int ws_ret = app_intercom_ws_send_binary_packet(packet, len);
+    uint32_t now = osal_get_tick_ms();
+    uint32_t send_ms = (uint32_t)(now - send_start_ms);
+    if (send_ms > s_ws_tx_stat_send_max_ms) {
+        s_ws_tx_stat_send_max_ms = send_ms;
+    }
+    if (send_ms >= APP_INTERCOM_TX_SEND_SLOW_MS) {
+        s_ws_tx_stat_send_slow++;
+    }
     if (ws_ret == 0) {
         if (type == APP_INTERCOM_PKT_AUDIO) {
             s_ws_tx_stat_audio++;
@@ -1109,7 +1173,13 @@ static void app_intercom_ws_task(void *arg)
         s_ws_force_reconnect = 0;
         int sock = app_intercom_ws_connect_socket();
         if (sock < 0) {
-            APP_LOGW(TAG, "WebSocket 对讲连接失败, ret=%d", sock);
+            APP_LOGW(TAG,
+                     "intercom_ws event=connect_fail device=%s host=%s port=%d ret=%d retry_ms=%u",
+                     APP_DEVICE_ID,
+                     APP_BUSINESS_SERVER_HOST,
+                     APP_BUSINESS_WS_PORT,
+                     sock,
+                     (unsigned int)reconnect_delay_ms);
             (void)osal_task_notify_take(reconnect_delay_ms);
             reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
                                  reconnect_delay_ms * 2u :
@@ -1119,7 +1189,13 @@ static void app_intercom_ws_task(void *arg)
 
         int ret = app_intercom_ws_handshake(sock);
         if (ret != 0) {
-            APP_LOGW(TAG, "WebSocket 对讲握手失败, ret=%d", ret);
+            APP_LOGW(TAG,
+                     "intercom_ws event=handshake_fail device=%s host=%s port=%d ret=%d retry_ms=%u",
+                     APP_DEVICE_ID,
+                     APP_BUSINESS_SERVER_HOST,
+                     APP_BUSINESS_WS_PORT,
+                     ret,
+                     (unsigned int)reconnect_delay_ms);
             close(sock);
             (void)osal_task_notify_take(reconnect_delay_ms);
             reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
@@ -1139,11 +1215,12 @@ static void app_intercom_ws_task(void *arg)
         s_ws_reset_rx = 0;
         app_intercom_ws_rx_clear();
         APP_LOGI(TAG,
-                 "WebSocket 对讲已连接: ws://%s:%d%s?device=%s",
+                 "intercom_ws event=connected device=%s host=%s port=%d route=%s ch=%d",
+                 APP_DEVICE_ID,
                  APP_BUSINESS_SERVER_HOST,
                  APP_BUSINESS_WS_PORT,
                  APP_BUSINESS_WS_ROUTE_INTERCOM,
-                 APP_DEVICE_ID);
+                 (int)s_current_channel);
         (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
         (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
@@ -1193,7 +1270,11 @@ static void app_intercom_ws_task(void *arg)
         s_ws_force_reconnect = 0;
         s_ws_reset_rx = 1;
         app_intercom_ws_rx_clear();
-        APP_LOGW(TAG, "WebSocket 对讲断开，准备重连");
+        APP_LOGW(TAG,
+                 "intercom_ws event=disconnected device=%s ret=%d retry_ms=%u",
+                 APP_DEVICE_ID,
+                 ret,
+                 (unsigned int)reconnect_delay_ms);
         (void)osal_task_notify_take(reconnect_delay_ms);
         reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
                              reconnect_delay_ms * 2u :
@@ -1223,7 +1304,7 @@ static int app_intercom_start_ws_downlink_task(void)
                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ret != pdPASS) {
         APP_LOGW(TAG,
-                 "WebSocket 下行任务启动失败, ret=%d, psram_free=%u, internal_free=%u, internal_largest=%u",
+                 "intercom_ws_rx event=task_start_fail ret=%d psram_free=%u internal_free=%u internal_largest=%u",
                  (int)ret,
                  (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                  (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -1320,6 +1401,7 @@ static int app_intercom_seq_before(uint32_t a, uint32_t b)
 }
 
 static uint8_t app_intercom_jitter_count_ready(void);
+static uint8_t app_intercom_jitter_start_frames(void);
 
 static void app_intercom_rx_stats_reset(uint32_t first_seq)
 {
@@ -1327,17 +1409,53 @@ static void app_intercom_rx_stats_reset(uint32_t first_seq)
     s_rx_stat_last_seq = first_seq;
     s_rx_stat_has_last_seq = 0u;
     s_rx_stat_audio = 0u;
+    s_rx_stat_bytes = 0u;
+    s_rx_stat_first_seq = first_seq;
+    s_rx_stat_has_first_seq = 0u;
     s_rx_stat_gap_events = 0u;
     s_rx_stat_gap_frames = 0u;
     s_rx_stat_late = 0u;
     s_rx_stat_duplicate = 0u;
     s_rx_stat_overwrite = 0u;
     s_rx_stat_far_ahead = 0u;
+    s_rx_stat_last_arrival_ms = 0u;
+    s_rx_stat_interval_count = 0u;
+    s_rx_stat_interval_sum_ms = 0u;
+    s_rx_stat_interval_max_ms = 0u;
+    s_rx_stat_interval_gt40 = 0u;
+    s_rx_stat_interval_gt80 = 0u;
+    s_rx_stat_interval_gt200 = 0u;
 }
 
-static void app_intercom_rx_stats_note_audio(uint32_t seq)
+static void app_intercom_rx_stats_note_audio(uint32_t seq,
+                                             uint16_t payload_len,
+                                             uint32_t now)
 {
     s_rx_stat_audio++;
+    s_rx_stat_bytes += payload_len;
+    if (s_rx_stat_has_first_seq == 0u) {
+        s_rx_stat_first_seq = seq;
+        s_rx_stat_has_first_seq = 1u;
+    }
+    if (s_rx_stat_last_arrival_ms != 0u) {
+        uint32_t interval_ms = (uint32_t)(now - s_rx_stat_last_arrival_ms);
+        s_rx_stat_interval_count++;
+        s_rx_stat_interval_sum_ms += interval_ms;
+        if (interval_ms > s_rx_stat_interval_max_ms) {
+            s_rx_stat_interval_max_ms = interval_ms;
+        }
+        if (interval_ms >= APP_INTERCOM_RX_INTERVAL_WARN_MS) {
+            s_rx_stat_interval_gt40++;
+        }
+        if (interval_ms >= APP_INTERCOM_RX_INTERVAL_BAD_MS) {
+            s_rx_stat_interval_gt80++;
+        }
+        if (interval_ms >= APP_INTERCOM_RX_INTERVAL_STALL_MS) {
+            s_rx_stat_interval_gt200++;
+        }
+    }
+    s_rx_stat_last_arrival_ms = now;
+
     if (s_rx_stat_has_last_seq == 0u) {
         s_rx_stat_last_seq = seq;
         s_rx_stat_has_last_seq = 1u;
@@ -1365,32 +1483,153 @@ static void app_intercom_rx_stats_note_audio(uint32_t seq)
 static void app_intercom_rx_stats_log(uint32_t now)
 {
     if (s_rx_stat_audio == 0u ||
-        (uint32_t)(now - s_rx_stat_log_ms) < 1000u) {
+        (uint32_t)(now - s_rx_stat_log_ms) < APP_INTERCOM_RX_STAT_LOG_MS) {
         return;
     }
 
+    uint32_t avg_ms = s_rx_stat_interval_count == 0u ?
+                      0u :
+                      (s_rx_stat_interval_sum_ms / s_rx_stat_interval_count);
     APP_LOGI(TAG,
-             "对讲RX统计: device=%s, rx=%u, gap=%u/%u, late=%u, dup=%u, overwrite=%u, far=%u, expected=%u, last_rx=%u, buffered=%u",
+             "intercom_rx win_ms=%u device=%s ch=%d audio=%u bytes=%u gap=%u/%u "
+             "late=%u dup=%u overwrite=%u far=%u first_seq=%u last_seq=%u expected=%u "
+             "rx_avg_ms=%u rx_max_ms=%u rx_gt40=%u rx_gt80=%u rx_gt200=%u buffered=%u",
+             (unsigned int)APP_INTERCOM_RX_STAT_LOG_MS,
              s_rx_jitter_device,
+             (int)s_current_channel,
              (unsigned int)s_rx_stat_audio,
+             (unsigned int)s_rx_stat_bytes,
              (unsigned int)s_rx_stat_gap_events,
              (unsigned int)s_rx_stat_gap_frames,
              (unsigned int)s_rx_stat_late,
              (unsigned int)s_rx_stat_duplicate,
              (unsigned int)s_rx_stat_overwrite,
              (unsigned int)s_rx_stat_far_ahead,
-             (unsigned int)s_rx_jitter_expected_seq,
+             (unsigned int)s_rx_stat_first_seq,
              (unsigned int)s_rx_stat_last_seq,
+             (unsigned int)s_rx_jitter_expected_seq,
+             (unsigned int)avg_ms,
+             (unsigned int)s_rx_stat_interval_max_ms,
+             (unsigned int)s_rx_stat_interval_gt40,
+             (unsigned int)s_rx_stat_interval_gt80,
+             (unsigned int)s_rx_stat_interval_gt200,
              (unsigned int)app_intercom_jitter_count_ready());
 
     s_rx_stat_log_ms = now;
     s_rx_stat_audio = 0u;
+    s_rx_stat_bytes = 0u;
+    s_rx_stat_has_first_seq = 0u;
     s_rx_stat_gap_events = 0u;
     s_rx_stat_gap_frames = 0u;
     s_rx_stat_late = 0u;
     s_rx_stat_duplicate = 0u;
     s_rx_stat_overwrite = 0u;
     s_rx_stat_far_ahead = 0u;
+    s_rx_stat_interval_count = 0u;
+    s_rx_stat_interval_sum_ms = 0u;
+    s_rx_stat_interval_max_ms = 0u;
+    s_rx_stat_interval_gt40 = 0u;
+    s_rx_stat_interval_gt80 = 0u;
+    s_rx_stat_interval_gt200 = 0u;
+}
+
+static void app_intercom_play_stats_note_buffer(uint8_t buffered)
+{
+    if (s_rx_play_stat_has_buf == 0u) {
+        s_rx_play_stat_buf_min = buffered;
+        s_rx_play_stat_buf_max = buffered;
+        s_rx_play_stat_has_buf = 1u;
+        return;
+    }
+    if (buffered < s_rx_play_stat_buf_min) {
+        s_rx_play_stat_buf_min = buffered;
+    }
+    if (buffered > s_rx_play_stat_buf_max) {
+        s_rx_play_stat_buf_max = buffered;
+    }
+}
+
+static void app_intercom_play_stats_reset(uint32_t now)
+{
+    s_rx_play_stat_log_ms = now;
+    s_rx_play_stat_frames = 0u;
+    s_rx_play_stat_real = 0u;
+    s_rx_play_stat_plc = 0u;
+    s_rx_play_stat_skip_events = 0u;
+    s_rx_play_stat_skip_frames = 0u;
+    s_rx_play_stat_fail = 0u;
+    s_rx_play_stat_late = 0u;
+    s_rx_play_stat_late_max_ms = 0u;
+    s_rx_play_stat_write_max_ms = 0u;
+    s_rx_play_stat_has_buf = 0u;
+    s_rx_play_stat_buf_min = APP_INTERCOM_JITTER_FRAME_COUNT;
+    s_rx_play_stat_buf_max = 0u;
+}
+
+static void app_intercom_play_stats_note_late(uint32_t late_ms)
+{
+    if (late_ms < APP_INTERCOM_PLAY_LATE_MS) {
+        return;
+    }
+
+    s_rx_play_stat_late++;
+    if (late_ms > s_rx_play_stat_late_max_ms) {
+        s_rx_play_stat_late_max_ms = late_ms;
+    }
+}
+
+static void app_intercom_play_stats_log(uint32_t now)
+{
+    if ((uint32_t)(now - s_rx_play_stat_log_ms) < APP_INTERCOM_RX_STAT_LOG_MS) {
+        return;
+    }
+    if (s_rx_play_stat_frames == 0u &&
+        s_rx_play_stat_skip_events == 0u &&
+        s_rx_play_stat_fail == 0u &&
+        s_rx_play_stat_late == 0u) {
+        return;
+    }
+
+    uint8_t buffered = app_intercom_jitter_count_ready();
+    if (s_rx_play_stat_has_buf == 0u) {
+        s_rx_play_stat_buf_min = buffered;
+        s_rx_play_stat_buf_max = buffered;
+    }
+    APP_LOGI(TAG,
+             "intercom_play win_ms=%u device=%s ch=%d play=%u real=%u plc=%u "
+             "skip=%u/%u fail=%u late=%u late_max_ms=%u write_max_ms=%u "
+             "buf_min=%u buf_max=%u buf_now=%u missing=%u target=%u",
+             (unsigned int)APP_INTERCOM_RX_STAT_LOG_MS,
+             s_rx_jitter_device,
+             (int)s_current_channel,
+             (unsigned int)s_rx_play_stat_frames,
+             (unsigned int)s_rx_play_stat_real,
+             (unsigned int)s_rx_play_stat_plc,
+             (unsigned int)s_rx_play_stat_skip_events,
+             (unsigned int)s_rx_play_stat_skip_frames,
+             (unsigned int)s_rx_play_stat_fail,
+             (unsigned int)s_rx_play_stat_late,
+             (unsigned int)s_rx_play_stat_late_max_ms,
+             (unsigned int)s_rx_play_stat_write_max_ms,
+             (unsigned int)s_rx_play_stat_buf_min,
+             (unsigned int)s_rx_play_stat_buf_max,
+             (unsigned int)buffered,
+             (unsigned int)s_rx_jitter_missing,
+             (unsigned int)app_intercom_jitter_start_frames());
+
+    s_rx_play_stat_log_ms = now;
+    s_rx_play_stat_frames = 0u;
+    s_rx_play_stat_real = 0u;
+    s_rx_play_stat_plc = 0u;
+    s_rx_play_stat_skip_events = 0u;
+    s_rx_play_stat_skip_frames = 0u;
+    s_rx_play_stat_fail = 0u;
+    s_rx_play_stat_late = 0u;
+    s_rx_play_stat_late_max_ms = 0u;
+    s_rx_play_stat_write_max_ms = 0u;
+    s_rx_play_stat_has_buf = 0u;
+    s_rx_play_stat_buf_min = APP_INTERCOM_JITTER_FRAME_COUNT;
+    s_rx_play_stat_buf_max = 0u;
 }
 
 static void app_intercom_jitter_clear(void)
@@ -1461,7 +1700,7 @@ static void app_intercom_jitter_bump_target(void)
     s_rx_jitter_stable_frames = 0u;
     if (s_rx_jitter_target_start < APP_INTERCOM_JITTER_MAX_START_FRAMES) {
         s_rx_jitter_target_start++;
-        APP_LOGW(TAG, "对讲音频 jitter 提高缓存水位, target=%u",
+        APP_LOGW(TAG, "intercom_play event=bump_target target=%u",
                  (unsigned int)s_rx_jitter_target_start);
     }
 }
@@ -1477,7 +1716,7 @@ static void app_intercom_jitter_recover_target(void)
     if (s_rx_jitter_stable_frames >= APP_INTERCOM_JITTER_RECOVER_FRAMES) {
         s_rx_jitter_target_start--;
         s_rx_jitter_stable_frames = 0u;
-        APP_LOGI(TAG, "对讲音频 jitter 降低缓存水位, target=%u",
+        APP_LOGI(TAG, "intercom_play event=recover_target target=%u",
                  (unsigned int)s_rx_jitter_target_start);
     }
 }
@@ -1526,6 +1765,7 @@ static void app_intercom_jitter_reset_for_source(const char *device, uint32_t se
     s_rx_jitter_ready = 1u;
     s_rx_jitter_ending = 0u;
     app_intercom_rx_stats_reset(seq);
+    app_intercom_play_stats_reset(osal_get_tick_ms());
 }
 
 static void app_intercom_jitter_mark_stop(const app_intercom_packet_view_t *view)
@@ -1540,8 +1780,9 @@ static void app_intercom_jitter_mark_stop(const app_intercom_packet_view_t *view
     s_rx_jitter_ending = 1u;
     s_rx_jitter_last_enqueue_ms = osal_get_tick_ms();
     APP_LOGI(TAG,
-             "对讲音频收到结束标记, device=%s, seq=%u, buffered=%u",
+             "intercom_ptt event=remote_stop device=%s ch=%d seq=%u buffered=%u",
              s_rx_jitter_device,
+             (int)s_current_channel,
              (unsigned int)view->seq,
              (unsigned int)app_intercom_jitter_count_ready());
 }
@@ -1563,7 +1804,7 @@ static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *vi
     }
 
     uint32_t now = osal_get_tick_ms();
-    app_intercom_rx_stats_note_audio(view->seq);
+    app_intercom_rx_stats_note_audio(view->seq, view->payload_len, now);
 
     if (s_rx_jitter_playing && app_intercom_seq_before(view->seq, s_rx_jitter_expected_seq)) {
         s_rx_stat_late++;
@@ -1684,15 +1925,18 @@ static void app_intercom_jitter_play_tick(void)
         s_rx_jitter_playing = 1u;
         s_rx_jitter_next_play_ms = now;
         s_rx_jitter_missing = 0u;
-        APP_LOGI(TAG, "对讲音频 jitter 起播, device=%s, seq=%u, target=%u",
+        APP_LOGI(TAG, "intercom_play event=start device=%s ch=%d seq=%u target=%u buffered=%u",
                  s_rx_jitter_device,
+                 (int)s_current_channel,
                  (unsigned int)s_rx_jitter_expected_seq,
-                 (unsigned int)start_frames);
+                 (unsigned int)start_frames,
+                 (unsigned int)ready_frames);
     }
 
     if (app_intercom_seq_before(now, s_rx_jitter_next_play_ms)) {
         return;
     }
+    app_intercom_play_stats_note_late((uint32_t)(now - s_rx_jitter_next_play_ms));
     if ((uint32_t)(now - s_rx_jitter_next_play_ms) > 100u) {
         s_rx_jitter_next_play_ms = now;
     }
@@ -1724,9 +1968,12 @@ static void app_intercom_jitter_play_tick(void)
             if (app_intercom_jitter_find_next_seq(s_rx_jitter_expected_seq, &next_seq) != 0 &&
                 next_seq != s_rx_jitter_expected_seq) {
                 uint32_t skipped = next_seq - s_rx_jitter_expected_seq;
+                s_rx_play_stat_skip_events++;
+                s_rx_play_stat_skip_frames += skipped;
                 if ((uint32_t)(now - s_rx_gap_log_ms) >= APP_INTERCOM_GAP_LOG_INTERVAL_MS) {
-                    APP_LOGW(TAG, "对讲音频跳过缺口, device=%s, from=%u, to=%u, skipped=%u, buffered=%u",
+                    APP_LOGW(TAG, "intercom_play event=skip_gap device=%s ch=%d from=%u to=%u skipped=%u buffered=%u",
                              s_rx_jitter_device,
+                             (int)s_current_channel,
                              (unsigned int)s_rx_jitter_expected_seq,
                              (unsigned int)next_seq,
                              (unsigned int)skipped,
@@ -1756,40 +2003,50 @@ static void app_intercom_jitter_play_tick(void)
             app_intercom_jitter_make_plc_frame(s_rx_pcm);
         }
         if (s_rx_jitter_missing > APP_INTERCOM_JITTER_MAX_MISSING) {
-            APP_LOGW(TAG, "对讲音频流中断, device=%s, seq=%u",
+            APP_LOGW(TAG, "intercom_play event=stream_break device=%s ch=%d seq=%u missing=%u",
                      s_rx_jitter_device,
-                     (unsigned int)s_rx_jitter_expected_seq);
+                     (int)s_current_channel,
+                     (unsigned int)s_rx_jitter_expected_seq,
+                     (unsigned int)s_rx_jitter_missing);
             app_intercom_rx_stop_playback();
             app_intercom_jitter_clear();
             return;
         }
     }
 
+    uint32_t play_start_ms = osal_get_tick_ms();
     int played = service_audio_play(s_rx_pcm, samples, 30u);
+    uint32_t play_done_ms = osal_get_tick_ms();
+    uint32_t write_ms = (uint32_t)(play_done_ms - play_start_ms);
+    if (write_ms > s_rx_play_stat_write_max_ms) {
+        s_rx_play_stat_write_max_ms = write_ms;
+    }
     if (played < 0) {
-        APP_LOGW(TAG, "对讲音频播放失败, seq=%u, ret=%d",
+        s_rx_play_stat_fail++;
+        APP_LOGW(TAG, "intercom_play event=write_fail device=%s ch=%d seq=%u ret=%d write_ms=%u",
+                 s_rx_jitter_device,
+                 (int)s_current_channel,
                  (unsigned int)s_rx_jitter_expected_seq,
-                 played);
+                 played,
+                 (unsigned int)write_ms);
         app_intercom_rx_stop_playback();
         app_intercom_jitter_clear();
         return;
     }
 
     if (played > 0) {
-        s_rx_last_audio_ms = now;
+        s_rx_last_audio_ms = play_done_ms;
+        s_rx_play_stat_frames++;
+        if (played_real_frame != 0u) {
+            s_rx_play_stat_real++;
+        } else {
+            s_rx_play_stat_plc++;
+        }
+        app_intercom_play_stats_note_buffer(app_intercom_jitter_count_ready());
         if (played_real_frame != 0u) {
             app_intercom_jitter_recover_target();
         }
-        if (s_rx_last_audio_ms - s_rx_play_log_ms >= 1000u) {
-            APP_LOGI(TAG, "对讲音频播放中, device=%s, seq=%u, samples=%d, buffered=%u, missing=%u, target=%u",
-                     s_rx_jitter_device,
-                     (unsigned int)s_rx_jitter_expected_seq,
-                     played,
-                     (unsigned int)app_intercom_jitter_count_ready(),
-                     (unsigned int)s_rx_jitter_missing,
-                     (unsigned int)app_intercom_jitter_start_frames());
-            s_rx_play_log_ms = s_rx_last_audio_ms;
-        }
+        app_intercom_play_stats_log(s_rx_last_audio_ms);
     }
 
     s_rx_jitter_expected_seq++;
@@ -1898,6 +2155,11 @@ static int app_intercom_handle_packet(const uint8_t *packet, uint16_t len)
         app_intercom_jitter_mark_stop(&view);
         return 3;
     } else if (view.type == APP_INTERCOM_PKT_PTT_START) {
+        APP_LOGI(TAG,
+                 "intercom_ptt event=remote_start device=%s ch=%u seq=%u",
+                 view.device,
+                 (unsigned int)view.channel,
+                 (unsigned int)view.seq);
         return 3;
     }
 
@@ -1989,7 +2251,11 @@ static void app_intercom_ptt_task(void *arg)
         }
 
         if (app_intercom_wait_tx_ready(APP_INTERCOM_PTT_WAIT_WS_MS) != 0) {
-            APP_LOGW(TAG, "PTT 放弃发送: 对讲上行通道未就绪");
+            APP_LOGW(TAG,
+                     "intercom_ptt event=abort reason=tx_not_ready ch=%d wait_ms=%u connected=%d",
+                     (int)s_current_channel,
+                     (unsigned int)APP_INTERCOM_PTT_WAIT_WS_MS,
+                     s_ws_connected);
             continue;
         }
 
@@ -1998,6 +2264,12 @@ static void app_intercom_ptt_task(void *arg)
         }
 
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_START);
+        uint32_t ptt_start_ms = osal_get_tick_ms();
+        APP_LOGI(TAG,
+                 "intercom_ptt event=start device=%s ch=%d connected=%d",
+                 APP_DEVICE_ID,
+                 (int)s_current_channel,
+                 s_ws_connected);
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
         uint32_t read_fail = 0u;
@@ -2052,8 +2324,11 @@ static void app_intercom_ptt_task(void *arg)
 
         (void)app_intercom_send_control(APP_INTERCOM_PKT_PTT_STOP);
         APP_LOGI(TAG,
-                 "PTT 发送统计: read_ok=%u, read_fail=%u, send_ok=%u, send_fail=%u, "
-                 "last_read=%d, last_send=%d",
+                 "intercom_ptt event=stop device=%s ch=%d dur_ms=%u read_ok=%u "
+                 "read_fail=%u send_ok=%u send_fail=%u last_read=%d last_send=%d",
+                 APP_DEVICE_ID,
+                 (int)s_current_channel,
+                 (unsigned int)(osal_get_tick_ms() - ptt_start_ms),
                  (unsigned int)read_ok,
                  (unsigned int)read_fail,
                  (unsigned int)send_ok,
@@ -2087,7 +2362,11 @@ int app_intercom_start(void)
 
     int ret = 0;
     if (service_network_is_ready() != 1) {
-        APP_LOGI(TAG, "WebSocket 对讲等待网络就绪后连接");
+        APP_LOGI(TAG,
+                 "intercom_ws event=wait_network device=%s host=%s port=%d",
+                 APP_DEVICE_ID,
+                 APP_BUSINESS_SERVER_HOST,
+                 APP_BUSINESS_WS_PORT);
     }
 
     ret = osal_task_create("biz_ptt",
@@ -2097,13 +2376,13 @@ int app_intercom_start(void)
                            6u,
                            &s_ptt_task);
     if (ret != 0) {
-        APP_LOGE(TAG, "PTT 任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "intercom_task event=start_fail name=biz_ptt ret=%d", ret);
         return ret;
     }
 
     ret = app_intercom_start_ws_downlink_task();
     if (ret != 0) {
-        APP_LOGE(TAG, "WebSocket 对讲任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "intercom_task event=start_fail name=biz_ws_rx ret=%d", ret);
         return ret;
     }
 
@@ -2114,7 +2393,7 @@ int app_intercom_start(void)
                            5u,
                            NULL);
     if (ret != 0) {
-        APP_LOGE(TAG, "WebSocket 接收播放任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "intercom_task event=start_fail name=biz_ws_play ret=%d", ret);
         return ret;
     }
 
@@ -2125,7 +2404,7 @@ int app_intercom_start(void)
                            4u,
                            &s_heartbeat_task);
     if (ret != 0) {
-        APP_LOGE(TAG, "对讲心跳任务启动失败, ret=%d", ret);
+        APP_LOGE(TAG, "intercom_task event=start_fail name=biz_heartbeat ret=%d", ret);
         return ret;
     }
 
@@ -2148,6 +2427,11 @@ void app_intercom_set_channel(int32_t channel)
     }
     s_current_channel = channel;
     (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
+    APP_LOGI(TAG,
+             "intercom_channel event=set device=%s ch=%d connected=%d",
+             APP_DEVICE_ID,
+             (int)s_current_channel,
+             s_ws_connected);
 }
 
 /**
@@ -2169,6 +2453,10 @@ void app_intercom_ptt_start(int32_t channel)
 {
     s_current_channel = channel > 0 ? channel : s_current_channel;
     if (app_business_audio_session_is_busy()) {
+        APP_LOGW(TAG,
+                 "intercom_ptt event=ignored reason=audio_busy device=%s ch=%d",
+                 APP_DEVICE_ID,
+                 (int)s_current_channel);
         return;
     }
 
@@ -2194,6 +2482,10 @@ void app_intercom_ptt_stop(void)
 
 void app_intercom_network_changed(void)
 {
+    APP_LOGI(TAG,
+             "intercom_ws event=network_changed device=%s connected=%d",
+             APP_DEVICE_ID,
+             s_ws_connected);
     s_ws_connected = 0;
     if (s_ws_tx_mutex != NULL &&
         osal_mutex_lock(s_ws_tx_mutex, OSAL_WAIT_FOREVER) == 0) {
