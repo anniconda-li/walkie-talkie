@@ -63,11 +63,11 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
 /** @brief WTK1 协议固定包头长度。 */
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，2 帧即 40ms/包，降低 WebSocket 发送频率。 */
-#define APP_INTERCOM_PACKET_FRAMES      2u
+/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，1 帧即 20ms/包，避免 TCP 单次发送阻塞拖长实时音频。 */
+#define APP_INTERCOM_PACKET_FRAMES      1u
 /** @brief 单个 AUDIO 包最大 PCM 样本数。 */
 #define APP_INTERCOM_PACKET_SAMPLES     (APP_BUSINESS_FRAME_SAMPLES * APP_INTERCOM_PACKET_FRAMES)
-/** @brief 单个 AUDIO 包 payload，当前为 40ms PCM 字节数。 */
+/** @brief 单个 AUDIO 包 payload，当前为 20ms PCM 字节数。 */
 #define APP_INTERCOM_AUDIO_PAYLOAD_BYTES (APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t))
 /** @brief 单个 WTK1 包最大 payload，WebSocket/TCP 模式只承载 AUDIO PCM。 */
 #define APP_INTERCOM_PACKET_MAX_PAYLOAD  APP_INTERCOM_AUDIO_PAYLOAD_BYTES
@@ -135,6 +135,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_RECV_TIMEOUT_MS  1000u
 /** @brief WebSocket 发送超时，兼顾公网抖动和 PTT 任务阻塞上限。 */
 #define APP_INTERCOM_WS_SEND_TIMEOUT_MS  200u
+/** @brief WebSocket 单帧发送实时预算，超过后认为连接不适合继续承载 PTT。 */
+#define APP_INTERCOM_WS_FRAME_SEND_BUDGET_MS 80u
+/** @brief WebSocket 单次等待 socket 可写的最长时间。 */
+#define APP_INTERCOM_WS_SEND_READY_WAIT_MS 20u
 /** @brief WebSocket 发送互斥等待时间。 */
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
@@ -151,8 +155,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_STAT_LOG_MS      1000u
 /** @brief 后端到设备的音频包到达间隔超过 2 个包周期时计入轻微抖动。 */
 #define APP_INTERCOM_RX_INTERVAL_WARN_MS (APP_INTERCOM_AUDIO_FRAME_MS * 2u)
-/** @brief 后端到设备的音频包到达间隔超过 3 个包周期时计入明显抖动。 */
-#define APP_INTERCOM_RX_INTERVAL_BAD_MS  (APP_INTERCOM_AUDIO_FRAME_MS * 3u)
+/** @brief 后端到设备的音频包到达间隔超过 4 个包周期时计入明显抖动。 */
+#define APP_INTERCOM_RX_INTERVAL_BAD_MS  (APP_INTERCOM_AUDIO_FRAME_MS * 4u)
 /** @brief 后端到设备的音频包到达间隔超过该值时计入严重抖动。 */
 #define APP_INTERCOM_RX_INTERVAL_STALL_MS 200u
 /** @brief WebSocket 单次发送耗时超过该值时计入慢发送。 */
@@ -290,12 +294,12 @@ static uint32_t s_rx_stat_interval_count = 0u;
 static uint32_t s_rx_stat_interval_sum_ms = 0u;
 /** @brief RX 本统计窗口最大音频包到达间隔。 */
 static uint32_t s_rx_stat_interval_max_ms = 0u;
-/** @brief RX 本统计窗口到达间隔超过 40ms 的次数。 */
-static uint32_t s_rx_stat_interval_gt40 = 0u;
-/** @brief RX 本统计窗口到达间隔超过 80ms 的次数。 */
-static uint32_t s_rx_stat_interval_gt80 = 0u;
-/** @brief RX 本统计窗口到达间隔超过 200ms 的次数。 */
-static uint32_t s_rx_stat_interval_gt200 = 0u;
+/** @brief RX 本统计窗口到达间隔超过轻微抖动阈值的次数。 */
+static uint32_t s_rx_stat_interval_warn = 0u;
+/** @brief RX 本统计窗口到达间隔超过明显抖动阈值的次数。 */
+static uint32_t s_rx_stat_interval_bad = 0u;
+/** @brief RX 本统计窗口到达间隔超过严重抖动阈值的次数。 */
+static uint32_t s_rx_stat_interval_stall = 0u;
 /** @brief 接收播放聚合统计日志节流时间。 */
 static uint32_t s_rx_play_stat_log_ms = 0u;
 static uint32_t s_rx_play_stat_frames = 0u;
@@ -729,16 +733,73 @@ static int app_intercom_ws_rx_pop(uint8_t *out, uint16_t *out_len)
     return 0;
 }
 
-static int app_intercom_ws_send_all(int sock, const uint8_t *data, size_t len)
+static int app_intercom_ws_wait_writable(int sock, uint32_t timeout_ms)
+{
+    fd_set write_fds;
+    struct timeval tv = {
+        .tv_sec = (long)(timeout_ms / 1000u),
+        .tv_usec = (long)((timeout_ms % 1000u) * 1000u),
+    };
+
+    FD_ZERO(&write_fds);
+    FD_SET(sock, &write_fds);
+
+    int ret = select(sock + 1, NULL, &write_fds, NULL, &tv);
+    if (ret > 0 && FD_ISSET(sock, &write_fds)) {
+        return 0;
+    }
+    if (ret < 0 && errno == EINTR) {
+        return 1;
+    }
+    return -1;
+}
+
+static int app_intercom_ws_send_all(int sock,
+                                    const uint8_t *data,
+                                    size_t len,
+                                    uint32_t budget_ms,
+                                    uint32_t ready_wait_ms)
 {
     size_t sent = 0u;
+    uint32_t start_ms = osal_get_tick_ms();
+
     while (sent < len) {
-        int ret = send(sock, &data[sent], len - sent, 0);
+        uint32_t now = osal_get_tick_ms();
+        if (budget_ms > 0u && (uint32_t)(now - start_ms) >= budget_ms) {
+            return -2;
+        }
+
+        uint32_t wait_ms = ready_wait_ms;
+        if (budget_ms > 0u) {
+            uint32_t used_ms = (uint32_t)(now - start_ms);
+            uint32_t remain_ms = budget_ms > used_ms ? (budget_ms - used_ms) : 0u;
+            if (wait_ms > remain_ms) {
+                wait_ms = remain_ms;
+            }
+        }
+
+        int wait_ret = app_intercom_ws_wait_writable(sock, wait_ms);
+        if (wait_ret > 0) {
+            continue;
+        }
+        if (wait_ret != 0) {
+            return -3;
+        }
+
+        int flags = 0;
+#ifdef MSG_DONTWAIT
+        flags = MSG_DONTWAIT;
+#endif
+        int ret = send(sock, &data[sent], len - sent, flags);
         if (ret > 0) {
             sent += (size_t)ret;
             continue;
         }
         if (ret < 0 && errno == EINTR) {
+            continue;
+        }
+        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            osal_delay_ms(1u);
             continue;
         }
         return -1;
@@ -890,7 +951,11 @@ static int app_intercom_ws_send_frame(int sock,
         frame[pos + i] = payload[i] ^ mask[i % 4u];
     }
 
-    int ret = app_intercom_ws_send_all(sock, frame, (size_t)(pos + payload_len));
+    int ret = app_intercom_ws_send_all(sock,
+                                       frame,
+                                       (size_t)(pos + payload_len),
+                                       APP_INTERCOM_WS_FRAME_SEND_BUDGET_MS,
+                                       APP_INTERCOM_WS_SEND_READY_WAIT_MS);
     osal_mutex_unlock(s_ws_tx_mutex);
     return ret;
 }
@@ -1030,7 +1095,11 @@ static int app_intercom_ws_handshake(int sock)
         return -1;
     }
 
-    if (app_intercom_ws_send_all(sock, (const uint8_t *)req, (size_t)len) != 0) {
+    if (app_intercom_ws_send_all(sock,
+                                 (const uint8_t *)req,
+                                 (size_t)len,
+                                 APP_INTERCOM_WS_HANDSHAKE_TIMEOUT_MS,
+                                 APP_INTERCOM_WS_SEND_TIMEOUT_MS) != 0) {
         return -2;
     }
 
@@ -1423,9 +1492,9 @@ static void app_intercom_rx_stats_reset(uint32_t first_seq)
     s_rx_stat_interval_count = 0u;
     s_rx_stat_interval_sum_ms = 0u;
     s_rx_stat_interval_max_ms = 0u;
-    s_rx_stat_interval_gt40 = 0u;
-    s_rx_stat_interval_gt80 = 0u;
-    s_rx_stat_interval_gt200 = 0u;
+    s_rx_stat_interval_warn = 0u;
+    s_rx_stat_interval_bad = 0u;
+    s_rx_stat_interval_stall = 0u;
 }
 
 static void app_intercom_rx_stats_note_audio(uint32_t seq,
@@ -1446,13 +1515,13 @@ static void app_intercom_rx_stats_note_audio(uint32_t seq,
             s_rx_stat_interval_max_ms = interval_ms;
         }
         if (interval_ms >= APP_INTERCOM_RX_INTERVAL_WARN_MS) {
-            s_rx_stat_interval_gt40++;
+            s_rx_stat_interval_warn++;
         }
         if (interval_ms >= APP_INTERCOM_RX_INTERVAL_BAD_MS) {
-            s_rx_stat_interval_gt80++;
+            s_rx_stat_interval_bad++;
         }
         if (interval_ms >= APP_INTERCOM_RX_INTERVAL_STALL_MS) {
-            s_rx_stat_interval_gt200++;
+            s_rx_stat_interval_stall++;
         }
     }
     s_rx_stat_last_arrival_ms = now;
@@ -1511,9 +1580,9 @@ static void app_intercom_rx_stats_log(uint32_t now)
              (unsigned int)s_rx_jitter_expected_seq,
              (unsigned int)avg_ms,
              (unsigned int)s_rx_stat_interval_max_ms,
-             (unsigned int)s_rx_stat_interval_gt40,
-             (unsigned int)s_rx_stat_interval_gt80,
-             (unsigned int)s_rx_stat_interval_gt200,
+             (unsigned int)s_rx_stat_interval_warn,
+             (unsigned int)s_rx_stat_interval_bad,
+             (unsigned int)s_rx_stat_interval_stall,
              (unsigned int)app_intercom_jitter_count_ready());
 
     s_rx_stat_log_ms = now;
@@ -1529,9 +1598,9 @@ static void app_intercom_rx_stats_log(uint32_t now)
     s_rx_stat_interval_count = 0u;
     s_rx_stat_interval_sum_ms = 0u;
     s_rx_stat_interval_max_ms = 0u;
-    s_rx_stat_interval_gt40 = 0u;
-    s_rx_stat_interval_gt80 = 0u;
-    s_rx_stat_interval_gt200 = 0u;
+    s_rx_stat_interval_warn = 0u;
+    s_rx_stat_interval_bad = 0u;
+    s_rx_stat_interval_stall = 0u;
 }
 
 static void app_intercom_play_stats_note_buffer(uint8_t buffered)
@@ -2232,7 +2301,7 @@ static void app_intercom_rx_task(void *arg)
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
- * - 每包当前 40ms (640 samples × 16bit = 1280 字节)，服务器按 PCM 原样转发
+ * - 每包当前 20ms (320 samples × 16bit = 640 字节)，服务器按 PCM 原样转发
  * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
  * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
  *
