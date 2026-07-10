@@ -1156,6 +1156,9 @@ static int app_intercom_ws_wait_writable(int sock, uint32_t timeout_ms)
     if (ret > 0 && FD_ISSET(sock, &write_fds)) {
         return 0;
     }
+    if (ret == 0) {
+        return 1;
+    }
     if (ret < 0 && errno == EINTR) {
         return 1;
     }
@@ -1331,11 +1334,22 @@ static int app_intercom_ws_send_frame(int sock,
     }
 
     if (osal_mutex_lock(s_ws_tx_mutex, APP_INTERCOM_WS_TX_LOCK_MS) != 0) {
+        APP_LOGW(TAG,
+                 "intercom_ws_tx event=frame_fail stage=lock opcode=%u payload=%u ret=-2 connected=%d",
+                 (unsigned int)opcode,
+                 (unsigned int)payload_len,
+                 s_ws_connected);
         return -2;
     }
     if (sock < 0 ||
         (s_ws_connected == 0 && opcode != APP_INTERCOM_WS_OPCODE_CLOSE)) {
         osal_mutex_unlock(s_ws_tx_mutex);
+        APP_LOGW(TAG,
+                 "intercom_ws_tx event=frame_fail stage=state opcode=%u payload=%u ret=-3 sock=%d connected=%d",
+                 (unsigned int)opcode,
+                 (unsigned int)payload_len,
+                 sock,
+                 s_ws_connected);
         return -3;
     }
 
@@ -1364,7 +1378,17 @@ static int app_intercom_ws_send_frame(int sock,
                                        (size_t)(pos + payload_len),
                                        APP_INTERCOM_WS_FRAME_SEND_BUDGET_MS,
                                        APP_INTERCOM_WS_SEND_READY_WAIT_MS);
+    int send_errno = ret == 0 ? 0 : errno;
     osal_mutex_unlock(s_ws_tx_mutex);
+    if (ret != 0) {
+        APP_LOGW(TAG,
+                 "intercom_ws_tx event=frame_fail stage=write opcode=%u payload=%u ret=%d errno=%d budget_ms=%u",
+                 (unsigned int)opcode,
+                 (unsigned int)payload_len,
+                 ret,
+                 send_errno,
+                 (unsigned int)APP_INTERCOM_WS_FRAME_SEND_BUDGET_MS);
+    }
     return ret;
 }
 
@@ -1403,7 +1427,7 @@ static int app_intercom_ws_send_binary_packet(const uint8_t *packet, uint16_t le
         if (s_ws_task != NULL) {
             (void)osal_task_notify_give(s_ws_task);
         }
-        return -3;
+        return ret;
     }
 
     return 0;
