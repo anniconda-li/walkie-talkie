@@ -31,7 +31,7 @@
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（当前上行测试为裸 Opus；关闭测试后仍兼容 ADPCM/PCM）
+ * Byte 34+:  payload（当前链路测试为裸 Opus；关闭测试后仍兼容 ADPCM/PCM）
  * ```
  */
 #include "app_intercom.h"
@@ -53,6 +53,7 @@
 #include <unistd.h>
 
 #include "esp_heap_caps.h"
+#include "esp_opus_dec.h"
 #include "esp_opus_enc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -85,7 +86,7 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_ADPCM_MAX_DATA_BYTES (((APP_INTERCOM_PACKET_SAMPLES - 1u) + 1u) / 2u)
 /** @brief ADPCM AUDIO 最大 payload 长度。 */
 #define APP_INTERCOM_ADPCM_MAX_PAYLOAD   (APP_INTERCOM_ADPCM_HEADER_LEN + APP_INTERCOM_ADPCM_MAX_DATA_BYTES)
-/** @brief 单个 WTK1 包最大 payload，兼容 PCM 和 ADPCM。 */
+/** @brief 单个 WTK1 包最大 payload，兼容当前 Opus 测试及 PCM/ADPCM 回退。 */
 #define APP_INTERCOM_PACKET_MAX_PAYLOAD  ((APP_INTERCOM_AUDIO_PAYLOAD_BYTES > APP_INTERCOM_ADPCM_MAX_PAYLOAD) ? \
                                           APP_INTERCOM_AUDIO_PAYLOAD_BYTES : APP_INTERCOM_ADPCM_MAX_PAYLOAD)
 /** @brief 单个 WTK1 包最大总长度，包含固定头和最大业务 payload。 */
@@ -97,8 +98,12 @@ static const char *TAG = "app_intercom";
 #else
 #define APP_INTERCOM_PTT_TASK_STACK     8192u
 #endif
-/** @brief WebSocket 播放解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
+/** @brief WebSocket 播放解析任务栈大小；Opus 解码使用实测留有余量的 PSRAM 栈。 */
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+#define APP_INTERCOM_RX_TASK_STACK      32768u
+#else
 #define APP_INTERCOM_RX_TASK_STACK      10240u
+#endif
 /** @brief WebSocket 心跳任务栈大小。 */
 #define APP_INTERCOM_HEARTBEAT_STACK    6144u
 /** @brief PTT 开始采集前等待 WebSocket 就绪的最长时间。 */
@@ -225,7 +230,7 @@ typedef enum {
     APP_INTERCOM_PKT_REGISTER = 1,  /**< 设备注册（上报设备名到服务器） */
     APP_INTERCOM_PKT_CHANNEL = 2,   /**< 频道切换 */
     APP_INTERCOM_PKT_PTT_START = 3, /**< PTT 开始（对讲键按下） */
-    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（聚合 PCM） */
+    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（codec 由当前设备配置决定） */
     APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
     APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（空闲 3s 间隔） */
 } app_intercom_packet_type_t;
@@ -251,8 +256,13 @@ typedef struct {
 typedef struct {
     uint8_t valid;                                  /**< 槽位是否有可播放帧。 */
     uint32_t seq;                                  /**< 对应协议序列号。 */
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    uint16_t payload_len;                          /**< Opus 压缩帧长度。 */
+    uint8_t payload[APP_INTERCOM_PACKET_MAX_PAYLOAD]; /**< 按序等待播放的 Opus 帧。 */
+#else
     uint16_t samples;                              /**< PCM 样本数。 */
     int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 聚合 PCM 包。 */
+#endif
 } app_intercom_jitter_frame_t;
 
 typedef struct {
@@ -281,7 +291,7 @@ static int s_rx_playback_active = 0;
 /** @brief 接收侧最近一次成功播放音频帧的时间。 */
 static uint32_t s_rx_last_audio_ms = 0u;
 /** @brief 接收播放 PCM 缓冲，单任务独占使用。 */
-static int16_t s_rx_pcm[APP_INTERCOM_PACKET_SAMPLES];
+static int16_t s_rx_pcm[APP_INTERCOM_PACKET_SAMPLES] __attribute__((aligned(16)));
 /** @brief 接收上一帧 PCM，用于缺包补偿。 */
 static int16_t s_rx_last_pcm[APP_INTERCOM_PACKET_SAMPLES];
 /** @brief 接收 jitter buffer。 */
@@ -460,6 +470,18 @@ static uint32_t s_opus_tx_frame_calls = 0u;
 static uint64_t s_opus_tx_frame_total_us = 0u;
 static uint32_t s_opus_tx_frame_max_us = 0u;
 static uint32_t s_opus_tx_frame_late = 0u;
+#endif
+
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+/** @brief Opus 裸 payload 下行测试使用的常驻解码器，仅由播放任务访问。 */
+static void *s_opus_rx_decoder = NULL;
+static uint32_t s_opus_rx_decode_calls = 0u;
+static uint32_t s_opus_rx_decode_ok = 0u;
+static uint32_t s_opus_rx_decode_fail = 0u;
+static uint32_t s_opus_rx_plc_ok = 0u;
+static uint32_t s_opus_rx_plc_fail = 0u;
+static uint64_t s_opus_rx_decode_total_us = 0u;
+static uint32_t s_opus_rx_decode_max_us = 0u;
 #endif
 
 /* ==========================================================================
@@ -726,6 +748,113 @@ static int app_intercom_adpcm_decode_payload(const uint8_t *payload,
     *out_samples = samples;
     return 0;
 }
+
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+static void app_intercom_opus_rx_stats_reset(void)
+{
+    s_opus_rx_decode_calls = 0u;
+    s_opus_rx_decode_ok = 0u;
+    s_opus_rx_decode_fail = 0u;
+    s_opus_rx_plc_ok = 0u;
+    s_opus_rx_plc_fail = 0u;
+    s_opus_rx_decode_total_us = 0u;
+    s_opus_rx_decode_max_us = 0u;
+}
+
+static int app_intercom_opus_rx_init(void)
+{
+    if (s_opus_rx_decoder != NULL) {
+        return 0;
+    }
+
+    uint32_t internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    esp_opus_dec_cfg_t cfg = ESP_OPUS_DEC_CONFIG_DEFAULT();
+    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
+    cfg.channel = ESP_AUDIO_MONO;
+    cfg.frame_duration = ESP_OPUS_DEC_FRAME_DURATION_20_MS;
+    cfg.self_delimited = false;
+
+    esp_audio_err_t codec_ret = esp_opus_dec_open(&cfg,
+                                                   sizeof(cfg),
+                                                   &s_opus_rx_decoder);
+    if (codec_ret != ESP_AUDIO_ERR_OK || s_opus_rx_decoder == NULL) {
+        APP_LOGE(TAG, "intercom_opus_rx event=decoder_open_fail ret=%d", (int)codec_ret);
+        s_opus_rx_decoder = NULL;
+        return -1;
+    }
+
+    app_intercom_opus_rx_stats_reset();
+    APP_LOGI(TAG,
+             "intercom_opus_rx event=ready rate=16000 channels=1 frame_ms=20 output_bytes=%u "
+             "internal_used=%u psram_used=%u",
+             (unsigned int)APP_INTERCOM_AUDIO_PAYLOAD_BYTES,
+             (unsigned int)(internal_before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             (unsigned int)(psram_before - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    return 0;
+}
+
+static int app_intercom_opus_rx_reset(void)
+{
+    app_intercom_opus_rx_stats_reset();
+    return s_opus_rx_decoder != NULL &&
+           esp_opus_dec_reset(s_opus_rx_decoder) == ESP_AUDIO_ERR_OK ? 0 : -1;
+}
+
+static int app_intercom_opus_rx_decode(const uint8_t *payload,
+                                       uint16_t payload_len,
+                                       esp_audio_dec_recovery_t recovery,
+                                       int16_t *pcm)
+{
+    if (s_opus_rx_decoder == NULL || pcm == NULL ||
+        (recovery == ESP_AUDIO_DEC_RECOVERY_NONE &&
+         (payload == NULL || payload_len == 0u))) {
+        return -1;
+    }
+
+    esp_audio_dec_in_raw_t raw = {
+        .buffer = (uint8_t *)payload,
+        .len = payload_len,
+        .consumed = 0u,
+        .frame_recover = recovery,
+    };
+    esp_audio_dec_out_frame_t decoded = {
+        .buffer = (uint8_t *)pcm,
+        .len = APP_INTERCOM_AUDIO_PAYLOAD_BYTES,
+        .needed_size = 0u,
+        .decoded_size = 0u,
+    };
+    esp_audio_dec_info_t info = {0};
+    int64_t start_us = esp_timer_get_time();
+    esp_audio_err_t codec_ret = esp_opus_dec_decode(s_opus_rx_decoder,
+                                                     &raw,
+                                                     &decoded,
+                                                     &info);
+    uint32_t decode_us = (uint32_t)(esp_timer_get_time() - start_us);
+    s_opus_rx_decode_calls++;
+    s_opus_rx_decode_total_us += decode_us;
+    if (decode_us > s_opus_rx_decode_max_us) {
+        s_opus_rx_decode_max_us = decode_us;
+    }
+
+    int valid = codec_ret == ESP_AUDIO_ERR_OK &&
+                raw.consumed == payload_len &&
+                decoded.decoded_size == APP_INTERCOM_AUDIO_PAYLOAD_BYTES;
+    if (recovery == ESP_AUDIO_DEC_RECOVERY_PLC) {
+        if (valid) {
+            s_opus_rx_plc_ok++;
+        } else {
+            s_opus_rx_plc_fail++;
+        }
+    } else if (valid) {
+        s_opus_rx_decode_ok++;
+    } else {
+        s_opus_rx_decode_fail++;
+    }
+
+    return valid ? 0 : -2;
+}
+#endif
 
 /**
  * @brief 构建一个完整的 WTK1 协议包。
@@ -2180,6 +2309,9 @@ static void app_intercom_play_stats_reset(uint32_t now)
     s_rx_play_stat_has_buf = 0u;
     s_rx_play_stat_buf_min = APP_INTERCOM_JITTER_FRAME_COUNT;
     s_rx_play_stat_buf_max = 0u;
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    app_intercom_opus_rx_stats_reset();
+#endif
 }
 
 static void app_intercom_play_stats_note_late(uint32_t late_ms)
@@ -2232,6 +2364,22 @@ static void app_intercom_play_stats_log(uint32_t now)
              (unsigned int)buffered,
              (unsigned int)s_rx_jitter_missing,
              (unsigned int)app_intercom_jitter_start_frames());
+
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    APP_LOGI(TAG,
+             "intercom_opus_rx win_ms=%u decode_ok=%u decode_fail=%u plc_ok=%u plc_fail=%u "
+             "decode_avg_us=%u decode_max_us=%u stack_hwm=%u",
+             (unsigned int)APP_INTERCOM_RX_STAT_LOG_MS,
+             (unsigned int)s_opus_rx_decode_ok,
+             (unsigned int)s_opus_rx_decode_fail,
+             (unsigned int)s_opus_rx_plc_ok,
+             (unsigned int)s_opus_rx_plc_fail,
+             s_opus_rx_decode_calls > 0u ?
+             (unsigned int)(s_opus_rx_decode_total_us / s_opus_rx_decode_calls) : 0u,
+             (unsigned int)s_opus_rx_decode_max_us,
+             (unsigned int)uxTaskGetStackHighWaterMark(NULL));
+    app_intercom_opus_rx_stats_reset();
+#endif
 
     s_rx_play_stat_log_ms = now;
     s_rx_play_stat_frames = 0u;
@@ -2395,6 +2543,11 @@ static void app_intercom_jitter_drop_before(uint32_t seq)
 static void app_intercom_jitter_reset_for_source(const char *device, uint32_t seq)
 {
     app_intercom_jitter_clear();
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    if (app_intercom_opus_rx_reset() != 0) {
+        APP_LOGW(TAG, "intercom_opus_rx event=decoder_reset_fail seq=%u", (unsigned int)seq);
+    }
+#endif
     if (device != NULL) {
         strncpy(s_rx_jitter_device, device, sizeof(s_rx_jitter_device) - 1u);
         s_rx_jitter_device[sizeof(s_rx_jitter_device) - 1u] = '\0';
@@ -2475,16 +2628,23 @@ static void app_intercom_jitter_mark_stop(const app_intercom_packet_view_t *view
              (unsigned int)app_intercom_jitter_count_ready());
 }
 
-static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *view,
-                                            const uint8_t *pcm,
-                                            uint16_t samples)
+static void app_intercom_jitter_enqueue_frame(const app_intercom_packet_view_t *view,
+                                              const uint8_t *data,
+                                              uint16_t data_len)
 {
-    if (view == NULL || pcm == NULL || samples == 0u) {
+    if (view == NULL || data == NULL || data_len == 0u) {
         return;
     }
-    if (samples > APP_INTERCOM_PACKET_SAMPLES) {
-        samples = APP_INTERCOM_PACKET_SAMPLES;
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    if (data_len > APP_INTERCOM_PACKET_MAX_PAYLOAD) {
+        s_ws_rx_stat_parse_drop++;
+        return;
     }
+#else
+    if (data_len > APP_INTERCOM_AUDIO_PAYLOAD_BYTES) {
+        data_len = APP_INTERCOM_AUDIO_PAYLOAD_BYTES;
+    }
+#endif
 
     if (s_rx_jitter_ready == 0u ||
         strncmp(s_rx_jitter_device, view->device, APP_INTERCOM_DEVICE_FIELD_LEN) != 0) {
@@ -2521,9 +2681,14 @@ static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *vi
         s_rx_stat_overwrite++;
     }
 
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    memcpy(frame->payload, data, data_len);
+    frame->payload_len = data_len;
+#else
     memset(frame->pcm, 0, sizeof(frame->pcm));
-    memcpy(frame->pcm, pcm, (size_t)samples * sizeof(int16_t));
-    frame->samples = samples;
+    memcpy(frame->pcm, data, data_len);
+    frame->samples = (uint16_t)(data_len / sizeof(int16_t));
+#endif
     frame->seq = view->seq;
     frame->valid = 1u;
     s_rx_jitter_last_enqueue_ms = now;
@@ -2532,11 +2697,14 @@ static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *vi
 
 static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
 {
-    if (view == NULL || view->payload == NULL || view->payload_len < sizeof(int16_t)) {
+    if (view == NULL || view->payload == NULL || view->payload_len == 0u) {
         return;
     }
 
-    int16_t decoded_pcm[APP_INTERCOM_PACKET_SAMPLES];
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    app_intercom_jitter_enqueue_frame(view, view->payload, view->payload_len);
+#else
+    int16_t decoded_pcm[APP_INTERCOM_PACKET_SAMPLES] __attribute__((aligned(16)));
     uint16_t samples = 0u;
     if (view->payload_len >= APP_INTERCOM_ADPCM_HEADER_LEN &&
         memcmp(view->payload, APP_INTERCOM_ADPCM_MAGIC, 4u) == 0) {
@@ -2548,12 +2716,39 @@ static void app_intercom_jitter_enqueue(const app_intercom_packet_view_t *view)
             s_ws_rx_stat_parse_drop++;
             return;
         }
-        app_intercom_jitter_enqueue_pcm(view, (const uint8_t *)decoded_pcm, samples);
+        app_intercom_jitter_enqueue_frame(view,
+                                          (const uint8_t *)decoded_pcm,
+                                          (uint16_t)(samples * sizeof(int16_t)));
         return;
     }
 
     samples = (uint16_t)(view->payload_len / sizeof(int16_t));
-    app_intercom_jitter_enqueue_pcm(view, view->payload, samples);
+    app_intercom_jitter_enqueue_frame(view,
+                                      view->payload,
+                                      (uint16_t)(samples * sizeof(int16_t)));
+#endif
+}
+
+static int app_intercom_jitter_decode_frame(const app_intercom_jitter_frame_t *frame,
+                                             int16_t *pcm,
+                                             uint16_t *samples)
+{
+    if (frame == NULL || pcm == NULL || samples == NULL) {
+        return -1;
+    }
+
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    int ret = app_intercom_opus_rx_decode(frame->payload,
+                                           frame->payload_len,
+                                           ESP_AUDIO_DEC_RECOVERY_NONE,
+                                           pcm);
+    *samples = ret == 0 ? APP_INTERCOM_PACKET_SAMPLES : 0u;
+    return ret;
+#else
+    memcpy(pcm, frame->pcm, sizeof(frame->pcm));
+    *samples = frame->samples;
+    return 0;
+#endif
 }
 
 static void app_intercom_jitter_make_plc_frame(int16_t *out)
@@ -2561,6 +2756,15 @@ static void app_intercom_jitter_make_plc_frame(int16_t *out)
     if (out == NULL) {
         return;
     }
+
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    if (app_intercom_opus_rx_decode(NULL,
+                                    0u,
+                                    ESP_AUDIO_DEC_RECOVERY_PLC,
+                                    out) == 0) {
+        return;
+    }
+#endif
 
     memset(out, 0, (size_t)APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t));
 
@@ -2653,15 +2857,24 @@ static void app_intercom_jitter_play_tick(void)
     uint8_t played_real_frame = 0u;
     if (frame != NULL) {
         uint8_t fade_in = s_rx_jitter_missing != 0u ? 1u : 0u;
-        memcpy(s_rx_pcm, frame->pcm, sizeof(s_rx_pcm));
-        samples = frame->samples;
-        if (fade_in != 0u) {
-            app_intercom_jitter_fade_in_pcm(s_rx_pcm, samples);
-        }
-        memcpy(s_rx_last_pcm, s_rx_pcm, sizeof(s_rx_last_pcm));
+        int decode_ret = app_intercom_jitter_decode_frame(frame, s_rx_pcm, &samples);
         frame->valid = 0u;
-        s_rx_jitter_missing = 0u;
-        played_real_frame = 1u;
+        if (decode_ret == 0) {
+            if (fade_in != 0u) {
+                app_intercom_jitter_fade_in_pcm(s_rx_pcm, samples);
+            }
+            memcpy(s_rx_last_pcm, s_rx_pcm, sizeof(s_rx_last_pcm));
+            s_rx_jitter_missing = 0u;
+            played_real_frame = 1u;
+        } else {
+            s_rx_jitter_missing++;
+            if (s_rx_jitter_missing == 1u) {
+                app_intercom_rx_show_weak("decode_fail", now);
+                app_intercom_jitter_bump_target();
+            }
+            samples = APP_INTERCOM_PACKET_SAMPLES;
+            app_intercom_jitter_make_plc_frame(s_rx_pcm);
+        }
     } else {
         uint8_t ready_frames = app_intercom_jitter_count_ready();
         if (s_rx_jitter_ending != 0u && ready_frames == 0u) {
@@ -2710,15 +2923,21 @@ static void app_intercom_jitter_play_tick(void)
                 s_rx_jitter_expected_seq = next_seq;
                 frame = app_intercom_jitter_find(s_rx_jitter_expected_seq);
                 if (frame != NULL) {
-                    memcpy(s_rx_pcm, frame->pcm, sizeof(s_rx_pcm));
-                    samples = frame->samples;
-                    if (missing_before_skip != 0u) {
-                        app_intercom_jitter_fade_in_pcm(s_rx_pcm, samples);
-                    }
-                    memcpy(s_rx_last_pcm, s_rx_pcm, sizeof(s_rx_last_pcm));
+                    int decode_ret = app_intercom_jitter_decode_frame(frame,
+                                                                      s_rx_pcm,
+                                                                      &samples);
                     frame->valid = 0u;
-                    s_rx_jitter_missing = 0u;
-                    played_real_frame = 1u;
+                    if (decode_ret == 0) {
+                        if (missing_before_skip != 0u) {
+                            app_intercom_jitter_fade_in_pcm(s_rx_pcm, samples);
+                        }
+                        memcpy(s_rx_last_pcm, s_rx_pcm, sizeof(s_rx_last_pcm));
+                        s_rx_jitter_missing = 0u;
+                        played_real_frame = 1u;
+                    } else {
+                        samples = APP_INTERCOM_PACKET_SAMPLES;
+                        app_intercom_jitter_make_plc_frame(s_rx_pcm);
+                    }
                 } else {
                     app_intercom_jitter_make_plc_frame(s_rx_pcm);
                 }
@@ -2728,18 +2947,19 @@ static void app_intercom_jitter_play_tick(void)
         } else {
             app_intercom_jitter_make_plc_frame(s_rx_pcm);
         }
-        if (s_rx_jitter_missing > APP_INTERCOM_JITTER_MAX_MISSING) {
-            app_intercom_rx_show_weak("stream_break", now);
-            app_intercom_rx_note_unstable("stream_break", now);
-            APP_LOGW(TAG, "intercom_play event=stream_break device=%s ch=%d seq=%u missing=%u",
-                     s_rx_jitter_device,
-                     (int)s_current_channel,
-                     (unsigned int)s_rx_jitter_expected_seq,
-                     (unsigned int)s_rx_jitter_missing);
-            app_intercom_rx_stop_playback();
-            app_intercom_jitter_clear();
-            return;
-        }
+    }
+
+    if (s_rx_jitter_missing > APP_INTERCOM_JITTER_MAX_MISSING) {
+        app_intercom_rx_show_weak("stream_break", now);
+        app_intercom_rx_note_unstable("stream_break", now);
+        APP_LOGW(TAG, "intercom_play event=stream_break device=%s ch=%d seq=%u missing=%u",
+                 s_rx_jitter_device,
+                 (int)s_current_channel,
+                 (unsigned int)s_rx_jitter_expected_seq,
+                 (unsigned int)s_rx_jitter_missing);
+        app_intercom_rx_stop_playback();
+        app_intercom_jitter_clear();
+        return;
     }
 
     uint32_t play_start_ms = osal_get_tick_ms();
@@ -3343,6 +3563,14 @@ int app_intercom_start(void)
     }
 #endif
 
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    ret = app_intercom_opus_rx_init();
+    if (ret != 0) {
+        APP_LOGE(TAG, "intercom_opus_rx event=start_fail ret=%d", ret);
+        return ret;
+    }
+#endif
+
     if (service_network_is_ready() != 1) {
         APP_LOGI(TAG,
                  "intercom_ws event=wait_network device=%s host=%s port=%d",
@@ -3391,6 +3619,27 @@ int app_intercom_start(void)
         return ret;
     }
 
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+    TaskHandle_t play_handle = NULL;
+    BaseType_t play_ret = xTaskCreateWithCaps(app_intercom_rx_task,
+                                              "biz_ws_play",
+                                              APP_INTERCOM_RX_TASK_STACK,
+                                              NULL,
+                                              5u,
+                                              &play_handle,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (play_ret != pdPASS) {
+        APP_LOGE(TAG,
+                 "intercom_task event=start_fail name=biz_ws_play ret=%d stack=%u psram_free=%u "
+                 "internal_free=%u internal_largest=%u",
+                 (int)play_ret,
+                 (unsigned int)APP_INTERCOM_RX_TASK_STACK,
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        return -1;
+    }
+#else
     ret = osal_task_create("biz_ws_play",
                            app_intercom_rx_task,
                            NULL,
@@ -3401,6 +3650,7 @@ int app_intercom_start(void)
         APP_LOGE(TAG, "intercom_task event=start_fail name=biz_ws_play ret=%d", ret);
         return ret;
     }
+#endif
 
     ret = osal_task_create("biz_heartbeat",
                            app_intercom_heartbeat_task,
