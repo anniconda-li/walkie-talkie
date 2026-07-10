@@ -127,6 +127,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_MAX_MISSING  APP_INTERCOM_MS_TO_FRAMES(800u)
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 1200u
+/** @brief 接收端允许的最大突发迟到时间，超过后认为是 TCP 旧包并丢弃。 */
+#define APP_INTERCOM_RX_STALE_DROP_MS   1200u
+/** @brief RX 播放任务每轮最多处理的 WebSocket 包数，避免突发队列挤占播放节奏。 */
+#define APP_INTERCOM_RX_DRAIN_LIMIT     16u
 /** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
 #define APP_INTERCOM_GAP_LOG_INTERVAL_MS 1000u
 /** @brief 缺包淡出/真实音频淡入采样数，约 3ms，降低卡顿和点击感。 */
@@ -209,6 +213,7 @@ typedef struct {
     uint8_t type;           /**< 包类型（见 app_intercom_packet_type_t） */
     uint16_t channel;       /**< 目标频道号 */
     uint32_t seq;           /**< 发送序列号（每包递增） */
+    uint32_t timestamp_ms;   /**< 发送端打包时刻，用于接收端估算突发迟到。 */
     char device[APP_INTERCOM_DEVICE_FIELD_LEN + 1u]; /**< 发送端设备名。 */
     const uint8_t *payload; /**< payload 指针（指向原始 buffer 内部） */
     uint16_t payload_len;   /**< payload 长度（字节） */
@@ -262,6 +267,12 @@ static uint32_t s_rx_jitter_expected_seq = 0u;
 static uint32_t s_rx_jitter_next_play_ms = 0u;
 /** @brief 最近一次收到当前 jitter 流音频包的时间。 */
 static uint32_t s_rx_jitter_last_enqueue_ms = 0u;
+/** @brief 当前流首个音频包的发送端时间戳。 */
+static uint32_t s_rx_jitter_first_timestamp_ms = 0u;
+/** @brief 当前流首个音频包在本机的到达时间。 */
+static uint32_t s_rx_jitter_first_arrival_ms = 0u;
+/** @brief 当前流是否已建立发送端时间戳到本机时间的相对映射。 */
+static uint8_t s_rx_jitter_timing_ready = 0u;
 /** @brief jitter buffer 是否已绑定当前语音流。 */
 static uint8_t s_rx_jitter_ready = 0u;
 /** @brief jitter buffer 是否已经起播。 */
@@ -302,6 +313,10 @@ static uint32_t s_rx_stat_duplicate = 0u;
 static uint32_t s_rx_stat_overwrite = 0u;
 /** @brief RX 本统计窗口太超前导致播放指针前移的次数。 */
 static uint32_t s_rx_stat_far_ahead = 0u;
+/** @brief RX 本统计窗口因突发迟到而丢弃的旧音频包数。 */
+static uint32_t s_rx_stat_stale_drop = 0u;
+/** @brief RX 本统计窗口估算到的最大突发迟到时间。 */
+static uint32_t s_rx_stat_stale_max_ms = 0u;
 /** @brief RX 上一个音频包到达时间，用于估算后端/网络下行抖动。 */
 static uint32_t s_rx_stat_last_arrival_ms = 0u;
 /** @brief RX 本统计窗口音频包到达间隔样本数。 */
@@ -733,6 +748,7 @@ static int app_intercom_parse_packet(const uint8_t *packet,
     view->type = packet[4];
     view->channel = app_intercom_read_u16(&packet[6]);
     view->seq = app_intercom_read_u32(&packet[8]);
+    view->timestamp_ms = app_intercom_read_u32(&packet[12]);
     memcpy(view->device, &packet[16], APP_INTERCOM_DEVICE_FIELD_LEN);
     view->device[APP_INTERCOM_DEVICE_FIELD_LEN] = '\0';
     view->payload = &packet[header_len];
@@ -1822,6 +1838,8 @@ static void app_intercom_rx_stats_reset(uint32_t first_seq)
     s_rx_stat_duplicate = 0u;
     s_rx_stat_overwrite = 0u;
     s_rx_stat_far_ahead = 0u;
+    s_rx_stat_stale_drop = 0u;
+    s_rx_stat_stale_max_ms = 0u;
     s_rx_stat_last_arrival_ms = 0u;
     s_rx_stat_interval_count = 0u;
     s_rx_stat_interval_sum_ms = 0u;
@@ -1896,8 +1914,9 @@ static void app_intercom_rx_stats_log(uint32_t now)
                       (s_rx_stat_interval_sum_ms / s_rx_stat_interval_count);
     APP_LOGI(TAG,
              "intercom_rx win_ms=%u device=%s ch=%d audio=%u bytes=%u gap=%u/%u "
-             "late=%u dup=%u overwrite=%u far=%u first_seq=%u last_seq=%u expected=%u "
-             "rx_avg_ms=%u rx_max_ms=%u rx_warn=%u rx_bad=%u rx_stall=%u buffered=%u",
+             "late=%u dup=%u overwrite=%u far=%u stale=%u stale_max_ms=%u "
+             "first_seq=%u last_seq=%u expected=%u rx_avg_ms=%u rx_max_ms=%u "
+             "rx_warn=%u rx_bad=%u rx_stall=%u buffered=%u",
              (unsigned int)APP_INTERCOM_RX_STAT_LOG_MS,
              s_rx_jitter_device,
              (int)s_current_channel,
@@ -1909,6 +1928,8 @@ static void app_intercom_rx_stats_log(uint32_t now)
              (unsigned int)s_rx_stat_duplicate,
              (unsigned int)s_rx_stat_overwrite,
              (unsigned int)s_rx_stat_far_ahead,
+             (unsigned int)s_rx_stat_stale_drop,
+             (unsigned int)s_rx_stat_stale_max_ms,
              (unsigned int)s_rx_stat_first_seq,
              (unsigned int)s_rx_stat_last_seq,
              (unsigned int)s_rx_jitter_expected_seq,
@@ -1929,6 +1950,8 @@ static void app_intercom_rx_stats_log(uint32_t now)
     s_rx_stat_duplicate = 0u;
     s_rx_stat_overwrite = 0u;
     s_rx_stat_far_ahead = 0u;
+    s_rx_stat_stale_drop = 0u;
+    s_rx_stat_stale_max_ms = 0u;
     s_rx_stat_interval_count = 0u;
     s_rx_stat_interval_sum_ms = 0u;
     s_rx_stat_interval_max_ms = 0u;
@@ -2044,6 +2067,9 @@ static void app_intercom_jitter_clear(void)
     s_rx_jitter_expected_seq = 0u;
     s_rx_jitter_next_play_ms = 0u;
     s_rx_jitter_last_enqueue_ms = 0u;
+    s_rx_jitter_first_timestamp_ms = 0u;
+    s_rx_jitter_first_arrival_ms = 0u;
+    s_rx_jitter_timing_ready = 0u;
     s_rx_jitter_ready = 0u;
     s_rx_jitter_playing = 0u;
     s_rx_jitter_missing = 0u;
@@ -2172,6 +2198,54 @@ static void app_intercom_jitter_reset_for_source(const char *device, uint32_t se
     app_intercom_play_stats_reset(osal_get_tick_ms());
 }
 
+static int app_intercom_jitter_drop_stale_audio(const app_intercom_packet_view_t *view,
+                                                uint32_t now)
+{
+    if (view == NULL) {
+        return 0;
+    }
+
+    if (s_rx_jitter_timing_ready == 0u) {
+        s_rx_jitter_first_timestamp_ms = view->timestamp_ms;
+        s_rx_jitter_first_arrival_ms = now;
+        s_rx_jitter_timing_ready = 1u;
+        return 0;
+    }
+
+    uint32_t sender_delta_ms = view->timestamp_ms - s_rx_jitter_first_timestamp_ms;
+    uint32_t expected_arrival_ms = s_rx_jitter_first_arrival_ms + sender_delta_ms;
+    if (app_intercom_seq_before(now, expected_arrival_ms)) {
+        return 0;
+    }
+
+    uint32_t stale_ms = now - expected_arrival_ms;
+    if (stale_ms > s_rx_stat_stale_max_ms) {
+        s_rx_stat_stale_max_ms = stale_ms;
+    }
+    if (stale_ms <= APP_INTERCOM_RX_STALE_DROP_MS) {
+        return 0;
+    }
+
+    s_rx_stat_stale_drop++;
+    app_intercom_rx_stats_log(now);
+    return 1;
+}
+
+static void app_intercom_jitter_mark_start(const app_intercom_packet_view_t *view)
+{
+    if (view == NULL) {
+        return;
+    }
+
+    app_intercom_jitter_reset_for_source(view->device, view->seq + 1u);
+    APP_LOGI(TAG,
+             "intercom_ptt event=remote_start device=%s ch=%u seq=%u expected=%u",
+             view->device,
+             (unsigned int)view->channel,
+             (unsigned int)view->seq,
+             (unsigned int)s_rx_jitter_expected_seq);
+}
+
 static void app_intercom_jitter_mark_stop(const app_intercom_packet_view_t *view)
 {
     if (view == NULL || s_rx_jitter_ready == 0u) {
@@ -2209,6 +2283,9 @@ static void app_intercom_jitter_enqueue_pcm(const app_intercom_packet_view_t *vi
 
     uint32_t now = osal_get_tick_ms();
     app_intercom_rx_stats_note_audio(view->seq, view->payload_len, now);
+    if (app_intercom_jitter_drop_stale_audio(view, now) != 0) {
+        return;
+    }
 
     if (s_rx_jitter_playing && app_intercom_seq_before(view->seq, s_rx_jitter_expected_seq)) {
         s_rx_stat_late++;
@@ -2587,11 +2664,7 @@ static int app_intercom_handle_packet(const uint8_t *packet, uint16_t len)
         app_intercom_jitter_mark_stop(&view);
         return 3;
     } else if (view.type == APP_INTERCOM_PKT_PTT_START) {
-        APP_LOGI(TAG,
-                 "intercom_ptt event=remote_start device=%s ch=%u seq=%u",
-                 view.device,
-                 (unsigned int)view.channel,
-                 (unsigned int)view.seq);
+        app_intercom_jitter_mark_start(&view);
         return 3;
     }
 
@@ -2621,7 +2694,9 @@ static void app_intercom_rx_task(void *arg)
 
         uint16_t ws_packet_len = 0u;
         uint8_t ws_drained = 0u;
-        while (app_intercom_ws_rx_pop(s_ws_rx_packet_buf, &ws_packet_len) == 0) {
+        uint8_t drain_count = 0u;
+        while (drain_count < APP_INTERCOM_RX_DRAIN_LIMIT &&
+               app_intercom_ws_rx_pop(s_ws_rx_packet_buf, &ws_packet_len) == 0) {
             int handled = app_intercom_handle_packet(s_ws_rx_packet_buf, ws_packet_len);
             if (handled < 0) {
                 s_ws_rx_stat_parse_drop++;
@@ -2629,6 +2704,7 @@ static void app_intercom_rx_task(void *arg)
                 s_ws_rx_stat_control++;
             }
             ws_drained = 1u;
+            drain_count++;
         }
         app_intercom_ws_rx_stats_log(osal_get_tick_ms());
 
