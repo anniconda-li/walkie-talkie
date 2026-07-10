@@ -52,6 +52,8 @@ extern "C" {
 #define APP_INTERCOM_USE_WS_UPLINK      1
 /** @brief Opus 裸 payload 上行链路测试；后端仍只转发 WTK1 binary 包。 */
 #define APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE 1
+/** @brief Opus 裸 payload 下行链路测试；设备在 jitter buffer 播放阶段解码。 */
+#define APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE 1
 /** @brief 对讲 Opus 目标码率。 */
 #define APP_INTERCOM_OPUS_BITRATE       20000
 /**
