@@ -38,6 +38,7 @@
 
 #include "app_business.h"
 #include "app_config.h"
+#include "app_intercom_opus_test.h"
 #include "app_ui.h"
 #include "osal_mutex.h"
 #include "osal_task.h"
@@ -3086,6 +3087,16 @@ int app_intercom_start(void)
     }
 
     int ret = 0;
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    ret = app_intercom_opus_test_start();
+    if (ret != 0) {
+        APP_LOGE(TAG, "opus_local event=start_fail ret=%d", ret);
+        return ret;
+    }
+    s_started = 1;
+    return 0;
+#endif
+
     if (service_network_is_ready() != 1) {
         APP_LOGI(TAG,
                  "intercom_ws event=wait_network device=%s host=%s port=%d",
@@ -3151,6 +3162,10 @@ void app_intercom_set_channel(int32_t channel)
         channel = APP_BUSINESS_DEFAULT_CHANNEL;
     }
     s_current_channel = channel;
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    APP_LOGI(TAG, "opus_local event=channel_ignored ch=%d", (int)s_current_channel);
+    return;
+#endif
     (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
     APP_LOGI(TAG,
              "intercom_channel event=set device=%s ch=%d connected=%d",
@@ -3177,6 +3192,10 @@ void app_intercom_set_channel(int32_t channel)
 void app_intercom_ptt_start(int32_t channel)
 {
     s_current_channel = channel > 0 ? channel : s_current_channel;
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    app_intercom_opus_test_ptt_start();
+    return;
+#endif
     if (app_business_audio_session_is_busy()) {
         APP_LOGW(TAG,
                  "intercom_ptt event=ignored reason=audio_busy device=%s ch=%d",
@@ -3202,11 +3221,18 @@ void app_intercom_ptt_start(int32_t channel)
  */
 void app_intercom_ptt_stop(void)
 {
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    app_intercom_opus_test_ptt_stop();
+    return;
+#endif
     s_ptt_active = 0;
 }
 
 void app_intercom_network_changed(void)
 {
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    return;
+#endif
     APP_LOGI(TAG,
              "intercom_ws event=network_changed device=%s connected=%d",
              APP_DEVICE_ID,

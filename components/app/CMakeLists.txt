@@ -30,6 +30,8 @@ idf_component_register(
         lvgl__lvgl
         osal
         esp_app_format
+        esp_audio_codec
+        esp_timer
         lwip
         nvs_flash
 
