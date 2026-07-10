@@ -15,10 +15,12 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_opus_dec.h"
 #include "esp_opus_enc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 #if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
@@ -351,16 +353,25 @@ int app_intercom_opus_test_start(void)
     if (ret != 0) {
         return ret;
     }
-    ret = osal_task_create("opus_local",
-                           app_intercom_opus_test_task,
-                           NULL,
-                           APP_INTERCOM_OPUS_TEST_TASK_STACK,
-                           6u,
-                           &s_task);
-    if (ret != 0) {
-        APP_LOGE(TAG, "event=task_start_fail ret=%d", ret);
-        return ret;
+    TaskHandle_t handle = NULL;
+    BaseType_t task_ret = xTaskCreateWithCaps(app_intercom_opus_test_task,
+                                              "opus_local",
+                                              APP_INTERCOM_OPUS_TEST_TASK_STACK,
+                                              NULL,
+                                              6u,
+                                              &handle,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (task_ret != pdPASS) {
+        APP_LOGE(TAG,
+                 "event=task_start_fail ret=%d stack=%u psram_free=%u internal_free=%u internal_largest=%u",
+                 (int)task_ret,
+                 (unsigned int)APP_INTERCOM_OPUS_TEST_TASK_STACK,
+                 (unsigned int)osal_heap_get_external_free_size(),
+                 (unsigned int)osal_heap_get_internal_free_size(),
+                 (unsigned int)osal_heap_get_internal_largest_free_block());
+        return -1;
     }
+    s_task = (osal_task_t)handle;
     APP_LOGI(TAG, "event=enabled websocket=disabled hold_ptt=record release_ptt=playback");
     return 0;
 }
