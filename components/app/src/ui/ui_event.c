@@ -253,6 +253,27 @@ static void set_intercom_failed(ui_intercom_view_t *view)
     }
 }
 
+static void set_intercom_rx_weak(ui_intercom_view_t *view)
+{
+    if(view == NULL) {
+        return;
+    }
+
+    for(int32_t i = 0; i < 3; i++) {
+        stop_ptt_ring_anim(view->broadcast_rings[i], i);
+    }
+    set_obj_hidden(view->channel_label, true);
+    set_obj_hidden(view->channel_hint_label, true);
+    if(view->status_label != NULL) {
+        lv_label_set_text(view->status_label, "网络波动");
+        lv_obj_set_style_text_color(view->status_label, lv_color_make(0xFF, 0xC0, 0x47), 0);
+        set_obj_hidden(view->status_label, false);
+    }
+    if(view->ptt_button != NULL) {
+        lv_obj_set_style_bg_color(view->ptt_button, lv_color_make(0x5A, 0x52, 0x2A), 0);
+    }
+}
+
 /** @brief 切换频道（delta = +1 或 -1），钳位到 1-32 范围并触发回调。 */
 static void intercom_change_channel(ui_intercom_view_t *view, int32_t delta)
 {
@@ -1251,6 +1272,9 @@ void ui_event_set_intercom_state(int state)
             break;
         case 3:
             set_intercom_failed(g_intercom_view);
+            break;
+        case 4:
+            set_intercom_rx_weak(g_intercom_view);
             break;
         case 0:
         default:

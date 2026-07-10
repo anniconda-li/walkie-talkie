@@ -21,6 +21,7 @@ typedef enum {
     APP_UI_INTERCOM_STATE_TALKING,
     APP_UI_INTERCOM_STATE_RECOVERING,
     APP_UI_INTERCOM_STATE_FAILED,
+    APP_UI_INTERCOM_STATE_RX_WEAK,
 } app_ui_intercom_state_t;
 
 /**
