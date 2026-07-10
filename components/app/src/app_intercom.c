@@ -9,7 +9,7 @@
  * 2. 检查音频会话是否被 AI 占用 → 若空闲则置 s_ptt_active = 1
  * 3. notify_give(biz_ptt) → 唤醒 PTT 任务
  * 4. PTT 任务抢占音频会话锁 → 发 PTT_START 控制包
- * 5. 循环：读麦克风 320 samples(20ms) → 封装 WTK1 binary 包 → WebSocket 发送
+ * 5. 循环：读麦克风 320 samples(20ms) → 聚合为 AUDIO 包 → WebSocket 发送
  * 6. 用户松手 → s_ptt_active = 0 → 循环退出 → 发 PTT_STOP
  * 7. 释放音频会话锁 → notify_take 阻塞等待下次
  *
@@ -31,7 +31,7 @@
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，固定 20ms）
+ * Byte 34+:  payload（AUDIO 为 PCM 16bit 单声道，可按多个 20ms 帧聚合）
  * ```
  */
 #include "app_intercom.h"
@@ -63,11 +63,11 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_DEVICE_FIELD_LEN   16u
 /** @brief WTK1 协议固定包头长度。 */
 #define APP_INTERCOM_PACKET_HEADER_LEN  34u
-/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，1 帧即 20ms/包。 */
-#define APP_INTERCOM_PACKET_FRAMES      1u
+/** @brief 单个 AUDIO 包聚合的 20ms PCM 帧数，2 帧即 40ms/包，降低 WebSocket 发送频率。 */
+#define APP_INTERCOM_PACKET_FRAMES      2u
 /** @brief 单个 AUDIO 包最大 PCM 样本数。 */
 #define APP_INTERCOM_PACKET_SAMPLES     (APP_BUSINESS_FRAME_SAMPLES * APP_INTERCOM_PACKET_FRAMES)
-/** @brief 单个 AUDIO 包 payload，当前为 20ms PCM 字节数。 */
+/** @brief 单个 AUDIO 包 payload，当前为 40ms PCM 字节数。 */
 #define APP_INTERCOM_AUDIO_PAYLOAD_BYTES (APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t))
 /** @brief 单个 WTK1 包最大 payload，WebSocket/TCP 模式只承载 AUDIO PCM。 */
 #define APP_INTERCOM_PACKET_MAX_PAYLOAD  APP_INTERCOM_AUDIO_PAYLOAD_BYTES
@@ -90,24 +90,25 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_HEARTBEAT_BUSY_MS  500u
 /** @brief 接收播放空闲关闭时间，延长以避免弱网短断流导致功放反复开关。 */
 #define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 500u
-/** @brief 对讲固定音频包时长。 */
+/** @brief 单个对讲 AUDIO 包时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      (20u * APP_INTERCOM_PACKET_FRAMES)
-/** @brief jitter buffer 容量，64 包约 1280ms，用延迟换弱网播放连续性。 */
-#define APP_INTERCOM_JITTER_FRAME_COUNT  64u
-/** @brief 正常网络下的起播缓存包数，20 包约 400ms。 */
-#define APP_INTERCOM_JITTER_START_FRAMES 20u
-/** @brief 抖动网络下的最大起播缓存包数，32 包约 640ms。 */
-#define APP_INTERCOM_JITTER_MAX_START_FRAMES 32u
-/** @brief 稳定播放这么多包后，逐步降低自适应起播水位。 */
-#define APP_INTERCOM_JITTER_RECOVER_FRAMES 800u
-/** @brief jitter buffer 低水位，低于此值时减慢播放一拍等待网络追上。 */
-#define APP_INTERCOM_JITTER_LOW_WATER    2u
-/** @brief jitter buffer 高水位，超过此值时略微追帧降低延迟。 */
-#define APP_INTERCOM_JITTER_HIGH_WATER   48u
+#define APP_INTERCOM_MS_TO_FRAMES(ms)    (((ms) + APP_INTERCOM_AUDIO_FRAME_MS - 1u) / APP_INTERCOM_AUDIO_FRAME_MS)
+/** @brief jitter buffer 容量，约 1280ms，用延迟换弱网播放连续性。 */
+#define APP_INTERCOM_JITTER_FRAME_COUNT  APP_INTERCOM_MS_TO_FRAMES(1280u)
+/** @brief 正常网络下的起播缓存时长。 */
+#define APP_INTERCOM_JITTER_START_FRAMES APP_INTERCOM_MS_TO_FRAMES(400u)
+/** @brief 抖动网络下的最大起播缓存时长。 */
+#define APP_INTERCOM_JITTER_MAX_START_FRAMES APP_INTERCOM_MS_TO_FRAMES(640u)
+/** @brief 稳定播放约 16s 后，逐步降低自适应起播水位。 */
+#define APP_INTERCOM_JITTER_RECOVER_FRAMES APP_INTERCOM_MS_TO_FRAMES(16000u)
+/** @brief jitter buffer 低水位，低于约 40ms 时减慢播放一拍等待网络追上。 */
+#define APP_INTERCOM_JITTER_LOW_WATER    APP_INTERCOM_MS_TO_FRAMES(40u)
+/** @brief jitter buffer 高水位，超过约 960ms 时略微追帧降低延迟。 */
+#define APP_INTERCOM_JITTER_HIGH_WATER   APP_INTERCOM_MS_TO_FRAMES(960u)
 /** @brief 连续缺帧达到该值且已有后续帧时，跳过缺口继续播放真实音频。 */
 #define APP_INTERCOM_JITTER_RESYNC_MISSING 2u
-/** @brief 连续缺包补偿上限，超过后认为本次语音流中断。 */
-#define APP_INTERCOM_JITTER_MAX_MISSING  40u
+/** @brief 连续缺包补偿上限，超过约 800ms 后认为本次语音流中断。 */
+#define APP_INTERCOM_JITTER_MAX_MISSING  APP_INTERCOM_MS_TO_FRAMES(800u)
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 1200u
 /** @brief 缺包跳帧日志节流，避免弱网下实时播放任务频繁进入 printf/UART 锁。 */
@@ -138,8 +139,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_TX_LOCK_MS       5u
 /** @brief WebSocket HTTP 握手响应缓冲大小。 */
 #define APP_INTERCOM_WS_HANDSHAKE_BYTES  512u
-/** @brief WebSocket 下行队列容量，128 包约 2.56s，放在 PSRAM 中吸收播放任务短时阻塞。 */
-#define APP_INTERCOM_WS_RX_QUEUE_LEN     128u
+/** @brief WebSocket 下行队列容量，约 2.56s，放在 PSRAM 中吸收播放任务短时阻塞。 */
+#define APP_INTERCOM_WS_RX_QUEUE_LEN     APP_INTERCOM_MS_TO_FRAMES(2560u)
 /** @brief WebSocket 下行队列丢包日志节流。 */
 #define APP_INTERCOM_WS_DROP_LOG_MS      1000u
 /** @brief WebSocket 下行本地队列统计日志周期。 */
@@ -148,10 +149,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_TX_STAT_LOG_MS   1000u
 /** @brief 设备端对讲接收/播放聚合统计周期。 */
 #define APP_INTERCOM_RX_STAT_LOG_MS      1000u
-/** @brief 后端到设备的音频包到达间隔超过该值时计入轻微抖动。 */
-#define APP_INTERCOM_RX_INTERVAL_WARN_MS 40u
-/** @brief 后端到设备的音频包到达间隔超过该值时计入明显抖动。 */
-#define APP_INTERCOM_RX_INTERVAL_BAD_MS  80u
+/** @brief 后端到设备的音频包到达间隔超过 2 个包周期时计入轻微抖动。 */
+#define APP_INTERCOM_RX_INTERVAL_WARN_MS (APP_INTERCOM_AUDIO_FRAME_MS * 2u)
+/** @brief 后端到设备的音频包到达间隔超过 3 个包周期时计入明显抖动。 */
+#define APP_INTERCOM_RX_INTERVAL_BAD_MS  (APP_INTERCOM_AUDIO_FRAME_MS * 3u)
 /** @brief 后端到设备的音频包到达间隔超过该值时计入严重抖动。 */
 #define APP_INTERCOM_RX_INTERVAL_STALL_MS 200u
 /** @brief WebSocket 单次发送耗时超过该值时计入慢发送。 */
@@ -173,7 +174,7 @@ typedef enum {
     APP_INTERCOM_PKT_REGISTER = 1,  /**< 设备注册（上报设备名到服务器） */
     APP_INTERCOM_PKT_CHANNEL = 2,   /**< 频道切换 */
     APP_INTERCOM_PKT_PTT_START = 3, /**< PTT 开始（对讲键按下） */
-    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（20ms PCM） */
+    APP_INTERCOM_PKT_AUDIO = 4,     /**< 音频数据帧（聚合 PCM） */
     APP_INTERCOM_PKT_PTT_STOP = 5,  /**< PTT 结束（对讲键松开） */
     APP_INTERCOM_PKT_HEARTBEAT = 6, /**< 心跳保活（空闲 3s 间隔） */
 } app_intercom_packet_type_t;
@@ -182,7 +183,7 @@ typedef enum {
  * @brief 解析后的数据包视图——零拷贝设计。
  *
  * 解析时不复制 payload，直接指向原始 buffer 中的偏移位置，
- * 减少 20ms 音频帧的处理开销。
+ * 减少音频帧的处理开销。
  */
 typedef struct {
     uint8_t type;           /**< 包类型（见 app_intercom_packet_type_t） */
@@ -199,7 +200,7 @@ typedef struct {
     uint8_t valid;                                  /**< 槽位是否有可播放帧。 */
     uint32_t seq;                                  /**< 对应协议序列号。 */
     uint16_t samples;                              /**< PCM 样本数。 */
-    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 固定 20ms PCM 包。 */
+    int16_t pcm[APP_INTERCOM_PACKET_SAMPLES];      /**< 聚合 PCM 包。 */
 } app_intercom_jitter_frame_t;
 
 typedef struct {
@@ -473,7 +474,7 @@ static int app_intercom_parse_packet(const uint8_t *packet,
 
     uint8_t header_len = packet[5];
     uint16_t payload_len = app_intercom_read_u16(&packet[32]);
-    /* 解析阶段只建立 view，不复制 payload，减少 20ms 音频包处理开销。 */
+    /* 解析阶段只建立 view，不复制 payload，减少音频包处理开销。 */
     if (header_len != APP_INTERCOM_PACKET_HEADER_LEN ||
         len < (uint16_t)(header_len + payload_len)) {
         return -3;
@@ -1493,7 +1494,7 @@ static void app_intercom_rx_stats_log(uint32_t now)
     APP_LOGI(TAG,
              "intercom_rx win_ms=%u device=%s ch=%d audio=%u bytes=%u gap=%u/%u "
              "late=%u dup=%u overwrite=%u far=%u first_seq=%u last_seq=%u expected=%u "
-             "rx_avg_ms=%u rx_max_ms=%u rx_gt40=%u rx_gt80=%u rx_gt200=%u buffered=%u",
+             "rx_avg_ms=%u rx_max_ms=%u rx_warn=%u rx_bad=%u rx_stall=%u buffered=%u",
              (unsigned int)APP_INTERCOM_RX_STAT_LOG_MS,
              s_rx_jitter_device,
              (int)s_current_channel,
@@ -2222,8 +2223,8 @@ static void app_intercom_rx_task(void *arg)
  * 3. 发送 PTT_START 控制包（通知服务器和同频道其他人）
  * 4. 循环（while (s_ptt_active)）：
  *    a. service_audio_read(pcm, 320, 30ms) —— 读 20ms PCM 帧
- *    b. 按 1 帧为一个 20ms PCM 包
- *    c. app_intercom_build_packet(packet, AUDIO, pcm, 640)
+ *    b. 聚合 APP_INTERCOM_PACKET_FRAMES 个 20ms 帧为一个 AUDIO 包
+ *    c. app_intercom_build_packet(packet, AUDIO, pcm, APP_INTERCOM_AUDIO_PAYLOAD_BYTES)
  *    d. WebSocket binary frame 发给服务器
  * 5. 用户松手 → s_ptt_active = 0 → 退出循环
  * 6. 发送 PTT_STOP 控制包
@@ -2231,7 +2232,7 @@ static void app_intercom_rx_task(void *arg)
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
- * - 每包 20ms (320 samples × 16bit = 640 字节)，服务器按 PCM 原样转发
+ * - 每包当前 40ms (640 samples × 16bit = 1280 字节)，服务器按 PCM 原样转发
  * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
  * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
  *
