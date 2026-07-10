@@ -117,6 +117,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_MAX_START_FRAMES APP_INTERCOM_MS_TO_FRAMES(640u)
 /** @brief 稳定播放约 16s 后，逐步降低自适应起播水位。 */
 #define APP_INTERCOM_JITTER_RECOVER_FRAMES APP_INTERCOM_MS_TO_FRAMES(16000u)
+/** @brief 发现一次严重下行停顿时，临时提高约 80ms 缓冲水位。 */
+#define APP_INTERCOM_JITTER_STALL_BUMP_FRAMES APP_INTERCOM_MS_TO_FRAMES(80u)
+/** @brief 下行质量触发升挡的最小间隔，避免偶发批量到达把水位迅速拉满。 */
+#define APP_INTERCOM_JITTER_QUALITY_BUMP_INTERVAL_MS 3000u
 /** @brief jitter buffer 低水位，低于约 40ms 时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    APP_INTERCOM_MS_TO_FRAMES(40u)
 /** @brief jitter buffer 高水位，超过约 960ms 时略微追帧降低延迟。 */
@@ -287,6 +291,8 @@ static uint8_t s_rx_jitter_ending = 0u;
 static uint8_t s_rx_jitter_target_start = APP_INTERCOM_JITTER_START_FRAMES;
 /** @brief 连续稳定播放帧数，用于恢复低延迟水位。 */
 static uint16_t s_rx_jitter_stable_frames = 0u;
+/** @brief 最近一次因下行质量触发提高 jitter 水位的时间。 */
+static uint32_t s_rx_jitter_quality_bump_ms = 0u;
 /** @brief RX 统计日志节流时间。 */
 static uint32_t s_rx_stat_log_ms = 0u;
 /** @brief RX 缺口跳帧日志节流时间。 */
@@ -1824,6 +1830,7 @@ static int app_intercom_seq_before(uint32_t a, uint32_t b)
 
 static uint8_t app_intercom_jitter_count_ready(void);
 static uint8_t app_intercom_jitter_start_frames(void);
+static void app_intercom_jitter_bump_target_by(uint8_t frames, const char *reason);
 
 static void app_intercom_rx_stats_reset(uint32_t first_seq)
 {
@@ -1876,6 +1883,13 @@ static void app_intercom_rx_stats_note_audio(uint32_t seq,
         }
         if (interval_ms >= APP_INTERCOM_RX_INTERVAL_STALL_MS) {
             s_rx_stat_interval_stall++;
+            if (s_rx_jitter_playing != 0u &&
+                (uint32_t)(now - s_rx_jitter_quality_bump_ms) >=
+                    APP_INTERCOM_JITTER_QUALITY_BUMP_INTERVAL_MS) {
+                app_intercom_jitter_bump_target_by(APP_INTERCOM_JITTER_STALL_BUMP_FRAMES,
+                                                   "rx_stall");
+                s_rx_jitter_quality_bump_ms = now;
+            }
         }
     }
     s_rx_stat_last_arrival_ms = now;
@@ -2127,14 +2141,32 @@ static uint8_t app_intercom_jitter_low_water(void)
            APP_INTERCOM_JITTER_LOW_WATER;
 }
 
+static void app_intercom_jitter_bump_target_by(uint8_t frames, const char *reason)
+{
+    uint8_t old_target = s_rx_jitter_target_start;
+
+    if (frames == 0u) {
+        return;
+    }
+
+    s_rx_jitter_stable_frames = 0u;
+    while (frames > 0u && s_rx_jitter_target_start < APP_INTERCOM_JITTER_MAX_START_FRAMES) {
+        s_rx_jitter_target_start++;
+        frames--;
+    }
+
+    if (s_rx_jitter_target_start != old_target) {
+        APP_LOGW(TAG,
+                 "intercom_play event=bump_target reason=%s target=%u step=%u",
+                 reason != NULL ? reason : "unknown",
+                 (unsigned int)s_rx_jitter_target_start,
+                 (unsigned int)(s_rx_jitter_target_start - old_target));
+    }
+}
+
 static void app_intercom_jitter_bump_target(void)
 {
-    s_rx_jitter_stable_frames = 0u;
-    if (s_rx_jitter_target_start < APP_INTERCOM_JITTER_MAX_START_FRAMES) {
-        s_rx_jitter_target_start++;
-        APP_LOGW(TAG, "intercom_play event=bump_target target=%u",
-                 (unsigned int)s_rx_jitter_target_start);
-    }
+    app_intercom_jitter_bump_target_by(1u, "missing");
 }
 
 static void app_intercom_jitter_recover_target(void)
