@@ -42,6 +42,7 @@
  * UI 控件的 LVGL 事件处理函数通过此结构体调用业务回调。
  */
 static ui_event_callbacks_t g_callbacks;
+static ui_intercom_view_t *g_intercom_view = NULL;
 static ui_ai_view_t *g_ai_view = NULL;
 static ui_settings_view_t *g_settings_view = NULL;
 static lv_timer_t *g_ai_wait_timer = NULL;
@@ -201,11 +202,54 @@ static void set_intercom_talking(ui_intercom_view_t *view, bool talking)
 
     set_obj_hidden(view->channel_label, talking);
     set_obj_hidden(view->channel_hint_label, talking);
+    set_obj_hidden(view->status_label, true);
 
     if(view->ptt_button != NULL) {
         lv_obj_set_style_bg_color(view->ptt_button,
                                   talking ? UI_COLOR_INTERCOM : lv_color_make(0x3A, 0x3A, 0x3A),
                                   0);
+    }
+}
+
+static void set_intercom_recovering(ui_intercom_view_t *view)
+{
+    if(view == NULL) {
+        return;
+    }
+
+    for(int32_t i = 0; i < 3; i++) {
+        stop_ptt_ring_anim(view->broadcast_rings[i], i);
+    }
+    set_obj_hidden(view->channel_label, true);
+    set_obj_hidden(view->channel_hint_label, true);
+    if(view->status_label != NULL) {
+        lv_label_set_text(view->status_label, "重连中...");
+        lv_obj_set_style_text_color(view->status_label, lv_color_make(0xFF, 0xC0, 0x47), 0);
+        set_obj_hidden(view->status_label, false);
+    }
+    if(view->ptt_button != NULL) {
+        lv_obj_set_style_bg_color(view->ptt_button, lv_color_make(0x66, 0x5A, 0x2A), 0);
+    }
+}
+
+static void set_intercom_failed(ui_intercom_view_t *view)
+{
+    if(view == NULL) {
+        return;
+    }
+
+    for(int32_t i = 0; i < 3; i++) {
+        stop_ptt_ring_anim(view->broadcast_rings[i], i);
+    }
+    set_obj_hidden(view->channel_label, true);
+    set_obj_hidden(view->channel_hint_label, true);
+    if(view->status_label != NULL) {
+        lv_label_set_text(view->status_label, "连接失败");
+        lv_obj_set_style_text_color(view->status_label, lv_color_make(0xFF, 0x6B, 0x6B), 0);
+        set_obj_hidden(view->status_label, false);
+    }
+    if(view->ptt_button != NULL) {
+        lv_obj_set_style_bg_color(view->ptt_button, lv_color_make(0x64, 0x32, 0x32), 0);
     }
 }
 
@@ -1187,12 +1231,32 @@ void ui_event_register_intercom(ui_intercom_view_t *view)
         return;
     }
 
+    g_intercom_view = view;
     refresh_intercom_channel(view);
     set_intercom_talking(view, false);
 
     lv_obj_add_event_cb(view->channel_dec_button, intercom_dec_event_cb, LV_EVENT_ALL, view);
     lv_obj_add_event_cb(view->channel_inc_button, intercom_inc_event_cb, LV_EVENT_ALL, view);
     lv_obj_add_event_cb(view->ptt_button, intercom_ptt_event_cb, LV_EVENT_ALL, view);
+}
+
+void ui_event_set_intercom_state(int state)
+{
+    switch(state) {
+        case 1:
+            set_intercom_talking(g_intercom_view, true);
+            break;
+        case 2:
+            set_intercom_recovering(g_intercom_view);
+            break;
+        case 3:
+            set_intercom_failed(g_intercom_view);
+            break;
+        case 0:
+        default:
+            set_intercom_talking(g_intercom_view, false);
+            break;
+    }
 }
 
 void ui_event_register_camera(ui_camera_view_t *view)

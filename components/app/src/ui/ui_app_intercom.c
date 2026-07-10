@@ -105,6 +105,13 @@ lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
     lv_obj_set_style_text_color(g_intercom_view.channel_hint_label, lv_color_make(0xA8, 0xA8, 0xA8), 0);
     lv_obj_align(g_intercom_view.channel_hint_label, LV_ALIGN_CENTER, 0, 28);
 
+    g_intercom_view.status_label = lv_label_create(g_display_panel);
+    lv_label_set_text(g_intercom_view.status_label, "");
+    lv_obj_set_style_text_color(g_intercom_view.status_label, lv_color_make(0xFF, 0xC0, 0x47), 0);
+    lv_obj_set_style_text_font(g_intercom_view.status_label, ui_font_normal(), 0);
+    lv_obj_align(g_intercom_view.status_label, LV_ALIGN_CENTER, 0, 28);
+    lv_obj_add_flag(g_intercom_view.status_label, LV_OBJ_FLAG_HIDDEN);
+
     for(int32_t i = 0; i < 3; i++) {
         g_intercom_view.broadcast_rings[i] = lv_obj_create(g_display_panel);
         lv_obj_remove_flag(g_intercom_view.broadcast_rings[i], LV_OBJ_FLAG_SCROLLABLE);
@@ -119,6 +126,7 @@ lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
     }
     lv_obj_move_foreground(g_intercom_view.channel_label);
     lv_obj_move_foreground(g_intercom_view.channel_hint_label);
+    lv_obj_move_foreground(g_intercom_view.status_label);
 
     g_control_panel = create_panel(root, 16, 220, 208, 70);
     lv_obj_set_style_radius(g_control_panel, 20, 0);

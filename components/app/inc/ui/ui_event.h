@@ -80,6 +80,7 @@ typedef struct {
     lv_obj_t *channel_inc_button;  /**< 频道增加按钮。 */
     lv_obj_t *channel_label;       /**< 当前频道标签。 */
     lv_obj_t *channel_hint_label;  /**< 频道提示标签。 */
+    lv_obj_t *status_label;        /**< 对讲链路状态提示。 */
     lv_obj_t *ptt_button;          /**< PTT 按钮。 */
     lv_obj_t *broadcast_rings[3];  /**< PTT 波纹动画对象。 */
     int32_t channel;               /**< 当前 UI 频道号。 */
@@ -158,6 +159,8 @@ void ui_event_notify_power_shutdown_confirmed(void);
  * @param[in] view 对讲页面视图对象集合。
  */
 void ui_event_register_intercom(ui_intercom_view_t *view);
+
+void ui_event_set_intercom_state(int state);
 
 /**
  * @brief 注册相机页面视图对象。

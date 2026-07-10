@@ -16,6 +16,13 @@
 extern "C" {
 #endif
 
+typedef enum {
+    APP_UI_INTERCOM_STATE_IDLE = 0,
+    APP_UI_INTERCOM_STATE_TALKING,
+    APP_UI_INTERCOM_STATE_RECOVERING,
+    APP_UI_INTERCOM_STATE_FAILED,
+} app_ui_intercom_state_t;
+
 /**
  * @brief 创建应用主界面。
  *
