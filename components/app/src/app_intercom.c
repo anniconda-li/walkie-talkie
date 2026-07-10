@@ -121,6 +121,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_STALL_BUMP_FRAMES APP_INTERCOM_MS_TO_FRAMES(80u)
 /** @brief 下行质量触发升挡的最小间隔，避免偶发批量到达把水位迅速拉满。 */
 #define APP_INTERCOM_JITTER_QUALITY_BUMP_INTERVAL_MS 3000u
+/** @brief 接收弱网提示在最后一次异常后保持的最短时间。 */
+#define APP_INTERCOM_RX_WEAK_UI_CLEAR_MS 3000u
 /** @brief jitter buffer 低水位，低于约 40ms 时减慢播放一拍等待网络追上。 */
 #define APP_INTERCOM_JITTER_LOW_WATER    APP_INTERCOM_MS_TO_FRAMES(40u)
 /** @brief jitter buffer 高水位，超过约 960ms 时略微追帧降低延迟。 */
@@ -185,6 +187,14 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_RX_INTERVAL_BAD_MS  (APP_INTERCOM_AUDIO_FRAME_MS * 4u)
 /** @brief 后端到设备的音频包到达间隔超过该值时计入严重抖动。 */
 #define APP_INTERCOM_RX_INTERVAL_STALL_MS 200u
+/** @brief 单次下行停顿达到该值时，计入连接不稳事件。 */
+#define APP_INTERCOM_RX_RECONNECT_STALL_MS 1000u
+/** @brief 接收连接不稳事件统计窗口。 */
+#define APP_INTERCOM_RX_RECONNECT_WINDOW_MS 15000u
+/** @brief 窗口内达到该次数后，主动重建 WebSocket。 */
+#define APP_INTERCOM_RX_RECONNECT_EVENT_LIMIT 2u
+/** @brief 接收侧主动重连冷却时间，避免弱网下反复重连。 */
+#define APP_INTERCOM_RX_RECONNECT_COOLDOWN_MS 10000u
 /** @brief WebSocket 单次发送耗时超过该值时计入慢发送。 */
 #define APP_INTERCOM_TX_SEND_SLOW_MS     40u
 /** @brief 播放调度晚于计划超过该值时计入调度迟到。 */
@@ -293,6 +303,18 @@ static uint8_t s_rx_jitter_target_start = APP_INTERCOM_JITTER_START_FRAMES;
 static uint16_t s_rx_jitter_stable_frames = 0u;
 /** @brief 最近一次因下行质量触发提高 jitter 水位的时间。 */
 static uint32_t s_rx_jitter_quality_bump_ms = 0u;
+/** @brief 接收侧弱网提示是否正在显示。 */
+static uint8_t s_rx_ui_weak = 0u;
+/** @brief 接收侧是否已提示正在重连。 */
+static uint8_t s_rx_ui_reconnecting = 0u;
+/** @brief 最近一次接收弱网事件时间，用于自动清除 UI 提示。 */
+static uint32_t s_rx_ui_weak_event_ms = 0u;
+/** @brief 接收连接不稳统计窗口起点。 */
+static uint32_t s_rx_unstable_window_ms = 0u;
+/** @brief 接收连接不稳统计窗口内事件数。 */
+static uint8_t s_rx_unstable_events = 0u;
+/** @brief 最近一次接收侧主动重连时间。 */
+static uint32_t s_rx_unstable_reconnect_ms = 0u;
 /** @brief RX 统计日志节流时间。 */
 static uint32_t s_rx_stat_log_ms = 0u;
 /** @brief RX 缺口跳帧日志节流时间。 */
@@ -1649,6 +1671,10 @@ static void app_intercom_ws_task(void *arg)
                  APP_BUSINESS_WS_PORT,
                  APP_BUSINESS_WS_ROUTE_INTERCOM,
                  (int)s_current_channel);
+        if (s_rx_ui_reconnecting != 0u && s_ptt_active == 0) {
+            s_rx_ui_reconnecting = 0u;
+            (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
+        }
         (void)app_intercom_send_control(APP_INTERCOM_PKT_REGISTER);
         (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
@@ -1830,7 +1856,95 @@ static int app_intercom_seq_before(uint32_t a, uint32_t b)
 
 static uint8_t app_intercom_jitter_count_ready(void);
 static uint8_t app_intercom_jitter_start_frames(void);
+static uint8_t app_intercom_jitter_low_water(void);
 static void app_intercom_jitter_bump_target_by(uint8_t frames, const char *reason);
+
+static void app_intercom_rx_show_weak(const char *reason, uint32_t now)
+{
+    s_rx_ui_weak_event_ms = now;
+    if (s_ptt_active != 0 || s_rx_ui_weak != 0u) {
+        return;
+    }
+
+    s_rx_ui_weak = 1u;
+    (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_RX_WEAK);
+    APP_LOGW(TAG,
+             "intercom_rx event=weak_ui reason=%s buffered=%u target=%u",
+             reason != NULL ? reason : "unknown",
+             (unsigned int)app_intercom_jitter_count_ready(),
+             (unsigned int)app_intercom_jitter_start_frames());
+}
+
+static void app_intercom_rx_clear_weak_now(void)
+{
+    if (s_rx_ui_weak == 0u) {
+        return;
+    }
+
+    s_rx_ui_weak = 0u;
+    if (s_ptt_active == 0) {
+        (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
+    }
+}
+
+static void app_intercom_rx_clear_weak_if_stable(uint32_t now)
+{
+    if (s_rx_ui_weak == 0u ||
+        s_ptt_active != 0 ||
+        (uint32_t)(now - s_rx_ui_weak_event_ms) < APP_INTERCOM_RX_WEAK_UI_CLEAR_MS) {
+        return;
+    }
+
+    s_rx_ui_weak = 0u;
+    (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
+    APP_LOGI(TAG, "intercom_rx event=weak_clear");
+}
+
+static void app_intercom_rx_note_unstable(const char *reason, uint32_t now)
+{
+    if (service_network_is_ready() != 1) {
+        return;
+    }
+
+    if (s_rx_unstable_window_ms == 0u ||
+        (uint32_t)(now - s_rx_unstable_window_ms) > APP_INTERCOM_RX_RECONNECT_WINDOW_MS) {
+        s_rx_unstable_window_ms = now;
+        s_rx_unstable_events = 0u;
+    }
+    if (s_rx_unstable_events < UINT8_MAX) {
+        s_rx_unstable_events++;
+    }
+
+    APP_LOGW(TAG,
+             "intercom_rx event=unstable reason=%s events=%u window_ms=%u",
+             reason != NULL ? reason : "unknown",
+             (unsigned int)s_rx_unstable_events,
+             (unsigned int)(now - s_rx_unstable_window_ms));
+
+    if (s_rx_unstable_events < APP_INTERCOM_RX_RECONNECT_EVENT_LIMIT ||
+        s_ws_connected == 0 ||
+        (s_rx_unstable_reconnect_ms != 0u &&
+         (uint32_t)(now - s_rx_unstable_reconnect_ms) < APP_INTERCOM_RX_RECONNECT_COOLDOWN_MS)) {
+        return;
+    }
+
+    s_rx_unstable_events = 0u;
+    s_rx_unstable_window_ms = now;
+    s_rx_unstable_reconnect_ms = now;
+    s_ws_force_reconnect = 1;
+    s_rx_ui_weak = 0u;
+    if (s_ptt_active == 0) {
+        s_rx_ui_reconnecting = 1u;
+        (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_RECOVERING);
+    }
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
+    APP_LOGW(TAG,
+             "intercom_ws event=rx_unstable_reconnect reason=%s cooldown_ms=%u",
+             reason != NULL ? reason : "unknown",
+             (unsigned int)APP_INTERCOM_RX_RECONNECT_COOLDOWN_MS);
+}
 
 static void app_intercom_rx_stats_reset(uint32_t first_seq)
 {
@@ -1889,6 +2003,13 @@ static void app_intercom_rx_stats_note_audio(uint32_t seq,
                 app_intercom_jitter_bump_target_by(APP_INTERCOM_JITTER_STALL_BUMP_FRAMES,
                                                    "rx_stall");
                 s_rx_jitter_quality_bump_ms = now;
+            }
+            if (s_rx_jitter_playing != 0u &&
+                app_intercom_jitter_count_ready() <= (uint8_t)(app_intercom_jitter_low_water() + 2u)) {
+                app_intercom_rx_show_weak("rx_stall", now);
+            }
+            if (interval_ms >= APP_INTERCOM_RX_RECONNECT_STALL_MS) {
+                app_intercom_rx_note_unstable("rx_stall", now);
             }
         }
     }
@@ -2077,6 +2198,7 @@ static void app_intercom_play_stats_log(uint32_t now)
 
 static void app_intercom_jitter_clear(void)
 {
+    app_intercom_rx_clear_weak_now();
     memset(s_rx_jitter, 0, sizeof(s_rx_jitter));
     memset(s_rx_last_pcm, 0, sizeof(s_rx_last_pcm));
     s_rx_jitter_device[0] = '\0';
@@ -2261,6 +2383,8 @@ static int app_intercom_jitter_drop_stale_audio(const app_intercom_packet_view_t
     }
 
     s_rx_stat_stale_drop++;
+    app_intercom_rx_show_weak("stale_drop", now);
+    app_intercom_rx_note_unstable("stale_drop", now);
     app_intercom_rx_stats_log(now);
     return 1;
 }
@@ -2496,6 +2620,8 @@ static void app_intercom_jitter_play_tick(void)
         if (ready_frames == 0u &&
             s_rx_jitter_last_enqueue_ms != 0u &&
             (uint32_t)(now - s_rx_jitter_last_enqueue_ms) >= APP_INTERCOM_JITTER_EMPTY_TIMEOUT_MS) {
+            app_intercom_rx_show_weak("empty_timeout", now);
+            app_intercom_rx_note_unstable("empty_timeout", now);
             APP_LOGW(TAG,
                      "intercom_play event=empty_timeout device=%s ch=%d seq=%u idle_ms=%u",
                      s_rx_jitter_device,
@@ -2508,6 +2634,7 @@ static void app_intercom_jitter_play_tick(void)
         }
         s_rx_jitter_missing++;
         if (s_rx_jitter_missing == 1u) {
+            app_intercom_rx_show_weak("missing", now);
             app_intercom_jitter_bump_target();
         }
         if (s_rx_jitter_missing >= APP_INTERCOM_JITTER_RESYNC_MISSING) {
@@ -2550,6 +2677,8 @@ static void app_intercom_jitter_play_tick(void)
             app_intercom_jitter_make_plc_frame(s_rx_pcm);
         }
         if (s_rx_jitter_missing > APP_INTERCOM_JITTER_MAX_MISSING) {
+            app_intercom_rx_show_weak("stream_break", now);
+            app_intercom_rx_note_unstable("stream_break", now);
             APP_LOGW(TAG, "intercom_play event=stream_break device=%s ch=%d seq=%u missing=%u",
                      s_rx_jitter_device,
                      (int)s_current_channel,
@@ -2592,6 +2721,7 @@ static void app_intercom_jitter_play_tick(void)
         app_intercom_play_stats_note_buffer(app_intercom_jitter_count_ready());
         if (played_real_frame != 0u) {
             app_intercom_jitter_recover_target();
+            app_intercom_rx_clear_weak_if_stable(play_done_ms);
         }
         app_intercom_play_stats_log(s_rx_last_audio_ms);
     }
@@ -2851,6 +2981,8 @@ static void app_intercom_ptt_task(void *arg)
         }
 
         uint32_t ptt_start_ms = osal_get_tick_ms();
+        s_rx_ui_weak = 0u;
+        s_rx_ui_reconnecting = 0u;
         (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_TALKING);
         APP_LOGI(TAG,
                  "intercom_ptt event=start device=%s ch=%d codec=%s connected=%d",
