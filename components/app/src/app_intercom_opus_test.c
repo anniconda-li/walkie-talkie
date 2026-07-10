@@ -63,7 +63,7 @@ static int app_intercom_opus_test_init_codec(void)
     enc_cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
     enc_cfg.channel = ESP_AUDIO_MONO;
     enc_cfg.bits_per_sample = ESP_AUDIO_BIT16;
-    enc_cfg.bitrate = APP_INTERCOM_OPUS_LOCAL_TEST_BITRATE;
+    enc_cfg.bitrate = APP_INTERCOM_OPUS_BITRATE;
     enc_cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
     enc_cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
     enc_cfg.complexity = 0;
@@ -126,7 +126,7 @@ static int app_intercom_opus_test_init_codec(void)
              "output_bytes=%d store_bytes=%u internal_used=%u psram_used=%u",
              (unsigned int)APP_BUSINESS_AUDIO_SAMPLE_RATE,
              (unsigned int)APP_BUSINESS_AUDIO_CHANNELS,
-             APP_INTERCOM_OPUS_LOCAL_TEST_BITRATE,
+             APP_INTERCOM_OPUS_BITRATE,
              s_input_bytes,
              s_output_bytes,
              (unsigned int)APP_INTERCOM_OPUS_TEST_STORE_BYTES,
@@ -169,7 +169,7 @@ static void app_intercom_opus_test_run(void)
     APP_LOGI(TAG,
              "event=record_start max_ms=%u bitrate=%d",
              (unsigned int)APP_INTERCOM_OPUS_LOCAL_TEST_MAX_MS,
-             APP_INTERCOM_OPUS_LOCAL_TEST_BITRATE);
+             APP_INTERCOM_OPUS_BITRATE);
 
     while (s_active &&
            (uint32_t)(osal_get_tick_ms() - record_start_ms) < APP_INTERCOM_OPUS_LOCAL_TEST_MAX_MS) {

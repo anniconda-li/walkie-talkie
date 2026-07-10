@@ -50,17 +50,19 @@ extern "C" {
 #define APP_INTERCOM_USE_WS_DOWNLINK    1
 /** @brief 对讲上行固定使用 WebSocket，不再回退 UDP。 */
 #define APP_INTERCOM_USE_WS_UPLINK      1
+/** @brief Opus 裸 payload 上行链路测试；后端仍只转发 WTK1 binary 包。 */
+#define APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE 1
+/** @brief 对讲 Opus 目标码率。 */
+#define APP_INTERCOM_OPUS_BITRATE       20000
 /**
  * @brief Opus 本地 PTT 回放测试开关。
  *
  * 1 = 不建立对讲 WebSocket；按住 PTT 时采集并编码到 PSRAM，松手后本地解码播放。
  * 0 = 恢复正常 WebSocket 对讲。
  */
-#define APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE 1
+#define APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE 0
 /** @brief Opus 本地测试单次最长录音时间。 */
 #define APP_INTERCOM_OPUS_LOCAL_TEST_MAX_MS 20000u
-/** @brief Opus 本地测试目标码率。 */
-#define APP_INTERCOM_OPUS_LOCAL_TEST_BITRATE 20000
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
 #define APP_BUSINESS_HTTP_BASE_URL      "http://139.129.17.67:18080"
 /** @brief AI 创建会话路由。 */
