@@ -127,6 +127,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_MAX_MISSING  APP_INTERCOM_MS_TO_FRAMES(800u)
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 1200u
+/** @brief 播放中 buffer 为空且持续无新包时，认为远端语音流已断尾。 */
+#define APP_INTERCOM_JITTER_EMPTY_TIMEOUT_MS 500u
 /** @brief 接收端允许的最大突发迟到时间，超过后认为是 TCP 旧包并丢弃。 */
 #define APP_INTERCOM_RX_STALE_DROP_MS   1200u
 /** @brief RX 播放任务每轮最多处理的 WebSocket 包数，避免突发队列挤占播放节奏。 */
@@ -2453,13 +2455,29 @@ static void app_intercom_jitter_play_tick(void)
         s_rx_jitter_missing = 0u;
         played_real_frame = 1u;
     } else {
-        if (s_rx_jitter_ending != 0u && app_intercom_jitter_count_ready() == 0u) {
+        uint8_t ready_frames = app_intercom_jitter_count_ready();
+        if (s_rx_jitter_ending != 0u && ready_frames == 0u) {
+            app_intercom_rx_stop_playback_smooth();
+            app_intercom_jitter_clear();
+            return;
+        }
+        if (ready_frames == 0u &&
+            s_rx_jitter_last_enqueue_ms != 0u &&
+            (uint32_t)(now - s_rx_jitter_last_enqueue_ms) >= APP_INTERCOM_JITTER_EMPTY_TIMEOUT_MS) {
+            APP_LOGW(TAG,
+                     "intercom_play event=empty_timeout device=%s ch=%d seq=%u idle_ms=%u",
+                     s_rx_jitter_device,
+                     (int)s_current_channel,
+                     (unsigned int)s_rx_jitter_expected_seq,
+                     (unsigned int)(now - s_rx_jitter_last_enqueue_ms));
             app_intercom_rx_stop_playback_smooth();
             app_intercom_jitter_clear();
             return;
         }
         s_rx_jitter_missing++;
-        app_intercom_jitter_bump_target();
+        if (s_rx_jitter_missing == 1u) {
+            app_intercom_jitter_bump_target();
+        }
         if (s_rx_jitter_missing >= APP_INTERCOM_JITTER_RESYNC_MISSING) {
             uint32_t next_seq = 0u;
             if (app_intercom_jitter_find_next_seq(s_rx_jitter_expected_seq, &next_seq) != 0 &&
