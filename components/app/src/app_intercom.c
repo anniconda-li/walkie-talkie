@@ -31,7 +31,7 @@
  * Byte 12-15: 时间戳（uint32 LE, ms）
  * Byte 16-31: 设备名（16 字节，不足补 0）
  * Byte 32-33: payload 长度（uint16 LE）
- * Byte 34+:  payload（AUDIO 默认为每包独立 IMA ADPCM block，兼容老 PCM payload）
+ * Byte 34+:  payload（当前上行测试为裸 Opus；关闭测试后仍兼容 ADPCM/PCM）
  * ```
  */
 #include "app_intercom.h"
@@ -53,7 +53,11 @@
 #include <unistd.h>
 
 #include "esp_heap_caps.h"
+#include "esp_opus_enc.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/task.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
@@ -71,7 +75,7 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_PACKET_SAMPLES     (APP_BUSINESS_FRAME_SAMPLES * APP_INTERCOM_PACKET_FRAMES)
 /** @brief 单个 AUDIO 包原始 PCM 字节数，ADPCM 编码前使用。 */
 #define APP_INTERCOM_AUDIO_PAYLOAD_BYTES (APP_INTERCOM_PACKET_SAMPLES * sizeof(int16_t))
-/** @brief 设备端对讲默认启用每包独立 ADPCM，降低 WebSocket 上行码率。 */
+/** @brief 关闭 Opus 上行测试后，设备端默认使用每包独立 ADPCM。 */
 #define APP_INTERCOM_AUDIO_ADPCM_ENABLE  1u
 /** @brief ADPCM AUDIO payload 魔数，标记后续为每包独立 IMA ADPCM block。 */
 #define APP_INTERCOM_ADPCM_MAGIC         "ADP1"
@@ -87,8 +91,12 @@ static const char *TAG = "app_intercom";
 /** @brief 单个 WTK1 包最大总长度，包含固定头和最大业务 payload。 */
 #define APP_INTERCOM_PACKET_MAX_BYTES   (APP_INTERCOM_PACKET_HEADER_LEN + APP_INTERCOM_PACKET_MAX_PAYLOAD)
 
-/** @brief PTT 发送任务栈大小，需容纳协议包缓冲和 service_audio_read 调用栈。 */
+/** @brief PTT 发送任务栈大小；Opus 上行测试使用已实测留有余量的 PSRAM 栈。 */
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+#define APP_INTERCOM_PTT_TASK_STACK     32768u
+#else
 #define APP_INTERCOM_PTT_TASK_STACK     8192u
+#endif
 /** @brief WebSocket 播放解析任务栈大小，播放和日志格式化共用该任务，预留更深调用栈。 */
 #define APP_INTERCOM_RX_TASK_STACK      10240u
 /** @brief WebSocket 心跳任务栈大小。 */
@@ -200,6 +208,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_TX_SEND_SLOW_MS     40u
 /** @brief 播放调度晚于计划超过该值时计入调度迟到。 */
 #define APP_INTERCOM_PLAY_LATE_MS        30u
+/** @brief Opus 编码失败的内部返回值，不应触发 WebSocket 重连。 */
+#define APP_INTERCOM_OPUS_ENCODE_FAIL_RET (-20)
 /** @brief RFC 示例 key；设备端只校验 101 状态，不依赖 key 的随机性。 */
 #define APP_INTERCOM_WS_CLIENT_KEY       "dGhlIHNhbXBsZSBub25jZQ=="
 
@@ -434,6 +444,23 @@ static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 /** @brief 全局 WTK1 包序列号，每发一个包自增 1。
  *  用于服务器端去重和排序。 */
 static uint32_t s_packet_seq = 0u;
+
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+/** @brief Opus 裸 payload 上行测试使用的常驻编码器。 */
+static void *s_opus_tx_encoder = NULL;
+static int s_opus_tx_input_bytes = 0;
+static int s_opus_tx_output_bytes = 0;
+static uint32_t s_opus_tx_encode_calls = 0u;
+static uint32_t s_opus_tx_encode_ok = 0u;
+static uint32_t s_opus_tx_encode_fail = 0u;
+static uint32_t s_opus_tx_payload_bytes = 0u;
+static uint64_t s_opus_tx_encode_total_us = 0u;
+static uint32_t s_opus_tx_encode_max_us = 0u;
+static uint32_t s_opus_tx_frame_calls = 0u;
+static uint64_t s_opus_tx_frame_total_us = 0u;
+static uint32_t s_opus_tx_frame_max_us = 0u;
+static uint32_t s_opus_tx_frame_late = 0u;
+#endif
 
 /* ==========================================================================
  * 协议编解码
@@ -2775,6 +2802,139 @@ static void app_intercom_heartbeat_task(void *arg)
     }
 }
 
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+static int app_intercom_opus_tx_init(void)
+{
+    if (s_opus_tx_encoder != NULL) {
+        return 0;
+    }
+
+    uint32_t internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    esp_opus_enc_config_t cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
+    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
+    cfg.channel = ESP_AUDIO_MONO;
+    cfg.bits_per_sample = ESP_AUDIO_BIT16;
+    cfg.bitrate = APP_INTERCOM_OPUS_BITRATE;
+    cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
+    cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
+    cfg.complexity = 0;
+    cfg.enable_fec = false;
+    cfg.enable_dtx = false;
+    cfg.enable_vbr = false;
+
+    esp_audio_err_t codec_ret = esp_opus_enc_open(&cfg,
+                                                   sizeof(cfg),
+                                                   &s_opus_tx_encoder);
+    if (codec_ret != ESP_AUDIO_ERR_OK || s_opus_tx_encoder == NULL) {
+        APP_LOGE(TAG, "intercom_opus_tx event=encoder_open_fail ret=%d", (int)codec_ret);
+        s_opus_tx_encoder = NULL;
+        return -1;
+    }
+
+    codec_ret = esp_opus_enc_get_frame_size(s_opus_tx_encoder,
+                                             &s_opus_tx_input_bytes,
+                                             &s_opus_tx_output_bytes);
+    if (codec_ret != ESP_AUDIO_ERR_OK ||
+        s_opus_tx_input_bytes != (int)APP_BUSINESS_FRAME_BYTES ||
+        s_opus_tx_output_bytes <= 0 ||
+        s_opus_tx_output_bytes > (int)APP_INTERCOM_PACKET_MAX_PAYLOAD) {
+        APP_LOGE(TAG,
+                 "intercom_opus_tx event=frame_size_invalid ret=%d input=%d output=%d max=%u",
+                 (int)codec_ret,
+                 s_opus_tx_input_bytes,
+                 s_opus_tx_output_bytes,
+                 (unsigned int)APP_INTERCOM_PACKET_MAX_PAYLOAD);
+        esp_opus_enc_close(s_opus_tx_encoder);
+        s_opus_tx_encoder = NULL;
+        return -2;
+    }
+
+    APP_LOGI(TAG,
+             "intercom_opus_tx event=ready bitrate=%d frame_ms=20 input_bytes=%d output_bytes=%d "
+             "internal_used=%u psram_used=%u payload_format=raw",
+             APP_INTERCOM_OPUS_BITRATE,
+             s_opus_tx_input_bytes,
+             s_opus_tx_output_bytes,
+             (unsigned int)(internal_before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             (unsigned int)(psram_before - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    return 0;
+}
+
+static int app_intercom_opus_tx_reset(void)
+{
+    s_opus_tx_encode_calls = 0u;
+    s_opus_tx_encode_ok = 0u;
+    s_opus_tx_encode_fail = 0u;
+    s_opus_tx_payload_bytes = 0u;
+    s_opus_tx_encode_total_us = 0u;
+    s_opus_tx_encode_max_us = 0u;
+    s_opus_tx_frame_calls = 0u;
+    s_opus_tx_frame_total_us = 0u;
+    s_opus_tx_frame_max_us = 0u;
+    s_opus_tx_frame_late = 0u;
+    return s_opus_tx_encoder != NULL &&
+           esp_opus_enc_reset(s_opus_tx_encoder) == ESP_AUDIO_ERR_OK ? 0 : -1;
+}
+
+static int app_intercom_opus_tx_encode(const int16_t *pcm,
+                                       uint16_t samples,
+                                       uint8_t *out,
+                                       uint16_t out_capacity,
+                                       uint16_t *out_len)
+{
+    if (s_opus_tx_encoder == NULL ||
+        pcm == NULL ||
+        out == NULL ||
+        out_len == NULL ||
+        samples != APP_INTERCOM_PACKET_SAMPLES) {
+        return APP_INTERCOM_OPUS_ENCODE_FAIL_RET;
+    }
+
+    esp_audio_enc_in_frame_t input = {
+        .buffer = (uint8_t *)pcm,
+        .len = (uint32_t)samples * sizeof(int16_t),
+    };
+    esp_audio_enc_out_frame_t output = {
+        .buffer = out,
+        .len = out_capacity,
+        .encoded_bytes = 0u,
+        .pts = 0u,
+    };
+    int64_t start_us = esp_timer_get_time();
+    esp_audio_err_t codec_ret = esp_opus_enc_process(s_opus_tx_encoder, &input, &output);
+    uint32_t encode_us = (uint32_t)(esp_timer_get_time() - start_us);
+    s_opus_tx_encode_calls++;
+    s_opus_tx_encode_total_us += encode_us;
+    if (encode_us > s_opus_tx_encode_max_us) {
+        s_opus_tx_encode_max_us = encode_us;
+    }
+    if (codec_ret != ESP_AUDIO_ERR_OK ||
+        output.encoded_bytes == 0u ||
+        output.encoded_bytes > out_capacity) {
+        s_opus_tx_encode_fail++;
+        return APP_INTERCOM_OPUS_ENCODE_FAIL_RET;
+    }
+
+    s_opus_tx_encode_ok++;
+    s_opus_tx_payload_bytes += output.encoded_bytes;
+    *out_len = (uint16_t)output.encoded_bytes;
+    return 0;
+}
+
+static void app_intercom_opus_tx_note_frame(uint32_t frame_us)
+{
+    s_opus_tx_frame_calls++;
+    s_opus_tx_frame_total_us += frame_us;
+    if (frame_us > s_opus_tx_frame_max_us) {
+        s_opus_tx_frame_max_us = frame_us;
+    }
+    if (frame_us > (APP_INTERCOM_AUDIO_FRAME_MS * 1000u)) {
+        s_opus_tx_frame_late++;
+    }
+}
+#endif
+
 static int app_intercom_send_audio_packet(uint8_t *packet,
                                           const int16_t *pcm,
                                           uint16_t samples)
@@ -2783,9 +2943,23 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
         return -1;
     }
 
-    uint8_t adpcm_payload[APP_INTERCOM_ADPCM_MAX_PAYLOAD];
     const uint8_t *payload = (const uint8_t *)pcm;
     uint16_t payload_len = (uint16_t)(samples * sizeof(int16_t));
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+    int64_t frame_start_us = esp_timer_get_time();
+    uint8_t opus_payload[APP_INTERCOM_PACKET_MAX_PAYLOAD] __attribute__((aligned(16)));
+    int codec_ret = app_intercom_opus_tx_encode(pcm,
+                                                 samples,
+                                                 opus_payload,
+                                                 (uint16_t)sizeof(opus_payload),
+                                                 &payload_len);
+    if (codec_ret != 0) {
+        app_intercom_opus_tx_note_frame((uint32_t)(esp_timer_get_time() - frame_start_us));
+        return codec_ret;
+    }
+    payload = opus_payload;
+#else
+    uint8_t adpcm_payload[APP_INTERCOM_ADPCM_MAX_PAYLOAD];
 #if APP_INTERCOM_AUDIO_ADPCM_ENABLE
     uint16_t adpcm_len = app_intercom_adpcm_encode_payload(adpcm_payload,
                                                            (uint16_t)sizeof(adpcm_payload),
@@ -2796,15 +2970,25 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
         payload_len = adpcm_len;
     }
 #endif
+#endif
     uint16_t packet_len = app_intercom_build_packet(packet,
                                                     APP_INTERCOM_PKT_AUDIO,
                                                     payload,
                                                     payload_len);
     if (packet_len == 0u) {
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+        app_intercom_opus_tx_note_frame((uint32_t)(esp_timer_get_time() - frame_start_us));
+#endif
         return -2;
     }
 
-    return app_intercom_send_packet_transport(packet, packet_len, APP_INTERCOM_PKT_AUDIO);
+    int send_ret = app_intercom_send_packet_transport(packet,
+                                                       packet_len,
+                                                       APP_INTERCOM_PKT_AUDIO);
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+    app_intercom_opus_tx_note_frame((uint32_t)(esp_timer_get_time() - frame_start_us));
+#endif
+    return send_ret;
 }
 
 /* ==========================================================================
@@ -2920,7 +3104,7 @@ static void app_intercom_rx_task(void *arg)
  * 8. 释放音频会话锁 → notify_take 阻塞等待下次
  *
  * ## 性能约束
- * - 每包当前 20ms，默认编码成每包独立 ADPCM block，服务器只需原样转发 binary payload
+ * - 每包当前 20ms；Opus 上行测试直接发送裸 payload，服务器仍只需原样转发
  * - service_audio_read 超时 30ms，确保最坏情况下也不丢帧
  * - PTT 任务优先级 6（高于 AI 的 5），保证实时性
  *
@@ -2929,8 +3113,8 @@ static void app_intercom_rx_task(void *arg)
 static void app_intercom_ptt_task(void *arg)
 {
     (void)arg;
-    int16_t pcm[APP_BUSINESS_FRAME_SAMPLES];       /* 20ms PCM 帧缓冲 */
-    int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES];    /* PCM 发送包缓冲 */
+    int16_t pcm[APP_BUSINESS_FRAME_SAMPLES] __attribute__((aligned(16))); /* 20ms PCM 帧缓冲 */
+    int16_t tx_pcm[APP_INTERCOM_PACKET_SAMPLES] __attribute__((aligned(16))); /* PCM 发送包缓冲 */
     uint8_t packet[APP_INTERCOM_PACKET_MAX_BYTES];  /* 协议包缓冲 */
 
     while (1) {
@@ -2954,6 +3138,15 @@ static void app_intercom_ptt_task(void *arg)
         if (!s_ptt_active || app_business_audio_session_try_begin() != 0) {
             continue;
         }
+
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+        if (app_intercom_opus_tx_reset() != 0) {
+            APP_LOGE(TAG, "intercom_opus_tx event=encoder_reset_fail");
+            (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_FAILED);
+            app_business_audio_session_end();
+            continue;
+        }
+#endif
 
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
@@ -2989,7 +3182,9 @@ static void app_intercom_ptt_task(void *arg)
                  "intercom_ptt event=start device=%s ch=%d codec=%s connected=%d",
                  APP_DEVICE_ID,
                  (int)s_current_channel,
-                 APP_INTERCOM_AUDIO_ADPCM_ENABLE != 0u ? "adpcm" : "pcm",
+                 APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE != 0 ?
+                 "opus_raw" :
+                 (APP_INTERCOM_AUDIO_ADPCM_ENABLE != 0u ? "adpcm" : "pcm"),
                  s_ws_connected);
         while (s_ptt_active) {
             int samples = service_audio_read(pcm, APP_BUSINESS_FRAME_SAMPLES, 30u);
@@ -3019,7 +3214,8 @@ static void app_intercom_ptt_task(void *arg)
                         send_fail++;
                         last_send_ret = send_ret;
                         tx_samples = 0u;
-                        if (app_intercom_ptt_wait_recovered(&last_send_ret,
+                        if (send_ret != APP_INTERCOM_OPUS_ENCODE_FAIL_RET &&
+                            app_intercom_ptt_wait_recovered(&last_send_ret,
                                                             &recover_count,
                                                             &recover_ok,
                                                             &recover_fail) != 0) {
@@ -3060,6 +3256,24 @@ static void app_intercom_ptt_task(void *arg)
                  (unsigned int)recover_fail,
                  last_read_ret,
                  last_send_ret);
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+        APP_LOGI(TAG,
+                 "intercom_opus_tx event=stop dur_ms=%u encode_ok=%u encode_fail=%u payload_bytes=%u "
+                 "encode_avg_us=%u encode_max_us=%u frame_avg_us=%u frame_max_us=%u "
+                 "frame_late=%u stack_hwm=%u",
+                 (unsigned int)(osal_get_tick_ms() - ptt_start_ms),
+                 (unsigned int)s_opus_tx_encode_ok,
+                 (unsigned int)s_opus_tx_encode_fail,
+                 (unsigned int)s_opus_tx_payload_bytes,
+                 s_opus_tx_encode_calls > 0u ?
+                 (unsigned int)(s_opus_tx_encode_total_us / s_opus_tx_encode_calls) : 0u,
+                 (unsigned int)s_opus_tx_encode_max_us,
+                 s_opus_tx_frame_calls > 0u ?
+                 (unsigned int)(s_opus_tx_frame_total_us / s_opus_tx_frame_calls) : 0u,
+                 (unsigned int)s_opus_tx_frame_max_us,
+                 (unsigned int)s_opus_tx_frame_late,
+                 (unsigned int)uxTaskGetStackHighWaterMark(NULL));
+#endif
         (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
         app_business_audio_session_end();
     }
@@ -3097,6 +3311,14 @@ int app_intercom_start(void)
     return 0;
 #endif
 
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+    ret = app_intercom_opus_tx_init();
+    if (ret != 0) {
+        APP_LOGE(TAG, "intercom_opus_tx event=start_fail ret=%d", ret);
+        return ret;
+    }
+#endif
+
     if (service_network_is_ready() != 1) {
         APP_LOGI(TAG,
                  "intercom_ws event=wait_network device=%s host=%s port=%d",
@@ -3105,6 +3327,28 @@ int app_intercom_start(void)
                  APP_BUSINESS_WS_PORT);
     }
 
+#if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
+    TaskHandle_t ptt_handle = NULL;
+    BaseType_t ptt_ret = xTaskCreateWithCaps(app_intercom_ptt_task,
+                                             "biz_ptt",
+                                             APP_INTERCOM_PTT_TASK_STACK,
+                                             NULL,
+                                             6u,
+                                             &ptt_handle,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ptt_ret != pdPASS) {
+        APP_LOGE(TAG,
+                 "intercom_task event=start_fail name=biz_ptt ret=%d stack=%u psram_free=%u "
+                 "internal_free=%u internal_largest=%u",
+                 (int)ptt_ret,
+                 (unsigned int)APP_INTERCOM_PTT_TASK_STACK,
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        return -1;
+    }
+    s_ptt_task = (osal_task_t)ptt_handle;
+#else
     ret = osal_task_create("biz_ptt",
                            app_intercom_ptt_task,
                            NULL,
@@ -3115,6 +3359,7 @@ int app_intercom_start(void)
         APP_LOGE(TAG, "intercom_task event=start_fail name=biz_ptt ret=%d", ret);
         return ret;
     }
+#endif
 
     ret = app_intercom_start_ws_downlink_task();
     if (ret != 0) {
