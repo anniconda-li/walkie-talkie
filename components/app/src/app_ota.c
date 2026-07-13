@@ -510,7 +510,12 @@ static int app_ota_download(const app_ota_update_info_t *info,
         *error_message = "固件响应头不符合约定";
         goto cleanup;
     }
-    if (esp_ota_begin(target, info->size, &ota_handle) != ESP_OK) {
+    uint32_t prepare_start_ms = osal_get_tick_ms();
+    APP_LOGI(TAG,
+             "ota_download event=partition_prepare mode=sequential target=%s size=%u",
+             target->label,
+             (unsigned int)info->size);
+    if (esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle) != ESP_OK) {
         *error_code = "OTA_BEGIN";
         *error_message = "无法准备升级分区";
         goto cleanup;
@@ -522,9 +527,13 @@ static int app_ota_download(const app_ota_update_info_t *info,
         goto cleanup;
     }
 
+    s_state = APP_OTA_STATE_DOWNLOADING;
+    (void)app_ui_ota_show("正在升级", 0, 1);
+    APP_LOGI(TAG,
+             "ota_download event=partition_ready mode=sequential elapsed_ms=%u",
+             (unsigned int)(osal_get_tick_ms() - prepare_start_ms));
     app_ota_queue_report("download_started", app_ota_current_version(), info->version, 0u, NULL, NULL);
     (void)app_ota_try_report();
-    s_state = APP_OTA_STATE_DOWNLOADING;
     uint32_t last_progress_ms = 0u;
     while (*bytes_written < info->size) {
         if (s_cancel_requested != 0) {
@@ -726,6 +735,9 @@ static void app_ota_task(void *arg)
         if (network_ready && !network_was_ready &&
             (next_check_ms == 0u || (int32_t)(now - next_check_ms) >= 0)) {
             next_check_ms = now + APP_OTA_CHECK_DELAY_MS;
+            APP_LOGI(TAG,
+                     "ota_check event=scheduled delay_ms=%u",
+                     (unsigned int)APP_OTA_CHECK_DELAY_MS);
         }
         network_was_ready = network_ready ? 1u : 0u;
 
