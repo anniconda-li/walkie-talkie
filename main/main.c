@@ -142,6 +142,12 @@ void app_main(void)
         main_fatal("业务任务启动", ret);
     }
 
+    ret = app_ota_boot_confirm();
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "OTA新固件确认失败, ret=%d", ret);
+        (void)esp_ota_mark_app_invalid_rollback_and_reboot();
+    }
+
     uint32_t splash_elapsed_ms = osal_get_tick_ms() - splash_started_ms;
     if (splash_elapsed_ms < BOOT_SPLASH_MIN_MS) {
         osal_delay_ms(BOOT_SPLASH_MIN_MS - splash_elapsed_ms);
@@ -152,12 +158,6 @@ void app_main(void)
         service_screen_unlock();
     } else {
         OSAL_LOGW(TAG, "启动页结束失败: LVGL 加锁超时");
-    }
-
-    ret = app_ota_boot_confirm();
-    if (ret != 0) {
-        OSAL_LOGE(TAG, "OTA新固件确认失败, ret=%d", ret);
-        (void)esp_ota_mark_app_invalid_rollback_and_reboot();
     }
 
     OSAL_LOGI(TAG, "业务固件启动完成");

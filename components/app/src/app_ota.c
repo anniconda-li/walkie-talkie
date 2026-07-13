@@ -36,14 +36,14 @@
 static const char *TAG = "app_ota";
 
 #define APP_OTA_TASK_STACK             16384u
-#define APP_OTA_TASK_PRIORITY          4u
+#define APP_OTA_TASK_PRIORITY          3u
 #define APP_OTA_CHECK_DELAY_MS         30000u
 #define APP_OTA_CHECK_INTERVAL_MS      (6u * 60u * 60u * 1000u)
 #define APP_OTA_REPORT_RETRY_MS        60000u
 #define APP_OTA_HTTP_TIMEOUT_MS        30000u
 #define APP_OTA_CHECK_RESPONSE_BYTES   2048u
 #define APP_OTA_DOWNLOAD_BUFFER_BYTES  4096u
-#define APP_OTA_BOOT_GUARD_MS          30000u
+#define APP_OTA_BOOT_GUARD_MS          60000u
 #define APP_OTA_PROGRESS_STEP_MS       250u
 #define APP_OTA_NVS_NS                 "app_ota"
 #define APP_OTA_CACHE_KEY              "update"
@@ -86,6 +86,7 @@ typedef struct {
 } app_ota_http_headers_t;
 
 static osal_task_t s_ota_task = NULL;
+static osal_task_t s_boot_guard_task = NULL;
 static volatile app_ota_state_t s_state = APP_OTA_STATE_IDLE;
 static volatile int s_install_requested = 0;
 static volatile int s_cancel_requested = 0;
@@ -547,10 +548,11 @@ static int app_ota_download(const app_ota_update_info_t *info,
             goto cleanup;
         }
         *bytes_written += (uint32_t)got;
+        osal_delay_ms(1u);
         uint32_t now = osal_get_tick_ms();
         if ((uint32_t)(now - last_progress_ms) >= APP_OTA_PROGRESS_STEP_MS || *bytes_written == info->size) {
             int percent = (int)((uint64_t)(*bytes_written) * 100u / info->size);
-            (void)app_ui_ota_show("正在下载升级", percent, 1);
+            (void)app_ui_ota_show("正在升级", percent, 1);
             last_progress_ms = now;
         }
     }
@@ -756,11 +758,13 @@ static void app_ota_task(void *arg)
 static void app_ota_boot_guard_task(void *arg)
 {
     (void)arg;
-    osal_delay_ms(APP_OTA_BOOT_GUARD_MS);
+    (void)osal_task_notify_take(APP_OTA_BOOT_GUARD_MS);
     if (s_pending_verify != 0) {
         APP_LOGE(TAG, "ota_boot event=verify_timeout action=rollback");
         (void)esp_ota_mark_app_invalid_rollback_and_reboot();
     }
+    s_boot_guard_task = NULL;
+    osal_task_delete_current();
 }
 
 int app_ota_boot_guard_start(void)
@@ -772,12 +776,15 @@ int app_ota_boot_guard_start(void)
         return 0;
     }
     s_pending_verify = 1;
+    APP_LOGW(TAG,
+             "ota_boot event=pending_verify guard_ms=%u",
+             (unsigned int)APP_OTA_BOOT_GUARD_MS);
     return osal_task_create("ota_guard",
                             app_ota_boot_guard_task,
                             NULL,
                             4096u,
                             7u,
-                            NULL);
+                            &s_boot_guard_task);
 }
 
 int app_ota_boot_confirm(void)
@@ -785,8 +792,6 @@ int app_ota_boot_confirm(void)
     if (s_pending_verify == 0) {
         return 0;
     }
-    /* 业务任务已启动后再观察一个短窗口，覆盖立即崩溃和WDT。 */
-    osal_delay_ms(5000u);
     esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
     if (ret != ESP_OK) {
         return -1;
@@ -804,6 +809,9 @@ int app_ota_boot_confirm(void)
     }
     if (s_ota_task != NULL) {
         (void)osal_task_notify_give(s_ota_task);
+    }
+    if (s_boot_guard_task != NULL) {
+        (void)osal_task_notify_give(s_boot_guard_task);
     }
     APP_LOGI(TAG, "ota_boot event=confirmed version=%s", app_ota_current_version());
     return 0;
