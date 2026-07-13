@@ -35,7 +35,7 @@
 
 static const char *TAG = "app_ota";
 
-#define APP_OTA_TASK_STACK             24576u
+#define APP_OTA_TASK_STACK             16384u
 #define APP_OTA_TASK_PRIORITY          4u
 #define APP_OTA_CHECK_DELAY_MS         30000u
 #define APP_OTA_CHECK_INTERVAL_MS      (6u * 60u * 60u * 1000u)
@@ -856,13 +856,14 @@ int app_ota_start(void)
     app_ota_apply_update_to_ui();
     s_state = s_update.available ? APP_OTA_STATE_AVAILABLE : APP_OTA_STATE_IDLE;
     TaskHandle_t handle = NULL;
+    /* NVS 和 OTA 写 Flash 时会关闭 PSRAM 缓存，任务栈必须位于内部 SRAM。 */
     BaseType_t ret = xTaskCreateWithCaps(app_ota_task,
                                          "biz_ota",
                                          APP_OTA_TASK_STACK,
                                          NULL,
                                          APP_OTA_TASK_PRIORITY,
                                          &handle,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (ret != pdPASS) {
         return -1;
     }
