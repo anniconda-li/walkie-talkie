@@ -69,8 +69,8 @@ extern "C" {
 #define APP_BUSINESS_HTTP_BASE_URL      "http://139.129.17.67:18080"
 /** @brief WiFi OTA 服务固定根地址。 */
 #define APP_OTA_BASE_URL                 "http://139.129.17.67:18082"
-/** @brief OTA 服务识别的硬件型号。 */
-#define APP_OTA_HARDWARE                 "walkie-v1"
+/** @brief OTA 服务识别的硬件型号；由当前设备分支在编译时固定。 */
+#define APP_OTA_HARDWARE                 "walkie-v1-rev-2"
 /** @brief OTA 仅使用稳定发布通道。 */
 #define APP_OTA_CHANNEL                  "stable"
 /** @brief AI 创建会话路由。 */
