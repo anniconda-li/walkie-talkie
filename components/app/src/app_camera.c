@@ -1126,8 +1126,11 @@ static int app_camera_post_chunk(const app_camera_upload_job_t *job,
                  ret,
                  status_code,
                  (unsigned int)(osal_get_tick_ms() - start_ms));
+        int retryable_status = status_code == 0 || status_code == 408 ||
+                               status_code == 425 || status_code == 429 ||
+                               status_code >= 500;
         if (service_network_is_ready() != 1 ||
-            (status_code >= 400 && status_code != 409)) {
+            (status_code >= 400 && status_code != 409 && !retryable_status)) {
             break;
         }
         if (attempt < APP_CAMERA_UPLOAD_RETRY_COUNT) {
@@ -1187,7 +1190,11 @@ static int app_camera_finish_chunk_upload(const app_camera_upload_job_t *job,
                  (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
                  ret,
                  status_code);
-        if (service_network_is_ready() != 1 || status_code >= 400) {
+        int retryable_status = status_code == 0 || status_code == 408 ||
+                               status_code == 425 || status_code == 429 ||
+                               status_code >= 500;
+        if (service_network_is_ready() != 1 ||
+            (status_code >= 400 && !retryable_status)) {
             break;
         }
         if (attempt < APP_CAMERA_UPLOAD_RETRY_COUNT) {
