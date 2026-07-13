@@ -154,6 +154,36 @@ static int service_init_network_wifi_get_status(service_network_status_t *status
     return 0;
 }
 
+static int service_init_network_wifi_http_post_ex(
+    const char *url,
+    const char *content_type,
+    const uint8_t *body,
+    uint32_t body_len,
+    uint8_t *resp,
+    uint32_t resp_size,
+    uint32_t *resp_len,
+    const service_network_http_options_t *options)
+{
+    d_wifi_http_options_t wifi_options = {0};
+    if (options != NULL) {
+        wifi_options.request_id = options->request_id;
+        wifi_options.content_sha256 = options->content_sha256;
+        wifi_options.upload_idle_timeout_ms = options->upload_idle_timeout_ms;
+        wifi_options.upload_total_timeout_ms = options->upload_total_timeout_ms;
+        wifi_options.response_timeout_ms = options->response_timeout_ms;
+        wifi_options.is_cancelled = options->is_cancelled;
+        wifi_options.cancel_ctx = options->cancel_ctx;
+    }
+    return d_wifi_http_post_ex(url,
+                               content_type,
+                               body,
+                               body_len,
+                               resp,
+                               resp_size,
+                               resp_len,
+                               options != NULL ? &wifi_options : NULL);
+}
+
 static service_network_backend_t s_network_backend = SERVICE_NETWORK_BACKEND_WIFI;
 
 static int service_init_buttons_read_pca_pin(pca9557_pin_t pin,
@@ -209,6 +239,8 @@ int service_init_network_for(service_network_backend_t backend)
     network_ops.udp_send = d_wifi_udp_send;
     network_ops.read_downlink = d_wifi_read_downlink;
     network_ops.http_post = d_wifi_http_post;
+    network_ops.http_post_ex = service_init_network_wifi_http_post_ex;
+    network_ops.http_cancel = d_wifi_http_cancel;
 
     (void)service_network_deinit();
     int ret = service_network_init(&network_ops);
