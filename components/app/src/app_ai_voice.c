@@ -5,10 +5,10 @@
  * ## 业务流程概述
  * 1. 用户长按 UI 上的 AI 按钮 → UI 回调触发 app_ai_voice_record_start()
  * 2. 抢占音频会话互斥锁（与 PTT 互斥）→ 唤醒 AI 任务采集 PCM
- * 3. AI 任务循环读取 service_audio PCM，直接写入请求 WAV 缓冲区
+ * 3. AI 任务逐个 20ms 帧编码为裸 Opus packet，写入 AOP1 缓冲区
  * 4. 用户松手 → UI 回调触发 app_ai_voice_record_stop()
  * 5. 停止录音 → biz_ai 任务退出采集循环
- * 6. biz_ai 任务：写 WAV 文件头 → 分片 POST 到 AI 服务器
+ * 6. biz_ai 任务：回填 AOP1 文件头 → 分片 POST 到 AI 服务器
  * 7. 分片拉取服务器返回的 WAV 响应 → 边解析边播放 AI 回答
  * 8. 释放音频会话互斥锁，等待下一次唤醒
  *
@@ -18,6 +18,7 @@
  */
 #include "app_ai_voice.h"
 
+#include "app_audio_opus.h"
 #include "app_business.h"
 #include "app_config.h"
 #include "app_ui.h"
@@ -29,7 +30,9 @@
 
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/idf_additions.h"
+#include "freertos/task.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -43,7 +46,7 @@ static const char *CANCEL_TAG = "APP_AI_CANCEL";
  * 全局状态变量
  * ========================================================================== */
 
-/** @brief AI 处理任务句柄，入口为 app_ai_voice_task()，优先级 5，栈 8192 字节。 */
+/** @brief AI 处理任务句柄，入口为 app_ai_voice_task()，优先级 5，栈 32768 字节。 */
 static osal_task_t s_ai_task = NULL;
 
 /** @brief AI 模块是否已通过 app_ai_voice_start() 启动。
@@ -55,13 +58,13 @@ static volatile int s_started = 0;
  *  record_stop 会检查此标志，防止重复停止。 */
 static volatile int s_ai_recording = 0;
 
-/** @brief AI 请求 WAV 缓冲区，分配到 PSRAM，保存 60 秒内请求 WAV。 */
-static uint8_t *s_ai_wav_buf = NULL;
+/** @brief AI 请求 AOP1 缓冲区，分配到 PSRAM，保存 60 秒内的裸 Opus packets。 */
+static uint8_t *s_ai_request_audio_buf = NULL;
 
 /** @brief AI 回复分片缓冲区，播放完当前分片后直接复用，不缓存完整回复。 */
 static uint8_t *s_ai_reply_chunk_buf = NULL;
 
-/** @brief AI 分片协议 JSON 响应临时缓冲，避免覆盖正在上传的 WAV 数据。 */
+/** @brief AI 分片协议 JSON 响应临时缓冲，避免覆盖正在上传的 AOP1 数据。 */
 static uint8_t s_ai_resp_buf[4096];
 
 typedef struct {
@@ -109,6 +112,32 @@ static char s_ai_current_session[64];
 #define APP_AI_PLAY_STOPPED_RET             (-901)
 #define APP_AI_TEXT_ONLY_RET                (-902)
 #define APP_AI_BACKEND_CANCEL_ON_DEVICE     0
+
+#define APP_AI_AUDIO_FORMAT                 "opus_packets_v1"
+#define APP_AI_AOP1_HEADER_LEN              24u
+#define APP_AI_AOP1_VERSION                 1u
+#define APP_AI_AOP1_FRAME_DURATION_MS       20u
+#define APP_AI_AOP1_PACKET_LEN_BYTES        2u
+#define APP_AI_AOP1_MAX_FRAMES              3000u
+#define APP_AI_TASK_STACK                   32768u
+/** 20 kbps CBR 的每个 20 ms packet 为 50 字节，60 秒 AOP1 共 156024 字节。 */
+#define APP_AI_OPUS_CBR_PACKET_BYTES \
+    ((APP_INTERCOM_OPUS_BITRATE * APP_AI_AOP1_FRAME_DURATION_MS + 7999u) / 8000u)
+#define APP_AI_OPUS_CBR_MAX_CONTAINER_BYTES \
+    (APP_AI_AOP1_HEADER_LEN + \
+     APP_AI_AOP1_MAX_FRAMES * (APP_AI_AOP1_PACKET_LEN_BYTES + APP_AI_OPUS_CBR_PACKET_BYTES))
+
+_Static_assert(APP_BUSINESS_AUDIO_SAMPLE_RATE == 16000u, "AOP1 sample rate must be 16 kHz");
+_Static_assert(APP_BUSINESS_AUDIO_CHANNELS == 1u, "AOP1 must be mono");
+_Static_assert(APP_BUSINESS_AUDIO_BITS == 16u, "Opus encoder input must be 16-bit PCM");
+_Static_assert(APP_BUSINESS_FRAME_SAMPLES == APP_AUDIO_OPUS_FRAME_SAMPLES,
+               "AI and intercom must share 20 ms frames");
+_Static_assert(APP_BUSINESS_AI_MAX_SAMPLES == 960000u, "AI sample limit must be 60 seconds");
+_Static_assert(APP_BUSINESS_AI_MAX_SAMPLES / APP_BUSINESS_FRAME_SAMPLES == APP_AI_AOP1_MAX_FRAMES,
+               "AI frame limit must be 3000");
+_Static_assert(APP_AI_UPLOAD_CHUNK_BYTES <= 65535u, "ML307C upload chunks must fit uint16");
+_Static_assert(APP_AI_OPUS_CBR_MAX_CONTAINER_BYTES <= APP_BUSINESS_AI_OPUS_BUF_BYTES,
+               "60-second CBR AOP1 must fit the request buffer");
 
 #if APP_AI_BACKEND_CANCEL_ON_DEVICE
 static volatile int s_ai_cancel_task_busy = 0;
@@ -169,16 +198,16 @@ static int app_ai_voice_can_start_recording_now(void)
 }
 
 /* ==========================================================================
- * WAV 格式辅助函数
+ * 小端字段与 AOP1 格式辅助函数
  * ========================================================================== */
 
 /**
  * @brief 向缓冲区写入 little-endian uint16 字段。
  *
- * WAV 文件格式要求所有多字节字段为小端序，
+ * AOP1 和 WAV 文件格式要求所有多字节字段为小端序，
  * 这在 ESP32（小端 CPU）上等同于直接写入内存，但显式拆分保证跨平台正确性。
  */
-static void app_ai_voice_wav_write_u16(uint8_t *buf, uint16_t value)
+static void app_ai_voice_write_u16_le(uint8_t *buf, uint16_t value)
 {
     buf[0] = (uint8_t)(value & 0xffu);
     buf[1] = (uint8_t)((value >> 8) & 0xffu);
@@ -191,7 +220,7 @@ static uint16_t app_ai_voice_wav_read_u16(const uint8_t *buf)
 }
 
 /** @brief 向缓冲区写入 little-endian uint32 字段。 */
-static void app_ai_voice_wav_write_u32(uint8_t *buf, uint32_t value)
+static void app_ai_voice_write_u32_le(uint8_t *buf, uint32_t value)
 {
     buf[0] = (uint8_t)(value & 0xffu);
     buf[1] = (uint8_t)((value >> 8) & 0xffu);
@@ -208,35 +237,20 @@ static uint32_t app_ai_voice_wav_read_u32(const uint8_t *buf)
            ((uint32_t)buf[3] << 24);
 }
 
-/**
- * @brief 写入标准 PCM WAV 文件头（44 字节）。
- *
- * 结构：RIFF(4) + 文件总长(4) + "WAVEfmt "(8) + fmt chunk(16+4) + "data"(4) + data 长度(4)
- *
- * 音频参数固定为本机配置：16000Hz、单声道、16bit PCM。
- *
- * @param buf     输出缓冲区，至少 44 字节。
- * @param pcm_bytes PCM 数据的字节数（不含头）。
- */
-static void app_ai_voice_wav_write_header(uint8_t *buf, uint32_t pcm_bytes)
+/** @brief 写入或回填固定 24 字节 AOP1 文件头。 */
+static void app_ai_voice_aop1_write_header(uint8_t *buf,
+                                            uint32_t frame_count,
+                                            uint32_t pcm_samples)
 {
-    /* 第一版只生成最基础的 PCM WAV：RIFF + fmt + data 三段。 */
-    uint32_t byte_rate = APP_BUSINESS_AUDIO_SAMPLE_RATE * APP_BUSINESS_AUDIO_CHANNELS * (APP_BUSINESS_AUDIO_BITS / 8u);
-    uint16_t block_align = APP_BUSINESS_AUDIO_CHANNELS * (APP_BUSINESS_AUDIO_BITS / 8u);
-    uint32_t riff_size = 36u + pcm_bytes;
-
-    memcpy(&buf[0], "RIFF", 4u);
-    app_ai_voice_wav_write_u32(&buf[4], riff_size);
-    memcpy(&buf[8], "WAVEfmt ", 8u);
-    app_ai_voice_wav_write_u32(&buf[16], 16u);
-    app_ai_voice_wav_write_u16(&buf[20], 1u);                     /* PCM = 1 */
-    app_ai_voice_wav_write_u16(&buf[22], APP_BUSINESS_AUDIO_CHANNELS);
-    app_ai_voice_wav_write_u32(&buf[24], APP_BUSINESS_AUDIO_SAMPLE_RATE);
-    app_ai_voice_wav_write_u32(&buf[28], byte_rate);
-    app_ai_voice_wav_write_u16(&buf[32], block_align);
-    app_ai_voice_wav_write_u16(&buf[34], APP_BUSINESS_AUDIO_BITS);
-    memcpy(&buf[36], "data", 4u);
-    app_ai_voice_wav_write_u32(&buf[40], pcm_bytes);
+    memcpy(&buf[0], "AOP1", 4u);
+    buf[4] = APP_AI_AOP1_VERSION;
+    buf[5] = APP_BUSINESS_AUDIO_CHANNELS;
+    app_ai_voice_write_u16_le(&buf[6], APP_AI_AOP1_HEADER_LEN);
+    app_ai_voice_write_u32_le(&buf[8], APP_BUSINESS_AUDIO_SAMPLE_RATE);
+    app_ai_voice_write_u16_le(&buf[12], APP_BUSINESS_FRAME_SAMPLES);
+    app_ai_voice_write_u16_le(&buf[14], APP_AI_AOP1_FRAME_DURATION_MS);
+    app_ai_voice_write_u32_le(&buf[16], frame_count);
+    app_ai_voice_write_u32_le(&buf[20], pcm_samples);
 }
 
 /** @brief WAV fmt chunk 中当前解析器至少需要的 PCM 格式字段长度。 */
@@ -1043,8 +1057,9 @@ static void app_ai_voice_request_backend_stop_audio_async(const char *session)
 /** @brief 请求服务器创建一次 AI 会话。 */
 static int app_ai_voice_start_session(char *session, size_t session_size)
 {
-    char json[96];
+    char json[128];
     char url[256];
+    char audio_format[32];
     uint32_t resp_len = 0u;
 
     if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_START, "") != 0) {
@@ -1053,8 +1068,10 @@ static int app_ai_voice_start_session(char *session, size_t session_size)
 
     int written = snprintf(json,
                            sizeof(json),
-                           "{\"device\":\"%s\",\"language\":\"zh\"}",
-                           APP_DEVICE_ID);
+                           "{\"device\":\"%s\",\"language\":\"zh\","
+                           "\"audio_format\":\"%s\"}",
+                           APP_DEVICE_ID,
+                           APP_AI_AUDIO_FORMAT);
     if (written <= 0 || (size_t)written >= sizeof(json)) {
         return -2;
     }
@@ -1068,31 +1085,60 @@ static int app_ai_voice_start_session(char *session, size_t session_size)
         return ret;
     }
     s_ai_resp_buf[resp_len < sizeof(s_ai_resp_buf) ? resp_len : (sizeof(s_ai_resp_buf) - 1u)] = '\0';
+    if (!app_ai_voice_json_is_true(s_ai_resp_buf, resp_len, "ok")) {
+        APP_LOGE(TAG, "ai_opus event=start_rejected reason=server_not_ok");
+        return -3;
+    }
     ret = app_ai_voice_json_get_string(s_ai_resp_buf, resp_len, "session", session, session_size);
-    if (ret == 0 && app_ai_voice_is_cancel_requested()) {
+    if (ret != 0) {
+        APP_LOGE(TAG, "ai_opus event=start_rejected reason=missing_session ret=%d", ret);
+        return -4;
+    }
+    ret = app_ai_voice_json_get_string(s_ai_resp_buf,
+                                       resp_len,
+                                       "audio_format",
+                                       audio_format,
+                                       sizeof(audio_format));
+    if (ret != 0) {
+        APP_LOGE(TAG, "ai_opus event=start_rejected reason=missing_audio_format ret=%d", ret);
+        return -5;
+    }
+    if (strcmp(audio_format, APP_AI_AUDIO_FORMAT) != 0) {
+        APP_LOGE(TAG,
+                 "ai_opus event=start_rejected reason=unsupported_audio_format got=%s expected=%s",
+                 audio_format,
+                 APP_AI_AUDIO_FORMAT);
+        return -6;
+    }
+    if (app_ai_voice_is_cancel_requested()) {
         app_ai_voice_set_current_session(session);
         app_ai_voice_request_backend_cancel_async(session);
         return APP_AI_CANCELED_RET;
     }
-    return ret;
+    return 0;
 }
 
-/** @brief 按固定大小上传完整请求 WAV。 */
-static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
+/** @brief 按文件字节偏移分片上传完整 AOP1 请求音频。 */
+static int app_ai_voice_upload_opus_chunks(const char *session, uint32_t total_len)
 {
-    if (session == NULL || wav_len == 0u || wav_len > APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES) {
+    if (session == NULL || total_len <= APP_AI_AOP1_HEADER_LEN ||
+        total_len > APP_BUSINESS_AI_OPUS_BUF_BYTES) {
         return -1;
     }
 
+    uint32_t upload_start_ms = osal_get_tick_ms();
     uint32_t offset = 0u;
     uint32_t index = 0u;
-    while (offset < wav_len) {
+    uint32_t chunk_count = 0u;
+    int result = 0;
+    while (offset < total_len) {
         if (app_ai_voice_is_cancel_requested()) {
             APP_LOGI(CANCEL_TAG, "cancel during upload index=%u", (unsigned int)index);
-            return APP_AI_CANCELED_RET;
+            result = APP_AI_CANCELED_RET;
+            break;
         }
 
-        uint32_t chunk_len = wav_len - offset;
+        uint32_t chunk_len = total_len - offset;
         if (chunk_len > APP_AI_UPLOAD_CHUNK_BYTES) {
             chunk_len = APP_AI_UPLOAD_CHUNK_BYTES;
         }
@@ -1107,9 +1153,10 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
                  APP_DEVICE_ID,
                  (unsigned int)index,
                  (unsigned int)offset,
-                 (unsigned int)wav_len);
+                 (unsigned int)total_len);
         if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_UPLOAD, query) != 0) {
-            return -2;
+            result = -2;
+            break;
         }
 
         APP_LOGI(TAG,
@@ -1117,10 +1164,11 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
                  (unsigned int)index,
                  (unsigned int)offset,
                  (unsigned int)chunk_len,
-                 (unsigned int)wav_len);
+                 (unsigned int)total_len);
+        chunk_count++;
         int ret = service_network_http_post(url,
-                                            "application/octet-stream",
-                                            &s_ai_wav_buf[offset],
+                                            "application/vnd.wkt.opus-packets",
+                                            &s_ai_request_audio_buf[offset],
                                             chunk_len,
                                             s_ai_resp_buf,
                                             sizeof(s_ai_resp_buf) - 1u,
@@ -1128,21 +1176,29 @@ static int app_ai_voice_upload_wav_chunks(const char *session, uint32_t wav_len)
                                             APP_AI_HTTP_CHUNK_TIMEOUT_MS);
         if (app_ai_voice_is_cancel_requested()) {
             APP_LOGI(CANCEL_TAG, "cancel during upload index=%u", (unsigned int)index);
-            return APP_AI_CANCELED_RET;
+            result = APP_AI_CANCELED_RET;
+            break;
         }
         if (ret != 0) {
             APP_LOGW(TAG, "AI 上传分片失败, index=%u, offset=%u, ret=%d",
                      (unsigned int)index,
                      (unsigned int)offset,
                      ret);
-            return ret;
+            result = ret;
+            break;
         }
 
         offset += chunk_len;
         index++;
     }
 
-    return 0;
+    APP_LOGI(TAG,
+             "ai_opus event=upload_stop total_bytes=%u chunk_count=%u upload_ms=%u result=%d",
+             (unsigned int)total_len,
+             (unsigned int)chunk_count,
+             (unsigned int)(osal_get_tick_ms() - upload_start_ms),
+             result);
+    return result;
 }
 
 /** @brief 通知服务器上传结束并开始处理。 */
@@ -1161,7 +1217,14 @@ static int app_ai_voice_finish_upload(const char *session)
         return APP_AI_CANCELED_RET;
     }
 
-    int ret = app_ai_voice_post_json(url, &resp_len);
+    int ret = service_network_http_post(url,
+                                        "application/json",
+                                        NULL,
+                                        0u,
+                                        s_ai_resp_buf,
+                                        sizeof(s_ai_resp_buf) - 1u,
+                                        &resp_len,
+                                        APP_AI_HTTP_CHUNK_TIMEOUT_MS);
     if (app_ai_voice_is_cancel_requested()) {
         return APP_AI_CANCELED_RET;
     }
@@ -1656,50 +1719,176 @@ static void app_ai_voice_play_request_task(void *arg)
     osal_task_delete_current();
 }
 
-/**
- * @brief 录制一次 AI 请求 PCM，直接追加到请求 WAV 缓冲区的 data 区。
- *
- * s_ai_wav_buf 前 44 字节预留给 WAV 头；录音阶段只写 PCM，停止后再根据
- * 实际样本数回填 WAV 头，避免 service 层再维护一份整段录音缓存。
- *
- * @return 实际录到的 int16_t 单声道样本数。
- */
-static uint32_t app_ai_voice_record_to_wav_buffer(void)
-{
-    int16_t frame[APP_BUSINESS_FRAME_SAMPLES];
-    int16_t *record_pcm = (int16_t *)&s_ai_wav_buf[APP_BUSINESS_WAV_HEADER_LEN];
-    uint32_t samples_total = 0u;
+typedef struct {
+    uint32_t duration_ms;
+    uint32_t pcm_samples;
+    uint32_t frame_count;
+    uint32_t opus_payload_bytes;
+    uint32_t container_bytes;
+    uint32_t encode_ok;
+    uint32_t encode_fail;
+    uint64_t encode_total_us;
+    uint32_t encode_max_us;
+    uint8_t canceled;
+    uint8_t buffer_full;
+} app_ai_voice_record_result_t;
 
-    while (s_ai_recording && samples_total < APP_BUSINESS_AI_MAX_SAMPLES) {
+/** @brief 编码并安全追加一个 AOP1 packet；real_samples 不包含补零样本。 */
+static int app_ai_voice_aop1_append_frame(app_ai_voice_record_result_t *result,
+                                           const int16_t *pcm,
+                                           uint16_t real_samples)
+{
+    uint8_t packet[APP_AUDIO_OPUS_PACKET_MAX_BYTES] __attribute__((aligned(16)));
+    uint16_t packet_len = 0u;
+    int64_t encode_start_us = esp_timer_get_time();
+    int ret = app_audio_opus_encode_20ms(pcm,
+                                          APP_BUSINESS_FRAME_SAMPLES,
+                                          packet,
+                                          (uint16_t)sizeof(packet),
+                                          &packet_len);
+    uint32_t encode_us = (uint32_t)(esp_timer_get_time() - encode_start_us);
+    result->encode_total_us += encode_us;
+    if (encode_us > result->encode_max_us) {
+        result->encode_max_us = encode_us;
+    }
+    if (ret != 0 || packet_len == 0u || packet_len > APP_AUDIO_OPUS_PACKET_MAX_BYTES) {
+        result->encode_fail++;
+        APP_LOGE(TAG,
+                 "ai_opus event=encode_fail ret=%d packet_len=%u frame_count=%u",
+                 ret,
+                 (unsigned int)packet_len,
+                 (unsigned int)result->frame_count);
+        return -1;
+    }
+    result->encode_ok++;
+
+    uint32_t needed = APP_AI_AOP1_PACKET_LEN_BYTES + packet_len;
+    if (result->container_bytes > APP_BUSINESS_AI_OPUS_BUF_BYTES - needed) {
+        result->buffer_full = 1u;
+        APP_LOGE(TAG,
+                 "ai_opus event=buffer_full used=%u needed=%u capacity=%u frame_count=%u",
+                 (unsigned int)result->container_bytes,
+                 (unsigned int)needed,
+                 (unsigned int)APP_BUSINESS_AI_OPUS_BUF_BYTES,
+                 (unsigned int)result->frame_count);
+        return -2;
+    }
+
+    app_ai_voice_write_u16_le(&s_ai_request_audio_buf[result->container_bytes], packet_len);
+    memcpy(&s_ai_request_audio_buf[result->container_bytes + APP_AI_AOP1_PACKET_LEN_BYTES],
+           packet,
+           packet_len);
+    result->container_bytes += needed;
+    result->opus_payload_bytes += packet_len;
+    result->pcm_samples += real_samples;
+    result->frame_count++;
+    return 0;
+}
+
+/** @brief 录制并逐帧编码一次 AI 请求，输出完整 AOP1 文件到 PSRAM。 */
+static app_ai_voice_record_result_t app_ai_voice_record_to_opus_buffer(void)
+{
+    app_ai_voice_record_result_t result = {
+        .container_bytes = APP_AI_AOP1_HEADER_LEN,
+    };
+    int16_t frame[APP_BUSINESS_FRAME_SAMPLES] __attribute__((aligned(16)));
+    uint16_t frame_samples = 0u;
+    uint32_t record_start_ms = osal_get_tick_ms();
+
+    app_ai_voice_aop1_write_header(s_ai_request_audio_buf, 0u, 0u);
+    if (app_audio_opus_encoder_reset() != 0) {
+        result.encode_fail = 1u;
+        s_ai_recording = 0;
+        APP_LOGE(TAG, "ai_opus event=encoder_reset_fail");
+        goto done;
+    }
+
+    while (s_ai_recording && result.frame_count < APP_AI_AOP1_MAX_FRAMES) {
         if (app_ai_voice_is_cancel_requested()) {
             APP_LOGI(CANCEL_TAG, "cancel during recording");
+            result.canceled = 1u;
             s_ai_recording = 0;
-            return 0u;
+            break;
         }
 
-        uint32_t room = APP_BUSINESS_AI_MAX_SAMPLES - samples_total;
-        uint32_t request = room > APP_BUSINESS_FRAME_SAMPLES ?
-                           APP_BUSINESS_FRAME_SAMPLES :
-                           room;
-        int read_samples = service_audio_read(frame,
+        uint32_t pending_total = result.pcm_samples + frame_samples;
+        if (pending_total >= APP_BUSINESS_AI_MAX_SAMPLES) {
+            s_ai_recording = 0;
+            break;
+        }
+        uint32_t request = APP_BUSINESS_FRAME_SAMPLES - frame_samples;
+        uint32_t sample_room = APP_BUSINESS_AI_MAX_SAMPLES - pending_total;
+        if (request > sample_room) {
+            request = sample_room;
+        }
+        int read_samples = service_audio_read(&frame[frame_samples],
                                               request,
                                               APP_AI_RECORD_READ_TIMEOUT_MS);
         if (read_samples <= 0) {
             osal_delay_ms(5u);
             continue;
         }
+        if ((uint32_t)read_samples > request) {
+            APP_LOGW(TAG,
+                     "ai_opus event=read_clamped got=%d requested=%u",
+                     read_samples,
+                     (unsigned int)request);
+            read_samples = (int)request;
+        }
+        frame_samples = (uint16_t)(frame_samples + (uint16_t)read_samples);
+        if (frame_samples < APP_BUSINESS_FRAME_SAMPLES) {
+            continue;
+        }
 
-        memcpy(&record_pcm[samples_total],
-               frame,
-               (uint32_t)read_samples * sizeof(int16_t));
-        samples_total += (uint32_t)read_samples;
+        if (app_ai_voice_aop1_append_frame(&result,
+                                            frame,
+                                            APP_BUSINESS_FRAME_SAMPLES) != 0) {
+            frame_samples = 0u;
+            s_ai_recording = 0;
+            break;
+        }
+        frame_samples = 0u;
     }
 
-    if (samples_total >= APP_BUSINESS_AI_MAX_SAMPLES) {
+    if (result.frame_count >= APP_AI_AOP1_MAX_FRAMES ||
+        result.pcm_samples >= APP_BUSINESS_AI_MAX_SAMPLES) {
         s_ai_recording = 0;
     }
 
-    return samples_total;
+    /* 松手时将最后不足 20 ms 的真实 PCM 以零补齐后编码。 */
+    if (!result.canceled && frame_samples > 0u &&
+        result.frame_count < APP_AI_AOP1_MAX_FRAMES) {
+        uint16_t real_samples = frame_samples;
+        memset(&frame[frame_samples],
+               0,
+               (APP_BUSINESS_FRAME_SAMPLES - frame_samples) * sizeof(int16_t));
+        (void)app_ai_voice_aop1_append_frame(&result, frame, real_samples);
+    }
+
+done:
+    app_ai_voice_aop1_write_header(s_ai_request_audio_buf,
+                                    result.frame_count,
+                                    result.pcm_samples);
+    result.duration_ms = osal_get_tick_ms() - record_start_ms;
+    APP_LOGI(TAG,
+             "ai_opus event=record_stop duration_ms=%u pcm_samples=%u frame_count=%u "
+             "opus_payload_bytes=%u container_bytes=%u encode_ok=%u encode_fail=%u "
+             "encode_avg_us=%u encode_max_us=%u stack_hwm=%u psram_free=%u internal_free=%u",
+             (unsigned int)result.duration_ms,
+             (unsigned int)result.pcm_samples,
+             (unsigned int)result.frame_count,
+             (unsigned int)result.opus_payload_bytes,
+             (unsigned int)result.container_bytes,
+             (unsigned int)result.encode_ok,
+             (unsigned int)result.encode_fail,
+             (result.encode_ok + result.encode_fail) > 0u ?
+             (unsigned int)(result.encode_total_us /
+                            (result.encode_ok + result.encode_fail)) : 0u,
+             (unsigned int)result.encode_max_us,
+             (unsigned int)uxTaskGetStackHighWaterMark(NULL),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    return result;
 }
 
 /* ==========================================================================
@@ -1712,9 +1901,9 @@ static uint32_t app_ai_voice_record_to_wav_buffer(void)
  * ## 执行流程（每次被 notify 唤醒一次→处理一次完整的问答）：
  *
  * 1. 阻塞等待 notify（来自 app_ai_voice_record_start()）
- * 2. 循环读取 service_audio PCM，直接写入 s_ai_wav_buf 的 WAV data 区
- * 3. 写入 WAV 文件头（44 字节），封装成标准 WAV 格式
- * 5. 创建服务器 session，按 APP_AI_UPLOAD_CHUNK_BYTES 分片上传请求 WAV
+ * 2. 循环读取 service_audio PCM，编码并写入 AOP1 裸 Opus packet
+ * 3. 回填 24 字节 AOP1 文件头
+ * 5. 创建服务器 session，按 APP_AI_UPLOAD_CHUNK_BYTES 分片上传请求 AOP1
  * 6. finish 后轮询 result_info，拿到回复 WAV 总长度
  * 7. 按 APP_AI_REPLY_CHUNK_BYTES 拉取 result_chunk，边解析 WAV 边播放 PCM，播放后丢弃分片
  * 8. 录音结束后立即释放音频会话，后续 HTTP 上传/轮询不再阻塞 PTT
@@ -1725,7 +1914,7 @@ static uint32_t app_ai_voice_record_to_wav_buffer(void)
  * - AI 回复手动播放会重新申请音频会话，和 PTT 继续互斥
  *
  * ## 内存策略
- * - 请求 WAV 使用 s_ai_wav_buf；录音 PCM 直接写到 WAV data 区，不经过 service 缓冲
+ * - 请求 AOP1 使用 s_ai_request_audio_buf；仅保留单帧 PCM 和 Opus 临时缓冲
  * - 回复 WAV 只使用单个 HTTP 分片缓冲，边播边丢弃
  *
  * @param arg 未使用。
@@ -1739,12 +1928,12 @@ static void app_ai_voice_task(void *arg)
         (void)osal_task_notify_take(OSAL_WAIT_FOREVER);
 
         app_ai_voice_set_state(APP_AI_STATE_RECORDING);
-        uint32_t samples_total = app_ai_voice_record_to_wav_buffer();
+        app_ai_voice_record_result_t record = app_ai_voice_record_to_opus_buffer();
         app_business_audio_session_end();
         APP_LOGI(TAG,
                  "AI 录音采集结束，已释放音频会话, samples=%u",
-                 (unsigned int)samples_total);
-        if (app_ai_voice_is_cancel_requested()) {
+                 (unsigned int)record.pcm_samples);
+        if (record.canceled || app_ai_voice_is_cancel_requested()) {
             (void)app_ui_set_ai_waiting(0);
             (void)app_ui_set_ai_message(UI_TEXT_AI_IDLE);
             app_ai_voice_clear_reply_state();
@@ -1753,7 +1942,7 @@ static void app_ai_voice_task(void *arg)
             s_ai_cancel_requested = 0;
             continue;
         }
-        if (samples_total == 0u) {
+        if (record.frame_count == 0u || record.pcm_samples == 0u || record.encode_ok == 0u) {
             (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
             (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_HIDDEN);
             app_ai_voice_set_state(APP_AI_STATE_FAILED);
@@ -1767,11 +1956,10 @@ static void app_ai_voice_task(void *arg)
             continue;
         }
 
-        /* 构造请求 WAV 文件：录音 PCM 已在 data 区，这里只回填 WAV 头。 */
-        uint32_t pcm_bytes = samples_total * sizeof(int16_t);
-        uint32_t wav_len = APP_BUSINESS_WAV_HEADER_LEN + pcm_bytes;
-        if (pcm_bytes > 0u && wav_len <= APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES) {
-            app_ai_voice_wav_write_header(s_ai_wav_buf, pcm_bytes);
+        /* AOP1 头已在录音停止时回填，HTTP 阶段不再占用音频会话。 */
+        uint32_t request_audio_len = record.container_bytes;
+        if (request_audio_len > APP_AI_AOP1_HEADER_LEN &&
+            request_audio_len <= APP_BUSINESS_AI_OPUS_BUF_BYTES) {
             app_ai_voice_clear_reply_state();
 
             char session[64];
@@ -1780,7 +1968,7 @@ static void app_ai_voice_task(void *arg)
             int ret = app_ai_voice_start_session(session, sizeof(session));
             if (ret == 0) {
                 app_ai_voice_set_current_session(session);
-                ret = app_ai_voice_upload_wav_chunks(session, wav_len);
+                ret = app_ai_voice_upload_opus_chunks(session, request_audio_len);
             }
             if (ret == 0) {
                 app_ai_voice_set_state(APP_AI_STATE_FINISHING);
@@ -1869,7 +2057,9 @@ static void app_ai_voice_task(void *arg)
                 APP_LOGW(TAG, "AI 分片问答失败, ret=%d", ret);
             }
         } else {
-            APP_LOGW(TAG, "AI 录音 WAV 长度无效或超限, wav_len=%u", (unsigned int)wav_len);
+            APP_LOGW(TAG,
+                     "AI 录音 AOP1 长度无效或超限, len=%u",
+                     (unsigned int)request_audio_len);
             (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
             (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
             app_ai_voice_set_state(APP_AI_STATE_FAILED);
@@ -1893,7 +2083,7 @@ static void app_ai_voice_task(void *arg)
 /**
  * @brief 启动 AI 语音问答模块（开机时由 app_business_start 调用）。
  *
- * 直接分配 WAV 缓冲区并创建 biz_ai 任务，设置 s_started = 1。
+ * 初始化共享 Opus encoder，分配 AOP1 缓冲区并创建 biz_ai 任务，设置 s_started = 1。
  * 之后 UI 长按 AI 按钮时即可触发录音流程。
  *
  * @return 成功返回 0；失败返回负值。
@@ -1904,18 +2094,26 @@ int app_ai_voice_start(void)
         return 0;
     }
 
-    s_ai_wav_buf = (uint8_t *)osal_heap_alloc_external(APP_BUSINESS_AI_WAV_BUF_BYTES);
-    if (s_ai_wav_buf == NULL) {
-        APP_LOGE(TAG,
-                 "AI WAV 缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
-                 (unsigned int)APP_BUSINESS_AI_WAV_BUF_BYTES,
-                 (unsigned int)osal_heap_get_external_free_size());
+    int ret = app_audio_opus_encoder_init();
+    if (ret != 0) {
+        APP_LOGE(TAG, "AI Opus encoder 初始化失败, ret=%d", ret);
         return -1;
     }
 
+    s_ai_request_audio_buf =
+        (uint8_t *)osal_heap_alloc_external(APP_BUSINESS_AI_OPUS_BUF_BYTES);
+    if (s_ai_request_audio_buf == NULL) {
+        APP_LOGE(TAG,
+                 "AI AOP1 缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
+                 (unsigned int)APP_BUSINESS_AI_OPUS_BUF_BYTES,
+                 (unsigned int)osal_heap_get_external_free_size());
+        return -2;
+    }
+
     APP_LOGI(TAG,
-             "AI WAV 缓存已分配到 PSRAM, bytes=%u",
-             (unsigned int)APP_BUSINESS_AI_WAV_BUF_BYTES);
+             "AI AOP1 缓存已分配到 PSRAM, bytes=%u, cbr_60s_bytes=%u",
+             (unsigned int)APP_BUSINESS_AI_OPUS_BUF_BYTES,
+             (unsigned int)APP_AI_OPUS_CBR_MAX_CONTAINER_BYTES);
 
     s_ai_reply_chunk_buf = (uint8_t *)osal_heap_alloc_external(APP_AI_REPLY_CHUNK_BYTES);
     if (s_ai_reply_chunk_buf == NULL) {
@@ -1923,9 +2121,9 @@ int app_ai_voice_start(void)
                  "AI 回复分片缓存 PSRAM 分配失败, bytes=%u, psram_free=%u",
                  (unsigned int)APP_AI_REPLY_CHUNK_BYTES,
                  (unsigned int)osal_heap_get_external_free_size());
-        osal_heap_free(s_ai_wav_buf);
-        s_ai_wav_buf = NULL;
-        return -2;
+        osal_heap_free(s_ai_request_audio_buf);
+        s_ai_request_audio_buf = NULL;
+        return -3;
     }
 
     APP_LOGI(TAG,
@@ -1935,7 +2133,7 @@ int app_ai_voice_start(void)
     TaskHandle_t ai_handle = NULL;
     BaseType_t task_ret = xTaskCreateWithCaps(app_ai_voice_task,
                                               "biz_ai",
-                                              8192u,
+                                              APP_AI_TASK_STACK,
                                               NULL,
                                               5u,
                                               &ai_handle,
@@ -1949,9 +2147,9 @@ int app_ai_voice_start(void)
                  (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         osal_heap_free(s_ai_reply_chunk_buf);
         s_ai_reply_chunk_buf = NULL;
-        osal_heap_free(s_ai_wav_buf);
-        s_ai_wav_buf = NULL;
-        return -3;
+        osal_heap_free(s_ai_request_audio_buf);
+        s_ai_request_audio_buf = NULL;
+        return -4;
     }
 
     s_ai_task = (osal_task_t)ai_handle;
@@ -2024,7 +2222,7 @@ void app_ai_voice_record_start(void)
  *
  * ## 调度细节
  * biz_ai 任务被唤醒后执行以下流程（详见 app_ai_voice_task）：
- * 获取录音 → 构造 WAV → HTTP POST → 解析响应 WAV → 播放 → 释放音频会话
+ * 获取录音 → 构造 AOP1 → HTTP POST → 解析响应 WAV → 播放 → 释放音频会话
  *
  * 注意：录音停止后不再等待 HTTP 响应，biz_ai 任务在后台异步处理上传和播放。
  * 用户松手后 UI 立即恢复，不需要等待 AI 服务器返回。

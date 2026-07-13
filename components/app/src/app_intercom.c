@@ -37,6 +37,7 @@
 #include "app_intercom.h"
 
 #include "app_business.h"
+#include "app_audio_opus.h"
 #include "app_config.h"
 #include "app_intercom_opus_test.h"
 #include "app_ui.h"
@@ -54,7 +55,6 @@
 
 #include "esp_heap_caps.h"
 #include "esp_opus_dec.h"
-#include "esp_opus_enc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -458,10 +458,6 @@ static uint8_t s_ws_rx_packet_buf[APP_INTERCOM_PACKET_MAX_BYTES];
 static uint32_t s_packet_seq = 0u;
 
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
-/** @brief Opus 裸 payload 上行测试使用的常驻编码器。 */
-static void *s_opus_tx_encoder = NULL;
-static int s_opus_tx_input_bytes = 0;
-static int s_opus_tx_output_bytes = 0;
 static uint32_t s_opus_tx_encode_calls = 0u;
 static uint32_t s_opus_tx_encode_ok = 0u;
 static uint32_t s_opus_tx_encode_fail = 0u;
@@ -3056,65 +3052,7 @@ static void app_intercom_heartbeat_task(void *arg)
 }
 
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
-static int app_intercom_opus_tx_init(void)
-{
-    if (s_opus_tx_encoder != NULL) {
-        return 0;
-    }
-
-    uint32_t internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    uint32_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    esp_opus_enc_config_t cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
-    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
-    cfg.channel = ESP_AUDIO_MONO;
-    cfg.bits_per_sample = ESP_AUDIO_BIT16;
-    cfg.bitrate = APP_INTERCOM_OPUS_BITRATE;
-    cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_20_MS;
-    cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
-    cfg.complexity = 0;
-    cfg.enable_fec = false;
-    cfg.enable_dtx = false;
-    cfg.enable_vbr = false;
-
-    esp_audio_err_t codec_ret = esp_opus_enc_open(&cfg,
-                                                   sizeof(cfg),
-                                                   &s_opus_tx_encoder);
-    if (codec_ret != ESP_AUDIO_ERR_OK || s_opus_tx_encoder == NULL) {
-        APP_LOGE(TAG, "intercom_opus_tx event=encoder_open_fail ret=%d", (int)codec_ret);
-        s_opus_tx_encoder = NULL;
-        return -1;
-    }
-
-    codec_ret = esp_opus_enc_get_frame_size(s_opus_tx_encoder,
-                                             &s_opus_tx_input_bytes,
-                                             &s_opus_tx_output_bytes);
-    if (codec_ret != ESP_AUDIO_ERR_OK ||
-        s_opus_tx_input_bytes != (int)APP_BUSINESS_FRAME_BYTES ||
-        s_opus_tx_output_bytes <= 0 ||
-        s_opus_tx_output_bytes > (int)APP_INTERCOM_PACKET_MAX_PAYLOAD) {
-        APP_LOGE(TAG,
-                 "intercom_opus_tx event=frame_size_invalid ret=%d input=%d output=%d max=%u",
-                 (int)codec_ret,
-                 s_opus_tx_input_bytes,
-                 s_opus_tx_output_bytes,
-                 (unsigned int)APP_INTERCOM_PACKET_MAX_PAYLOAD);
-        esp_opus_enc_close(s_opus_tx_encoder);
-        s_opus_tx_encoder = NULL;
-        return -2;
-    }
-
-    APP_LOGI(TAG,
-             "intercom_opus_tx event=ready bitrate=%d frame_ms=20 input_bytes=%d output_bytes=%d "
-             "internal_used=%u psram_used=%u payload_format=raw",
-             APP_INTERCOM_OPUS_BITRATE,
-             s_opus_tx_input_bytes,
-             s_opus_tx_output_bytes,
-             (unsigned int)(internal_before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-             (unsigned int)(psram_before - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
-    return 0;
-}
-
-static int app_intercom_opus_tx_reset(void)
+static void app_intercom_opus_tx_stats_reset(void)
 {
     s_opus_tx_encode_calls = 0u;
     s_opus_tx_encode_ok = 0u;
@@ -3126,53 +3064,6 @@ static int app_intercom_opus_tx_reset(void)
     s_opus_tx_frame_total_us = 0u;
     s_opus_tx_frame_max_us = 0u;
     s_opus_tx_frame_late = 0u;
-    return s_opus_tx_encoder != NULL &&
-           esp_opus_enc_reset(s_opus_tx_encoder) == ESP_AUDIO_ERR_OK ? 0 : -1;
-}
-
-static int app_intercom_opus_tx_encode(const int16_t *pcm,
-                                       uint16_t samples,
-                                       uint8_t *out,
-                                       uint16_t out_capacity,
-                                       uint16_t *out_len)
-{
-    if (s_opus_tx_encoder == NULL ||
-        pcm == NULL ||
-        out == NULL ||
-        out_len == NULL ||
-        samples != APP_INTERCOM_PACKET_SAMPLES) {
-        return APP_INTERCOM_OPUS_ENCODE_FAIL_RET;
-    }
-
-    esp_audio_enc_in_frame_t input = {
-        .buffer = (uint8_t *)pcm,
-        .len = (uint32_t)samples * sizeof(int16_t),
-    };
-    esp_audio_enc_out_frame_t output = {
-        .buffer = out,
-        .len = out_capacity,
-        .encoded_bytes = 0u,
-        .pts = 0u,
-    };
-    int64_t start_us = esp_timer_get_time();
-    esp_audio_err_t codec_ret = esp_opus_enc_process(s_opus_tx_encoder, &input, &output);
-    uint32_t encode_us = (uint32_t)(esp_timer_get_time() - start_us);
-    s_opus_tx_encode_calls++;
-    s_opus_tx_encode_total_us += encode_us;
-    if (encode_us > s_opus_tx_encode_max_us) {
-        s_opus_tx_encode_max_us = encode_us;
-    }
-    if (codec_ret != ESP_AUDIO_ERR_OK ||
-        output.encoded_bytes == 0u ||
-        output.encoded_bytes > out_capacity) {
-        s_opus_tx_encode_fail++;
-        return APP_INTERCOM_OPUS_ENCODE_FAIL_RET;
-    }
-
-    s_opus_tx_encode_ok++;
-    s_opus_tx_payload_bytes += output.encoded_bytes;
-    *out_len = (uint16_t)output.encoded_bytes;
-    return 0;
 }
 
 static void app_intercom_opus_tx_note_frame(uint32_t frame_us)
@@ -3201,15 +3092,25 @@ static int app_intercom_send_audio_packet(uint8_t *packet,
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
     int64_t frame_start_us = esp_timer_get_time();
     uint8_t opus_payload[APP_INTERCOM_PACKET_MAX_PAYLOAD] __attribute__((aligned(16)));
-    int codec_ret = app_intercom_opus_tx_encode(pcm,
-                                                 samples,
-                                                 opus_payload,
-                                                 (uint16_t)sizeof(opus_payload),
-                                                 &payload_len);
-    if (codec_ret != 0) {
-        app_intercom_opus_tx_note_frame((uint32_t)(esp_timer_get_time() - frame_start_us));
-        return codec_ret;
+    int64_t encode_start_us = esp_timer_get_time();
+    int codec_ret = app_audio_opus_encode_20ms(pcm,
+                                                samples,
+                                                opus_payload,
+                                                (uint16_t)sizeof(opus_payload),
+                                                &payload_len);
+    uint32_t encode_us = (uint32_t)(esp_timer_get_time() - encode_start_us);
+    s_opus_tx_encode_calls++;
+    s_opus_tx_encode_total_us += encode_us;
+    if (encode_us > s_opus_tx_encode_max_us) {
+        s_opus_tx_encode_max_us = encode_us;
     }
+    if (codec_ret != 0) {
+        s_opus_tx_encode_fail++;
+        app_intercom_opus_tx_note_frame((uint32_t)(esp_timer_get_time() - frame_start_us));
+        return APP_INTERCOM_OPUS_ENCODE_FAIL_RET;
+    }
+    s_opus_tx_encode_ok++;
+    s_opus_tx_payload_bytes += payload_len;
     payload = opus_payload;
 #else
     uint8_t adpcm_payload[APP_INTERCOM_ADPCM_MAX_PAYLOAD];
@@ -3393,7 +3294,8 @@ static void app_intercom_ptt_task(void *arg)
         }
 
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
-        if (app_intercom_opus_tx_reset() != 0) {
+        app_intercom_opus_tx_stats_reset();
+        if (app_audio_opus_encoder_reset() != 0) {
             APP_LOGE(TAG, "intercom_opus_tx event=encoder_reset_fail");
             (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_FAILED);
             app_business_audio_session_end();
@@ -3565,7 +3467,7 @@ int app_intercom_start(void)
 #endif
 
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
-    ret = app_intercom_opus_tx_init();
+    ret = app_audio_opus_encoder_init();
     if (ret != 0) {
         APP_LOGE(TAG, "intercom_opus_tx event=start_fail ret=%d", ret);
         return ret;
