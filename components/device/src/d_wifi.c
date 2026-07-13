@@ -628,6 +628,9 @@ int d_wifi_http_post_ex(const char *url,
 
     int ret = 0;
     *resp_len = 0u;
+    if (options != NULL && options->status_code != NULL) {
+        *options->status_code = 0;
+    }
     (void)esp_http_client_set_method(client, HTTP_METHOD_POST);
     if (esp_http_client_set_header(client,
                                    "Content-Type",
@@ -635,7 +638,11 @@ int d_wifi_http_post_ex(const char *url,
         (options != NULL && options->request_id != NULL &&
          esp_http_client_set_header(client, "X-Request-ID", options->request_id) != ESP_OK) ||
         (options != NULL && options->content_sha256 != NULL &&
-         esp_http_client_set_header(client, "X-Content-SHA256", options->content_sha256) != ESP_OK)) {
+         esp_http_client_set_header(client, "X-Content-SHA256", options->content_sha256) != ESP_OK) ||
+        (options != NULL && options->image_sha256 != NULL &&
+         esp_http_client_set_header(client, "X-Image-SHA256", options->image_sha256) != ESP_OK) ||
+        (options != NULL && options->chunk_sha256 != NULL &&
+         esp_http_client_set_header(client, "X-Chunk-SHA256", options->chunk_sha256) != ESP_OK)) {
         ret = -11;
     }
 
@@ -729,20 +736,22 @@ int d_wifi_http_post_ex(const char *url,
     }
     if (ret == 0) {
         int status_code = esp_http_client_get_status_code(client);
-        if (status_code < 200 || status_code >= 300) {
-            ret = -6;
-            D_LOGW(TAG,
-                   "HTTP POST 状态码非 2xx, status=%d, body_len=%u",
-                   status_code,
-                   (unsigned int)body_len);
+        if (options != NULL && options->status_code != NULL) {
+            *options->status_code = status_code;
         }
-    }
-    if (ret == 0) {
         int read_len = esp_http_client_read_response(client, (char *)resp, (int)resp_size);
         if (read_len < 0) {
             ret = read_len;
         } else {
             *resp_len = (uint32_t)read_len;
+            if (status_code < 200 || status_code >= 300) {
+                ret = -6;
+                D_LOGW(TAG,
+                       "HTTP POST 状态码非 2xx, status=%d, body_len=%u, resp_len=%u",
+                       status_code,
+                       (unsigned int)body_len,
+                       (unsigned int)*resp_len);
+            }
         }
     }
 
