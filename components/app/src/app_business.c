@@ -643,7 +643,7 @@ static void app_business_register_ui_callbacks(void)
  * 2. 注册 UI→业务回调（必须在 app 模块启动前完成，否则开机后用户操作可能丢失）
  * 3. 启动状态监控（电池 1s + 信号 3s 轮询任务）
  * 4. 启动对讲模块（WebSocket 连接 + PTT/RX/心跳任务）
- * 5. 启动 AI 语音模块（biz_ai 任务 + WAV 缓冲区分配）
+ * 5. 启动 AI 语音模块（biz_ai 任务 + AOP1 缓冲区分配）
  * 6. 启动相机业务模块
  *
  * ## 防重复

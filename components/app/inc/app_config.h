@@ -75,7 +75,7 @@ extern "C" {
 #define APP_OTA_CHANNEL                  "stable"
 /** @brief AI 创建会话路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_START        "/ai/start"
-/** @brief AI 上传请求 WAV 分片路由。 */
+/** @brief AI 上传请求音频分片路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_UPLOAD       "/ai/upload"
 /** @brief AI 上传完成路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_FINISH       "/ai/finish"
@@ -129,7 +129,7 @@ extern "C" {
 /** @brief AI 回复语音是否默认自动播放；0 表示需要用户点击播放按钮。 */
 #define AUTO_PLAY_REPLY_AUDIO           0
 /** @brief AI 请求音频上传分片大小，减小单次 body 可提升热点弱网下的上传稳定性。 */
-#define APP_AI_UPLOAD_CHUNK_BYTES       8192u
+#define APP_AI_UPLOAD_CHUNK_BYTES       32768u
 /** @brief AI 回复音频拉取分片大小，保持较大片以减少播放时 HTTP 往返造成的卡顿。 */
 #define APP_AI_REPLY_CHUNK_BYTES        32768u
 /** @brief 开机默认频道号。 */
@@ -153,16 +153,13 @@ extern "C" {
 /** @brief AI 回复最大样本数。 */
 #define APP_BUSINESS_AI_REPLY_MAX_SAMPLES \
     ((APP_BUSINESS_AUDIO_SAMPLE_RATE * APP_BUSINESS_AI_REPLY_MAX_MS) / 1000u)
-/** @brief 标准 PCM WAV 文件头长度。 */
+/** @brief 标准 PCM WAV 文件头长度（仅用于 AI 回复上限计算）。 */
 #define APP_BUSINESS_WAV_HEADER_LEN     44u
-/** @brief AI 上传请求 WAV 最大字节数。 */
-#define APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES \
-    (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_MAX_SAMPLES * sizeof(int16_t)))
 /** @brief AI 回复 WAV 最大字节数。 */
 #define APP_BUSINESS_AI_REPLY_WAV_MAX_BYTES \
     (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_REPLY_MAX_SAMPLES * sizeof(int16_t)))
-/** @brief AI 请求 WAV 缓冲区字节数；回复分片边播边丢弃，不再按回复最大值缓存。 */
-#define APP_BUSINESS_AI_WAV_BUF_BYTES   APP_BUSINESS_AI_REQUEST_WAV_MAX_BYTES
+/** @brief AI 请求 AOP1 裸 Opus 帧容器缓冲区字节数。 */
+#define APP_BUSINESS_AI_OPUS_BUF_BYTES  (256u * 1024u)
 
 #ifdef __cplusplus
 }
