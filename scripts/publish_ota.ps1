@@ -131,16 +131,22 @@ try {
 
     $notesBytes = [System.Text.Encoding]::UTF8.GetBytes($Notes)
     $notesBase64 = [System.Convert]::ToBase64String($notesBytes)
-    $remoteTemplate = @'
+    $publishScriptTemplate = @'
 cd __DEPLOY_DIR__ && NOTES_B64='__NOTES_B64__' && NOTES="$(printf '%s' "$NOTES_B64" | base64 -d)" && docker compose --env-file .env -f compose.yaml exec -T ota python -m app.cli publish --hardware __HARDWARE__ --channel __CHANNEL__ --version __VERSION__ --file __CONTAINER_FILE__ --notes "$NOTES"
 '@
-    $remoteCommand = $remoteTemplate.Trim()
-    $remoteCommand = $remoteCommand.Replace('__DEPLOY_DIR__', $deployDir)
-    $remoteCommand = $remoteCommand.Replace('__NOTES_B64__', $notesBase64)
-    $remoteCommand = $remoteCommand.Replace('__HARDWARE__', $hardware)
-    $remoteCommand = $remoteCommand.Replace('__CHANNEL__', $channel)
-    $remoteCommand = $remoteCommand.Replace('__VERSION__', $version)
-    $remoteCommand = $remoteCommand.Replace('__CONTAINER_FILE__', $containerFilePath)
+    $publishScript = $publishScriptTemplate.Trim()
+    $publishScript = $publishScript.Replace('__DEPLOY_DIR__', $deployDir)
+    $publishScript = $publishScript.Replace('__NOTES_B64__', $notesBase64)
+    $publishScript = $publishScript.Replace('__HARDWARE__', $hardware)
+    $publishScript = $publishScript.Replace('__CHANNEL__', $channel)
+    $publishScript = $publishScript.Replace('__VERSION__', $version)
+    $publishScript = $publishScript.Replace('__CONTAINER_FILE__', $containerFilePath)
+
+    # Encode the complete script so Windows native argument handling cannot strip
+    # quotes that protect the decoded Notes value on the remote shell.
+    $publishScriptBytes = [System.Text.Encoding]::UTF8.GetBytes($publishScript)
+    $publishScriptBase64 = [System.Convert]::ToBase64String($publishScriptBytes)
+    $remoteCommand = "printf %s {0} | base64 -d | sh" -f $publishScriptBase64
 
     Write-Step "Release configuration"
     Write-Host ("Project root : {0}" -f $projectRoot)
