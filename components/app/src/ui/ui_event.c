@@ -124,12 +124,15 @@ static void ota_apply_settings_state(void)
         lv_obj_set_style_bg_color(view->ota_button,
                                   g_ota_update.mandatory ? lv_color_hex(0xB94747) : UI_COLOR_SETTINGS,
                                   0);
+        lv_obj_set_style_bg_opa(view->ota_button, LV_OPA_COVER, 0);
         lv_obj_remove_state(view->ota_button, LV_STATE_DISABLED);
+        lv_obj_add_flag(view->ota_button, LV_OBJ_FLAG_CLICKABLE);
     } else {
         lv_label_set_text(view->ota_label, "当前已是最新版本");
         lv_obj_set_style_text_color(view->ota_label, lv_color_hex(0xB8F0D0), 0);
-        lv_obj_set_style_bg_color(view->ota_button, lv_color_hex(0x181818), 0);
-        lv_obj_add_state(view->ota_button, LV_STATE_DISABLED);
+        lv_obj_set_style_bg_opa(view->ota_button, LV_OPA_TRANSP, 0);
+        lv_obj_remove_state(view->ota_button, LV_STATE_DISABLED);
+        lv_obj_remove_flag(view->ota_button, LV_OBJ_FLAG_CLICKABLE);
     }
 }
 
@@ -191,7 +194,7 @@ static void ota_show_install_confirmation(void)
     uint32_t size_tenths = (g_ota_update.size * 10u) / (1024u * 1024u);
     lv_snprintf(detail_text,
                 sizeof(detail_text),
-                "大小 %u.%u MB  最低电量 %u%%",
+                "大小 %u.%u MB  电量需 %u%%",
                 (unsigned int)(size_tenths / 10u),
                 (unsigned int)(size_tenths % 10u),
                 (unsigned int)g_ota_update.min_battery);
@@ -199,7 +202,7 @@ static void ota_show_install_confirmation(void)
     lv_obj_set_width(detail, 190);
     lv_obj_set_pos(detail, 0, 30);
     lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(detail, ui_font_small(), 0);
+    lv_obj_set_style_text_font(detail, ui_font_normal(), 0);
     lv_obj_set_style_text_color(detail, lv_color_hex(0xC8C8C8), 0);
 
     lv_obj_t *notes = lv_label_create(panel);
@@ -209,15 +212,14 @@ static void ota_show_install_confirmation(void)
     lv_obj_set_pos(notes, 4, 58);
     lv_obj_set_size(notes, 182, 48);
     lv_label_set_long_mode(notes, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(notes, ui_font_small(), 0);
+    lv_obj_set_style_text_font(notes, ui_font_normal(), 0);
     lv_obj_set_style_text_color(notes, lv_color_white(), 0);
 
     lv_obj_t *warning = lv_label_create(panel);
-    lv_label_set_text(warning,
-                      "升级期间对讲、AI和相机将暂停，\n请保持供电和WiFi连接。");
+    lv_label_set_text(warning, "升级期间功能暂停\n请保持供电和WiFi连接");
     lv_obj_set_pos(warning, 4, 116);
     lv_obj_set_size(warning, 182, 54);
-    lv_obj_set_style_text_font(warning, ui_font_small(), 0);
+    lv_obj_set_style_text_font(warning, ui_font_normal(), 0);
     lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(warning,
                                 g_ota_update.mandatory ? lv_color_hex(0xFF8A8A) : lv_color_hex(0xF0D27A),
@@ -278,12 +280,12 @@ static void ota_cancel_button_event_cb(lv_event_t *event)
     lv_obj_set_style_border_width(g_ota_cancel_dialog, 1, 0);
 
     lv_obj_t *text = lv_label_create(g_ota_cancel_dialog);
-    lv_label_set_text(text, "停止升级？\n已下载内容将作废，\n下次需要重新下载。");
+    lv_label_set_text(text, "停止升级？\n已下载内容将作废\n下次需要重新下载");
     lv_obj_set_size(text, 176, 76);
     lv_obj_align(text, LV_ALIGN_TOP_MID, 0, 12);
     lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(text, lv_color_white(), 0);
-    lv_obj_set_style_text_font(text, ui_font_small(), 0);
+    lv_obj_set_style_text_font(text, ui_font_normal(), 0);
 
     lv_obj_t *back = ota_create_button(g_ota_cancel_dialog, "继续升级", 8, 98, 78);
     lv_obj_set_style_bg_color(back, lv_color_hex(0x424242), 0);
