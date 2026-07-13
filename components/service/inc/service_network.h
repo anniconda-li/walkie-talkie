@@ -23,6 +23,19 @@ typedef struct {
 } service_network_status_t;
 
 /**
+ * @brief HTTP POST 扩展控制参数。
+ */
+typedef struct {
+    const char *request_id;       /**< 可选幂等请求 ID。 */
+    const char *content_sha256;   /**< 可选请求体 SHA-256。 */
+    uint32_t upload_idle_timeout_ms;  /**< 上传单次写入无进展超时。 */
+    uint32_t upload_total_timeout_ms; /**< 请求体整体上传上限。 */
+    uint32_t response_timeout_ms;     /**< 请求体发完后的响应等待超时。 */
+    int (*is_cancelled)(void *ctx);   /**< 可选取消状态回调。 */
+    void *cancel_ctx;                 /**< 取消回调上下文。 */
+} service_network_http_options_t;
+
+/**
  * @brief 网络服务依赖的下层网络能力。
  */
 typedef struct {
@@ -43,6 +56,15 @@ typedef struct {
                      uint32_t resp_size,
                      uint32_t *resp_len,
                      uint32_t timeout_ms); /**< HTTP POST 二进制数据并读取响应。 */
+    int (*http_post_ex)(const char *url,
+                        const char *content_type,
+                        const uint8_t *body,
+                        uint32_t body_len,
+                        uint8_t *resp,
+                        uint32_t resp_size,
+                        uint32_t *resp_len,
+                        const service_network_http_options_t *options); /**< 分阶段 HTTP POST。 */
+    int (*http_cancel)(void); /**< 取消正在阻塞的 HTTP 请求。 */
 } service_network_ops_t;
 
 /**
@@ -154,6 +176,23 @@ int service_network_http_post(const char *url,
                               uint32_t resp_size,
                               uint32_t *resp_len,
                               uint32_t timeout_ms);
+
+/**
+ * @brief 使用分阶段超时和幂等请求头执行 HTTP POST。
+ */
+int service_network_http_post_ex(const char *url,
+                                 const char *content_type,
+                                 const uint8_t *body,
+                                 uint32_t body_len,
+                                 uint8_t *resp,
+                                 uint32_t resp_size,
+                                 uint32_t *resp_len,
+                                 const service_network_http_options_t *options);
+
+/**
+ * @brief 不等待网络 I/O 锁，取消当前 HTTP 请求。
+ */
+int service_network_http_cancel(void);
 
 #ifdef __cplusplus
 }

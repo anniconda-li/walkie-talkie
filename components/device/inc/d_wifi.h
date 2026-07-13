@@ -38,6 +38,19 @@ typedef struct {
 } d_wifi_ap_record_t;
 
 /**
+ * @brief HTTP POST 扩展控制参数。
+ */
+typedef struct {
+    const char *request_id;       /**< 可选幂等请求 ID。 */
+    const char *content_sha256;   /**< 可选请求体 SHA-256。 */
+    uint32_t upload_idle_timeout_ms;  /**< 上传单次写入无进展超时。 */
+    uint32_t upload_total_timeout_ms; /**< 请求体整体上传上限。 */
+    uint32_t response_timeout_ms;     /**< 请求体发完后的响应等待超时。 */
+    int (*is_cancelled)(void *ctx);   /**< 可选取消状态回调。 */
+    void *cancel_ctx;                 /**< 取消回调上下文。 */
+} d_wifi_http_options_t;
+
+/**
  * @brief 准备 WiFi STA 内部资源，不等待联网。
  *
  * @return 成功返回 0；失败返回负值。
@@ -192,6 +205,25 @@ int d_wifi_http_post(const char *url,
                           uint32_t resp_size,
                           uint32_t *resp_len,
                           uint32_t timeout_ms);
+
+/**
+ * @brief 执行支持分阶段超时、幂等头和取消的 HTTP POST。
+ */
+int d_wifi_http_post_ex(const char *url,
+                        const char *content_type,
+                        const uint8_t *body,
+                        uint32_t body_len,
+                        uint8_t *resp,
+                        uint32_t resp_size,
+                        uint32_t *resp_len,
+                        const d_wifi_http_options_t *options);
+
+/**
+ * @brief 取消当前正在执行的 HTTP 请求。
+ *
+ * @return 已发出取消返回 0；没有活动请求返回 1；失败返回负值。
+ */
+int d_wifi_http_cancel(void);
 
 #ifdef __cplusplus
 }

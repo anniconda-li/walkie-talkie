@@ -10,6 +10,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "d_config.h"
+#include "osal_mutex.h"
 #include "osal_task.h"
 
 #include <errno.h>
@@ -24,6 +25,9 @@
 
 #define DEVICE_WIFI_CONNECT_TIMEOUT_MS 30000u /**< WiFi 等待获取 IP 的最长时间。 */
 #define DEVICE_WIFI_POLL_MS            200u   /**< WiFi 连接状态轮询间隔。 */
+#define DEVICE_WIFI_HTTP_DEFAULT_TIMEOUT_MS 30000u /**< 普通 HTTP 请求默认超时。 */
+#define DEVICE_WIFI_HTTP_WRITE_CHUNK_BYTES 4096u   /**< HTTP body 单次写入上限。 */
+#define DEVICE_WIFI_HTTP_PROGRESS_BYTES 8192u      /**< 上传进度日志间隔。 */
 
 /** @brief WiFi 驱动日志标签。 */
 static const char *TAG = "network_wifi";
@@ -48,6 +52,15 @@ static int s_udp_sock = -1;
 
 /** @brief TCP socket 句柄。 */
 static int s_tcp_sock = -1;
+
+/** @brief 保护活动 HTTP client 的生命周期，允许其他任务安全取消。 */
+static osal_mutex_t s_http_client_mutex = NULL;
+
+/** @brief 当前正在执行请求的 HTTP client。 */
+static esp_http_client_handle_t s_active_http_client = NULL;
+
+/** @brief 活动请求是否声明支持跨任务取消。 */
+static int s_active_http_cancel_allowed = 0;
 
 /** @brief UDP 对端地址缓存。 */
 static struct sockaddr_storage s_udp_peer;
@@ -136,6 +149,12 @@ static int device_wifi_wait_ip(uint32_t timeout_ms, uint32_t connect_epoch)
 
 int d_wifi_prepare(void)
 {
+    if (s_http_client_mutex == NULL) {
+        s_http_client_mutex = osal_mutex_create();
+        if (s_http_client_mutex == NULL) {
+            return -8;
+        }
+    }
     if (s_wifi_prepared) {
         return 0;
     }
@@ -302,6 +321,7 @@ int d_wifi_deinit(void)
 
 int d_wifi_disconnect(void)
 {
+    (void)d_wifi_http_cancel();
     if (s_udp_sock >= 0) {
         close(s_udp_sock);
         s_udp_sock = -1;
@@ -512,17 +532,60 @@ int d_wifi_tcp_close(void)
     return 0;
 }
 
-/**
- * @brief 通过 ESP HTTP client 执行一次 HTTP POST。
- */
-int d_wifi_http_post(const char *url,
-                          const char *content_type,
-                          const uint8_t *body,
-                          uint32_t body_len,
-                          uint8_t *resp,
-                          uint32_t resp_size,
-                          uint32_t *resp_len,
-                          uint32_t timeout_ms)
+static int device_wifi_set_active_http_client(esp_http_client_handle_t client,
+                                              int cancel_allowed)
+{
+    if (s_http_client_mutex == NULL ||
+        osal_mutex_lock(s_http_client_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return -1;
+    }
+    if (s_active_http_client != NULL) {
+        osal_mutex_unlock(s_http_client_mutex);
+        return -1;
+    }
+    s_active_http_client = client;
+    s_active_http_cancel_allowed = cancel_allowed;
+    osal_mutex_unlock(s_http_client_mutex);
+    return 0;
+}
+
+static void device_wifi_clear_active_http_client(esp_http_client_handle_t client)
+{
+    if (s_http_client_mutex == NULL ||
+        osal_mutex_lock(s_http_client_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return;
+    }
+    if (s_active_http_client == client) {
+        s_active_http_client = NULL;
+        s_active_http_cancel_allowed = 0;
+    }
+    osal_mutex_unlock(s_http_client_mutex);
+}
+
+int d_wifi_http_cancel(void)
+{
+    if (s_http_client_mutex == NULL ||
+        osal_mutex_lock(s_http_client_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return -1;
+    }
+    if (s_active_http_client == NULL || s_active_http_cancel_allowed == 0) {
+        osal_mutex_unlock(s_http_client_mutex);
+        return 1;
+    }
+
+    esp_err_t err = esp_http_client_cancel_request(s_active_http_client);
+    osal_mutex_unlock(s_http_client_mutex);
+    return err == ESP_OK ? 0 : device_wifi_err_to_int(err);
+}
+
+int d_wifi_http_post_ex(const char *url,
+                        const char *content_type,
+                        const uint8_t *body,
+                        uint32_t body_len,
+                        uint8_t *resp,
+                        uint32_t resp_size,
+                        uint32_t *resp_len,
+                        const d_wifi_http_options_t *options)
 {
     if (!s_wifi_got_ip || url == NULL || resp == NULL || resp_len == NULL ||
         (body_len > 0u && body == NULL)) {
@@ -532,42 +595,108 @@ int d_wifi_http_post(const char *url,
         return -2;
     }
 
+    uint32_t upload_idle_timeout_ms = DEVICE_WIFI_HTTP_DEFAULT_TIMEOUT_MS;
+    uint32_t upload_total_timeout_ms = 0u;
+    uint32_t response_timeout_ms = DEVICE_WIFI_HTTP_DEFAULT_TIMEOUT_MS;
+    if (options != NULL) {
+        if (options->upload_idle_timeout_ms > 0u) {
+            upload_idle_timeout_ms = options->upload_idle_timeout_ms;
+        }
+        upload_total_timeout_ms = options->upload_total_timeout_ms;
+        if (options->response_timeout_ms > 0u) {
+            response_timeout_ms = options->response_timeout_ms;
+        }
+    }
+    if (upload_idle_timeout_ms > (uint32_t)INT_MAX ||
+        response_timeout_ms > (uint32_t)INT_MAX) {
+        return -2;
+    }
+
     esp_http_client_config_t cfg = {
         .url = url,
-        .timeout_ms = (int)(timeout_ms == 0u ? 30000u : timeout_ms),
+        .timeout_ms = (int)upload_idle_timeout_ms,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
         return -3;
     }
+    int cancel_allowed = options != NULL && options->is_cancelled != NULL;
+    if (device_wifi_set_active_http_client(client, cancel_allowed) != 0) {
+        esp_http_client_cleanup(client);
+        return -10;
+    }
 
     int ret = 0;
     *resp_len = 0u;
     (void)esp_http_client_set_method(client, HTTP_METHOD_POST);
-    (void)esp_http_client_set_header(client,
-                                     "Content-Type",
-                                     content_type != NULL ? content_type : "application/octet-stream");
+    if (esp_http_client_set_header(client,
+                                   "Content-Type",
+                                   content_type != NULL ? content_type : "application/octet-stream") != ESP_OK ||
+        (options != NULL && options->request_id != NULL &&
+         esp_http_client_set_header(client, "X-Request-ID", options->request_id) != ESP_OK) ||
+        (options != NULL && options->content_sha256 != NULL &&
+         esp_http_client_set_header(client, "X-Content-SHA256", options->content_sha256) != ESP_OK)) {
+        ret = -11;
+    }
 
-    ret = device_wifi_err_to_int(esp_http_client_open(client, (int)body_len));
+    if (ret == 0 && options != NULL && options->is_cancelled != NULL &&
+        options->is_cancelled(options->cancel_ctx) != 0) {
+        ret = -7;
+    }
+    if (ret == 0) {
+        ret = device_wifi_err_to_int(esp_http_client_open(client, (int)body_len));
+    }
     if (ret == 0) {
         uint32_t written_total = 0u;
         uint32_t write_start_ms = osal_get_tick_ms();
+        uint32_t next_progress_bytes = DEVICE_WIFI_HTTP_PROGRESS_BYTES;
         while (written_total < body_len) {
+            if (options != NULL && options->is_cancelled != NULL &&
+                options->is_cancelled(options->cancel_ctx) != 0) {
+                ret = -7;
+                break;
+            }
+            if (upload_total_timeout_ms > 0u &&
+                (osal_get_tick_ms() - write_start_ms) >= upload_total_timeout_ms) {
+                ret = -8;
+                D_LOGW(TAG,
+                       "HTTP POST body 总上传超时, written=%u/%u, total_ms=%u",
+                       (unsigned int)written_total,
+                       (unsigned int)body_len,
+                       (unsigned int)(osal_get_tick_ms() - write_start_ms));
+                break;
+            }
             uint32_t remain = body_len - written_total;
-            int write_len = (int)(remain > 4096u ? 4096u : remain);
+            int write_len = (int)(remain > DEVICE_WIFI_HTTP_WRITE_CHUNK_BYTES ?
+                                  DEVICE_WIFI_HTTP_WRITE_CHUNK_BYTES : remain);
+            uint32_t write_call_start_ms = osal_get_tick_ms();
             int written = esp_http_client_write(client,
                                                 (const char *)&body[written_total],
                                                 write_len);
             if (written <= 0) {
-                ret = written < 0 ? written : -4;
+                ret = (options != NULL && options->is_cancelled != NULL &&
+                       options->is_cancelled(options->cancel_ctx) != 0) ?
+                      -7 : (written < 0 ? written : -4);
                 D_LOGW(TAG,
-                       "HTTP POST body 写入失败, ret=%d, written=%u/%u",
+                       "HTTP POST body 写入失败, ret=%d, written=%u/%u, wait_ms=%u",
                        ret,
                        (unsigned int)written_total,
-                       (unsigned int)body_len);
+                       (unsigned int)body_len,
+                       (unsigned int)(osal_get_tick_ms() - write_call_start_ms));
                 break;
             }
             written_total += (uint32_t)written;
+            if (body_len >= DEVICE_WIFI_HTTP_PROGRESS_BYTES &&
+                (written_total >= next_progress_bytes || written_total == body_len)) {
+                D_LOGI(TAG,
+                       "HTTP POST body 上传进度, written=%u/%u, elapsed_ms=%u",
+                       (unsigned int)written_total,
+                       (unsigned int)body_len,
+                       (unsigned int)(osal_get_tick_ms() - write_start_ms));
+                while (next_progress_bytes <= written_total) {
+                    next_progress_bytes += DEVICE_WIFI_HTTP_PROGRESS_BYTES;
+                }
+            }
         }
         if (ret == 0 && written_total != body_len) {
             ret = -4;
@@ -581,6 +710,11 @@ int d_wifi_http_post(const char *url,
                    "HTTP POST body 写入完成, body_len=%u, write_ms=%u",
                    (unsigned int)body_len,
                    (unsigned int)(osal_get_tick_ms() - write_start_ms));
+        }
+    }
+    if (ret == 0) {
+        if (esp_http_client_set_timeout_ms(client, (int)response_timeout_ms) != ESP_OK) {
+            ret = -12;
         }
     }
     if (ret == 0) {
@@ -612,6 +746,35 @@ int d_wifi_http_post(const char *url,
         }
     }
 
+    device_wifi_clear_active_http_client(client);
     esp_http_client_cleanup(client);
     return ret;
+}
+
+/**
+ * @brief 通过 ESP HTTP client 执行普通 HTTP POST。
+ */
+int d_wifi_http_post(const char *url,
+                     const char *content_type,
+                     const uint8_t *body,
+                     uint32_t body_len,
+                     uint8_t *resp,
+                     uint32_t resp_size,
+                     uint32_t *resp_len,
+                     uint32_t timeout_ms)
+{
+    uint32_t effective_timeout_ms = timeout_ms == 0u ?
+                                    DEVICE_WIFI_HTTP_DEFAULT_TIMEOUT_MS : timeout_ms;
+    d_wifi_http_options_t options = {
+        .upload_idle_timeout_ms = effective_timeout_ms,
+        .response_timeout_ms = effective_timeout_ms,
+    };
+    return d_wifi_http_post_ex(url,
+                               content_type,
+                               body,
+                               body_len,
+                               resp,
+                               resp_size,
+                               resp_len,
+                               &options);
 }

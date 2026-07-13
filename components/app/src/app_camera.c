@@ -19,6 +19,8 @@
 #include "service_network.h"
 #include "service_screen.h"
 
+#include "mbedtls/sha256.h"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -50,11 +52,17 @@ static const char *TAG = "app_camera";
 #define APP_CAMERA_STRIPE_ROW_DELTA 42
 /** @brief 预览黑屏填充一次绘制的行数，避免相机任务栈上出现大缓冲。 */
 #define APP_CAMERA_BLACK_CHUNK_LINES 8u
+/** @brief 上传幂等请求 ID 缓冲长度。 */
+#define APP_CAMERA_REQUEST_ID_BYTES 64u
+/** @brief SHA-256 小写十六进制字符串长度（含结尾 NUL）。 */
+#define APP_CAMERA_SHA256_TEXT_BYTES 65u
 
 typedef struct {
     uint8_t *jpeg_buf;
     uint32_t jpeg_len;
     uint32_t queued_at_ms;
+    char request_id[APP_CAMERA_REQUEST_ID_BYTES];
+    char content_sha256[APP_CAMERA_SHA256_TEXT_BYTES];
 } app_camera_upload_job_t;
 
 /** @brief 相机后台任务句柄。 */
@@ -97,6 +105,8 @@ static uint8_t s_upload_resp[APP_CAMERA_UPLOAD_RESP_BYTES];
 static app_camera_upload_job_t s_upload_job;
 /** @brief 上传按钮点击后入队时间。 */
 static uint32_t s_upload_queued_at_ms = 0u;
+/** @brief 上传请求序号，与 tick 共同构成单次启动周期内唯一请求 ID。 */
+static uint32_t s_upload_sequence = 0u;
 /** @brief RGB565 预览恢复后还需跳过的暖机帧数。 */
 static uint8_t s_preview_warmup_frames = 0u;
 /** @brief 连续拒绝的疑似异常预览帧数量。 */
@@ -343,6 +353,57 @@ static void app_camera_finish_upload_request(void)
 static int app_camera_is_upload_cancel_requested(void)
 {
     return s_upload_cancel_requested != 0;
+}
+
+static int app_camera_http_is_cancelled(void *ctx)
+{
+    (void)ctx;
+    return app_camera_is_upload_cancel_requested();
+}
+
+static int app_camera_prepare_upload_identity(app_camera_upload_job_t *job)
+{
+    if (job == NULL || job->jpeg_buf == NULL || job->jpeg_len == 0u) {
+        return -1;
+    }
+
+    uint8_t digest[32];
+    mbedtls_sha256_context sha_ctx;
+    mbedtls_sha256_init(&sha_ctx);
+    int ret = mbedtls_sha256_starts(&sha_ctx, 0);
+    if (ret == 0) {
+        ret = mbedtls_sha256_update(&sha_ctx, job->jpeg_buf, job->jpeg_len);
+    }
+    if (ret == 0) {
+        ret = mbedtls_sha256_finish(&sha_ctx, digest);
+    }
+    mbedtls_sha256_free(&sha_ctx);
+    if (ret != 0) {
+        return -2;
+    }
+
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0u; i < sizeof(digest); i++) {
+        job->content_sha256[i * 2u] = hex[digest[i] >> 4];
+        job->content_sha256[i * 2u + 1u] = hex[digest[i] & 0x0fu];
+    }
+    job->content_sha256[sizeof(job->content_sha256) - 1u] = '\0';
+
+    s_upload_sequence++;
+    int written = snprintf(job->request_id,
+                           sizeof(job->request_id),
+                           "%s-camera-%08x-%08x-%02x%02x%02x%02x",
+                           APP_DEVICE_ID,
+                           (unsigned int)job->queued_at_ms,
+                           (unsigned int)s_upload_sequence,
+                           (unsigned int)digest[0],
+                           (unsigned int)digest[1],
+                           (unsigned int)digest[2],
+                           (unsigned int)digest[3]);
+    if (written <= 0 || (size_t)written >= sizeof(job->request_id)) {
+        return -3;
+    }
+    return 0;
 }
 
 /**
@@ -969,6 +1030,31 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
         return;
     }
 
+    ret = app_camera_prepare_upload_identity(job);
+    if (ret != 0) {
+        APP_LOGW(TAG, "相机上传身份生成失败, ret=%d", ret);
+        app_camera_free_upload_job(job);
+        (void)app_ui_set_ai_waiting(0);
+        (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
+        app_camera_finish_upload_request();
+        return;
+    }
+    APP_LOGI(TAG,
+             "相机上传身份已生成, request_id=%s, sha256=%.12s..., len=%u",
+             job->request_id,
+             job->content_sha256,
+             (unsigned int)job->jpeg_len);
+
+    service_network_http_options_t http_options = {
+        .request_id = job->request_id,
+        .content_sha256 = job->content_sha256,
+        .upload_idle_timeout_ms = APP_CAMERA_UPLOAD_IDLE_TIMEOUT_MS,
+        .upload_total_timeout_ms = APP_CAMERA_UPLOAD_TOTAL_TIMEOUT_MS,
+        .response_timeout_ms = APP_CAMERA_RESPONSE_TIMEOUT_MS,
+        .is_cancelled = app_camera_http_is_cancelled,
+        .cancel_ctx = NULL,
+    };
+
     for (uint32_t attempt = 0u; attempt <= APP_CAMERA_UPLOAD_RETRY_COUNT; attempt++) {
         if (app_camera_is_upload_cancel_requested()) {
             APP_LOGI(TAG, "相机上传已中止: 跳过剩余重试");
@@ -984,14 +1070,14 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
                  (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
                  (unsigned int)job->jpeg_len,
                  (unsigned int)(http_start_ms - job->queued_at_ms));
-        ret = service_network_http_post(url,
-                                        "image/jpeg",
-                                        job->jpeg_buf,
-                                        job->jpeg_len,
-                                        s_upload_resp,
-                                        sizeof(s_upload_resp) - 1u,
-                                        &resp_len,
-                                        APP_CAMERA_UPLOAD_TIMEOUT_MS);
+        ret = service_network_http_post_ex(url,
+                                           "image/jpeg",
+                                           job->jpeg_buf,
+                                           job->jpeg_len,
+                                           s_upload_resp,
+                                           sizeof(s_upload_resp) - 1u,
+                                           &resp_len,
+                                           &http_options);
         uint32_t http_ms = osal_get_tick_ms() - http_start_ms;
         if (ret == 0) {
             APP_LOGI(TAG,
@@ -1009,12 +1095,16 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
             return;
         }
         APP_LOGW(TAG,
-                 "相机 JPEG 上传失败, attempt=%u/%u, ret=%d, len=%u, http_ms=%u",
+                 "相机 JPEG 上传失败, attempt=%u/%u, ret=%d, len=%u, http_ms=%u, request_id=%s",
                  (unsigned int)(attempt + 1u),
                  (unsigned int)(APP_CAMERA_UPLOAD_RETRY_COUNT + 1u),
                  ret,
                  (unsigned int)job->jpeg_len,
-                 (unsigned int)http_ms);
+                 (unsigned int)http_ms,
+                 job->request_id);
+        if (ret == -6 || service_network_is_ready() != 1) {
+            break;
+        }
         if (attempt < APP_CAMERA_UPLOAD_RETRY_COUNT) {
             osal_delay_ms(APP_CAMERA_UPLOAD_RETRY_DELAY_MS);
         }
@@ -1351,14 +1441,16 @@ int app_camera_cancel_current(void)
         return -2;
     }
 
+    int http_cancel_ret = service_network_http_cancel();
     if (queued) {
         app_camera_clear_jpeg();
         app_camera_finish_upload_request();
     }
     APP_LOGI(TAG,
-             "相机上传取消请求已接收, queued=%d, task_running=%d",
+             "相机上传取消请求已接收, queued=%d, task_running=%d, http_cancel_ret=%d",
              queued,
-             s_upload_task_running);
+             s_upload_task_running,
+             http_cancel_ret);
     app_camera_notify_task();
     return 0;
 }

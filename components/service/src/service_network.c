@@ -65,7 +65,9 @@ static int service_network_ops_is_valid(const service_network_ops_t *ops)
         ops->udp_connect == NULL ||
         ops->udp_send == NULL ||
         ops->read_downlink == NULL ||
-        ops->http_post == NULL) {
+        ops->http_post == NULL ||
+        ops->http_post_ex == NULL ||
+        ops->http_cancel == NULL) {
         return -1;
     }
 
@@ -297,4 +299,48 @@ int service_network_http_post(const char *url,
                                       timeout_ms);
     service_network_unlock_io();
     return ret;
+}
+
+int service_network_http_post_ex(const char *url,
+                                 const char *content_type,
+                                 const uint8_t *body,
+                                 uint32_t body_len,
+                                 uint8_t *resp,
+                                 uint32_t resp_size,
+                                 uint32_t *resp_len,
+                                 const service_network_http_options_t *options)
+{
+    if (s_network_ops_ready == 0u) {
+        return -1;
+    }
+
+    if (service_network_lock_io() != 0) {
+        return -2;
+    }
+    if (s_network_ops_ready == 0u || s_network_ops.http_post_ex == NULL) {
+        service_network_unlock_io();
+        return -1;
+    }
+    int ret = s_network_ops.http_post_ex(url,
+                                         content_type,
+                                         body,
+                                         body_len,
+                                         resp,
+                                         resp_size,
+                                         resp_len,
+                                         options);
+    service_network_unlock_io();
+    return ret;
+}
+
+int service_network_http_cancel(void)
+{
+    /*
+     * HTTP POST 持有网络 I/O 锁时也必须允许 UI 打断。底层 cancel API 自己负责
+     * 与活动 client 的生命周期同步，因此这里不能等待 s_network_io_mutex。
+     */
+    if (s_network_ops_ready == 0u || s_network_ops.http_cancel == NULL) {
+        return -1;
+    }
+    return s_network_ops.http_cancel();
 }
