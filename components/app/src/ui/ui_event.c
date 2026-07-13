@@ -61,7 +61,252 @@ static lv_obj_t *g_volume_overlay = NULL;
 static lv_obj_t *g_volume_slider = NULL;
 static lv_timer_t *g_volume_hide_timer = NULL;
 
+typedef struct {
+    uint8_t available;
+    uint8_t mandatory;
+    uint8_t min_battery;
+    uint32_t size;
+    char version[24];
+    char release_notes[256];
+} ui_ota_update_t;
+
+static ui_ota_update_t g_ota_update;
+static lv_obj_t *g_ota_confirm_overlay = NULL;
+static lv_obj_t *g_ota_overlay = NULL;
+static lv_obj_t *g_ota_status_label = NULL;
+static lv_obj_t *g_ota_progress = NULL;
+static lv_obj_t *g_ota_percent_label = NULL;
+static lv_obj_t *g_ota_cancel_button = NULL;
+static lv_obj_t *g_ota_cancel_dialog = NULL;
+static lv_timer_t *g_ota_recovery_timer = NULL;
+
 static void ai_answer_scroll_top(ui_ai_view_t *view);
+
+static void ota_delete_obj(lv_obj_t **obj)
+{
+    if(obj != NULL && *obj != NULL) {
+        lv_obj_delete(*obj);
+        *obj = NULL;
+    }
+}
+
+static lv_obj_t *ota_create_button(lv_obj_t *parent,
+                                   const char *text,
+                                   int32_t x,
+                                   int32_t y,
+                                   int32_t width)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_size(button, width, 34);
+    lv_obj_set_style_radius(button, 6, 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
+    lv_obj_set_style_bg_color(button, UI_COLOR_SETTINGS, 0);
+    lv_obj_t *label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_center(label);
+    return button;
+}
+
+static void ota_apply_settings_state(void)
+{
+    ui_settings_view_t *view = g_settings_view;
+    if(view == NULL || view->ota_button == NULL || view->ota_label == NULL) {
+        return;
+    }
+    if(g_ota_update.available != 0u) {
+        char text[64];
+        lv_snprintf(text, sizeof(text), "发现新版本 v%s", g_ota_update.version);
+        lv_label_set_text(view->ota_label, text);
+        lv_obj_set_style_text_color(view->ota_label, lv_color_white(), 0);
+        lv_obj_set_style_bg_color(view->ota_button,
+                                  g_ota_update.mandatory ? lv_color_hex(0xB94747) : UI_COLOR_SETTINGS,
+                                  0);
+        lv_obj_remove_state(view->ota_button, LV_STATE_DISABLED);
+    } else {
+        lv_label_set_text(view->ota_label, "当前已是最新版本");
+        lv_obj_set_style_text_color(view->ota_label, lv_color_hex(0xB8F0D0), 0);
+        lv_obj_set_style_bg_color(view->ota_button, lv_color_hex(0x181818), 0);
+        lv_obj_add_state(view->ota_button, LV_STATE_DISABLED);
+    }
+}
+
+static void ota_confirm_close_event_cb(lv_event_t *event)
+{
+    if(lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        ota_delete_obj(&g_ota_confirm_overlay);
+    }
+}
+
+static void ota_confirm_install_event_cb(lv_event_t *event)
+{
+    if(lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    ota_delete_obj(&g_ota_confirm_overlay);
+    if(g_callbacks.ota_install_requested != NULL) {
+        g_callbacks.ota_install_requested();
+    }
+}
+
+static void ota_show_install_confirmation(void)
+{
+    if(g_ota_update.available == 0u) {
+        return;
+    }
+    ota_delete_obj(&g_ota_confirm_overlay);
+    lv_obj_t *screen = lv_screen_active();
+    g_ota_confirm_overlay = lv_obj_create(screen);
+    lv_obj_remove_flag(g_ota_confirm_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_ota_confirm_overlay, UI_SCREEN_WIDTH, UI_SCREEN_HEIGHT);
+    lv_obj_set_pos(g_ota_confirm_overlay, 0, 0);
+    lv_obj_set_style_bg_color(g_ota_confirm_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_ota_confirm_overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(g_ota_confirm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(g_ota_confirm_overlay, 0, 0);
+
+    lv_obj_t *panel = lv_obj_create(g_ota_confirm_overlay);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(panel, 212, 244);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(panel, 8, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x202020), 0);
+    lv_obj_set_style_border_color(panel, UI_COLOR_SETTINGS, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_pad_all(panel, 10, 0);
+
+    lv_obj_t *title = lv_label_create(panel);
+    char title_text[64];
+    lv_snprintf(title_text, sizeof(title_text), "升级到 v%s", g_ota_update.version);
+    lv_label_set_text(title, title_text);
+    lv_obj_set_width(title, 190);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_pos(title, 0, 0);
+
+    lv_obj_t *detail = lv_label_create(panel);
+    char detail_text[96];
+    uint32_t size_tenths = (g_ota_update.size * 10u) / (1024u * 1024u);
+    lv_snprintf(detail_text,
+                sizeof(detail_text),
+                "大小 %u.%u MB  最低电量 %u%%",
+                (unsigned int)(size_tenths / 10u),
+                (unsigned int)(size_tenths % 10u),
+                (unsigned int)g_ota_update.min_battery);
+    lv_label_set_text(detail, detail_text);
+    lv_obj_set_width(detail, 190);
+    lv_obj_set_pos(detail, 0, 30);
+    lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(detail, ui_font_small(), 0);
+    lv_obj_set_style_text_color(detail, lv_color_hex(0xC8C8C8), 0);
+
+    lv_obj_t *notes = lv_label_create(panel);
+    lv_label_set_text(notes,
+                      g_ota_update.release_notes[0] != '\0' ?
+                      g_ota_update.release_notes : "系统稳定性与功能更新");
+    lv_obj_set_pos(notes, 4, 58);
+    lv_obj_set_size(notes, 182, 48);
+    lv_label_set_long_mode(notes, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(notes, ui_font_small(), 0);
+    lv_obj_set_style_text_color(notes, lv_color_white(), 0);
+
+    lv_obj_t *warning = lv_label_create(panel);
+    lv_label_set_text(warning,
+                      "升级期间对讲、AI和相机将暂停，\n请保持供电和WiFi连接。");
+    lv_obj_set_pos(warning, 4, 116);
+    lv_obj_set_size(warning, 182, 54);
+    lv_obj_set_style_text_font(warning, ui_font_small(), 0);
+    lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(warning,
+                                g_ota_update.mandatory ? lv_color_hex(0xFF8A8A) : lv_color_hex(0xF0D27A),
+                                0);
+
+    lv_obj_t *later = ota_create_button(panel, "稍后", 4, 188, 82);
+    lv_obj_set_style_bg_color(later, lv_color_hex(0x424242), 0);
+    lv_obj_add_event_cb(later, ota_confirm_close_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *install = ota_create_button(panel, "开始升级", 104, 188, 82);
+    lv_obj_add_event_cb(install, ota_confirm_install_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(g_ota_confirm_overlay);
+}
+
+static void settings_ota_event_cb(lv_event_t *event)
+{
+    if(lv_event_get_code(event) == LV_EVENT_CLICKED && g_ota_update.available != 0u) {
+        ota_show_install_confirmation();
+    }
+}
+
+static void ota_cancel_dialog_close_event_cb(lv_event_t *event)
+{
+    if(lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        ota_delete_obj(&g_ota_cancel_dialog);
+    }
+}
+
+static void ota_cancel_confirm_event_cb(lv_event_t *event)
+{
+    if(lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    ota_delete_obj(&g_ota_cancel_dialog);
+    if(g_ota_cancel_button != NULL) {
+        lv_obj_add_state(g_ota_cancel_button, LV_STATE_DISABLED);
+    }
+    if(g_ota_status_label != NULL) {
+        lv_label_set_text(g_ota_status_label, "正在停止升级");
+    }
+    if(g_callbacks.ota_cancel_requested != NULL) {
+        g_callbacks.ota_cancel_requested();
+    }
+}
+
+static void ota_cancel_button_event_cb(lv_event_t *event)
+{
+    if(lv_event_get_code(event) != LV_EVENT_CLICKED || g_ota_overlay == NULL) {
+        return;
+    }
+    ota_delete_obj(&g_ota_cancel_dialog);
+    g_ota_cancel_dialog = lv_obj_create(g_ota_overlay);
+    lv_obj_remove_flag(g_ota_cancel_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(g_ota_cancel_dialog, 204, 148);
+    lv_obj_align(g_ota_cancel_dialog, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_set_style_radius(g_ota_cancel_dialog, 8, 0);
+    lv_obj_set_style_bg_color(g_ota_cancel_dialog, lv_color_hex(0x202020), 0);
+    lv_obj_set_style_border_color(g_ota_cancel_dialog, lv_color_hex(0x686868), 0);
+    lv_obj_set_style_border_width(g_ota_cancel_dialog, 1, 0);
+
+    lv_obj_t *text = lv_label_create(g_ota_cancel_dialog);
+    lv_label_set_text(text, "停止升级？\n已下载内容将作废，\n下次需要重新下载。");
+    lv_obj_set_size(text, 176, 76);
+    lv_obj_align(text, LV_ALIGN_TOP_MID, 0, 12);
+    lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(text, lv_color_white(), 0);
+    lv_obj_set_style_text_font(text, ui_font_small(), 0);
+
+    lv_obj_t *back = ota_create_button(g_ota_cancel_dialog, "继续升级", 8, 98, 78);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x424242), 0);
+    lv_obj_add_event_cb(back, ota_cancel_dialog_close_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *stop = ota_create_button(g_ota_cancel_dialog, "停止", 102, 98, 78);
+    lv_obj_set_style_bg_color(stop, lv_color_hex(0xB94747), 0);
+    lv_obj_add_event_cb(stop, ota_cancel_confirm_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(g_ota_cancel_dialog);
+}
+
+static void ota_recovery_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    ota_delete_obj(&g_ota_overlay);
+    g_ota_status_label = NULL;
+    g_ota_progress = NULL;
+    g_ota_percent_label = NULL;
+    g_ota_cancel_button = NULL;
+    g_ota_cancel_dialog = NULL;
+    if(g_ota_recovery_timer != NULL) {
+        lv_timer_delete(g_ota_recovery_timer);
+        g_ota_recovery_timer = NULL;
+    }
+}
 
 /* ==========================================================================
  * 通用 UI 工具函数
@@ -1467,6 +1712,114 @@ void ui_event_set_settings_brightness(int32_t brightness)
     settings_refresh_brightness_label(view);
 }
 
+void ui_event_set_ota_update(int available,
+                             const char *version,
+                             uint32_t size,
+                             int min_battery,
+                             int mandatory,
+                             const char *release_notes)
+{
+    memset(&g_ota_update, 0, sizeof(g_ota_update));
+    g_ota_update.available = available != 0 ? 1u : 0u;
+    g_ota_update.mandatory = mandatory != 0 ? 1u : 0u;
+    g_ota_update.min_battery = (uint8_t)(min_battery < 0 ? 0 : (min_battery > 100 ? 100 : min_battery));
+    g_ota_update.size = size;
+    lv_snprintf(g_ota_update.version, sizeof(g_ota_update.version), "%s", version != NULL ? version : "");
+    lv_snprintf(g_ota_update.release_notes,
+                sizeof(g_ota_update.release_notes),
+                "%s",
+                release_notes != NULL ? release_notes : "");
+    ota_apply_settings_state();
+}
+
+void ui_event_ota_show(const char *message, int percent, int cancellable)
+{
+    ota_delete_obj(&g_ota_confirm_overlay);
+    if(g_ota_overlay == NULL) {
+        lv_obj_t *screen = lv_screen_active();
+        g_ota_overlay = lv_obj_create(screen);
+        lv_obj_remove_flag(g_ota_overlay, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(g_ota_overlay, UI_SCREEN_WIDTH, UI_SCREEN_HEIGHT);
+        lv_obj_set_pos(g_ota_overlay, 0, 0);
+        lv_obj_set_style_bg_color(g_ota_overlay, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(g_ota_overlay, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(g_ota_overlay, 0, 0);
+        lv_obj_set_style_pad_all(g_ota_overlay, 0, 0);
+
+        lv_obj_t *spinner = lv_spinner_create(g_ota_overlay);
+        lv_obj_set_size(spinner, 42, 42);
+        lv_obj_align(spinner, LV_ALIGN_CENTER, 0, -72);
+        lv_obj_set_style_arc_width(spinner, 4, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(spinner, 4, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(spinner, lv_color_hex(0x303030), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(spinner, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
+
+        g_ota_status_label = lv_label_create(g_ota_overlay);
+        lv_obj_set_size(g_ota_status_label, 210, 32);
+        lv_obj_align(g_ota_status_label, LV_ALIGN_CENTER, 0, -22);
+        lv_obj_set_style_text_align(g_ota_status_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(g_ota_status_label, lv_color_white(), 0);
+
+        g_ota_progress = lv_bar_create(g_ota_overlay);
+        lv_bar_set_range(g_ota_progress, 0, 100);
+        lv_obj_set_size(g_ota_progress, 168, 8);
+        lv_obj_align(g_ota_progress, LV_ALIGN_CENTER, 0, 22);
+        lv_obj_set_style_bg_color(g_ota_progress, lv_color_hex(0x303030), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(g_ota_progress, UI_COLOR_SETTINGS, LV_PART_INDICATOR);
+
+        g_ota_percent_label = lv_label_create(g_ota_overlay);
+        lv_obj_set_size(g_ota_percent_label, 80, 24);
+        lv_obj_align(g_ota_percent_label, LV_ALIGN_CENTER, 0, 48);
+        lv_obj_set_style_text_align(g_ota_percent_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(g_ota_percent_label, lv_color_hex(0xC8C8C8), 0);
+
+        g_ota_cancel_button = ota_create_button(g_ota_overlay, "停止升级", 66, 258, 108);
+        lv_obj_add_event_cb(g_ota_cancel_button, ota_cancel_button_event_cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    lv_label_set_text(g_ota_status_label, message != NULL ? message : "正在准备升级");
+    if(percent >= 0) {
+        char percent_text[16];
+        int value = percent > 100 ? 100 : percent;
+        lv_bar_set_value(g_ota_progress, value, LV_ANIM_OFF);
+        lv_snprintf(percent_text, sizeof(percent_text), "%d%%", value);
+        lv_label_set_text(g_ota_percent_label, percent_text);
+        lv_obj_remove_flag(g_ota_progress, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(g_ota_percent_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(g_ota_progress, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ota_percent_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(cancellable != 0) {
+        lv_obj_remove_state(g_ota_cancel_button, LV_STATE_DISABLED);
+        lv_obj_remove_flag(g_ota_cancel_button, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        ota_delete_obj(&g_ota_cancel_dialog);
+        lv_obj_add_flag(g_ota_cancel_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_move_foreground(g_ota_overlay);
+}
+
+void ui_event_ota_finish_recovery(const char *message)
+{
+    (void)message;
+    if(g_ota_overlay == NULL) {
+        ui_shell_switch_to(UI_APP_ID_INTERCOM);
+        return;
+    }
+    ota_delete_obj(&g_ota_cancel_dialog);
+    lv_obj_clean(g_ota_overlay);
+    lv_obj_t *logo_image = lv_image_create(g_ota_overlay);
+    lv_image_set_src(logo_image, &logo);
+    lv_obj_set_pos(logo_image, 0, 0);
+    ui_shell_switch_to(UI_APP_ID_INTERCOM);
+    if(g_ota_recovery_timer != NULL) {
+        lv_timer_delete(g_ota_recovery_timer);
+    }
+    g_ota_recovery_timer = lv_timer_create(ota_recovery_timer_cb, 1000u, NULL);
+    lv_timer_set_repeat_count(g_ota_recovery_timer, 1);
+}
+
 void ui_event_register_settings(ui_settings_view_t *view)
 {
     if(view == NULL) {
@@ -1495,9 +1848,13 @@ void ui_event_register_settings(ui_settings_view_t *view)
     if(view->brightness_slider != NULL) {
         lv_obj_add_event_cb(view->brightness_slider, settings_brightness_slider_event_cb, LV_EVENT_VALUE_CHANGED, view);
     }
+    if(view->ota_button != NULL) {
+        lv_obj_add_event_cb(view->ota_button, settings_ota_event_cb, LV_EVENT_CLICKED, view);
+    }
     settings_refresh_network_selected(view);
     settings_refresh_wlan_ssid(view);
     ui_event_set_settings_brightness(g_settings_brightness);
+    ota_apply_settings_state();
     if(g_settings_refresh_timer == NULL) {
         g_settings_refresh_timer = lv_timer_create(settings_refresh_timer_cb, 1000, view);
     } else {

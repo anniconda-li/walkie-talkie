@@ -70,6 +70,8 @@ typedef struct {
     int (*settings_4g_select_requested)(void);                     /**< 4G 切换请求。 */
     int (*settings_wifi_ssid_get)(char *ssid, size_t size);        /**< 查询当前 WLAN SSID。 */
     void (*power_shutdown_confirmed)(void);                        /**< 用户确认关机回调。 */
+    void (*ota_install_requested)(void);                           /**< 用户确认安装缓存更新。 */
+    void (*ota_cancel_requested)(void);                            /**< 用户确认停止升级。 */
 } ui_event_callbacks_t;
 
 /**
@@ -121,6 +123,8 @@ typedef struct {
 typedef struct {
     lv_obj_t *firmware_label;         /**< 固件版本标题标签。 */
     lv_obj_t *version_label;          /**< 固件版本号标签。 */
+    lv_obj_t *ota_button;             /**< OTA有更新/无更新状态按钮。 */
+    lv_obj_t *ota_label;              /**< OTA状态文本。 */
     lv_obj_t *wlan_button;            /**< WLAN 模式选择框。 */
     lv_obj_t *cellular_button;        /**< 4G 模式选择框。 */
     lv_obj_t *wlan_ssid_label;        /**< WLAN 当前热点标签。 */
@@ -213,6 +217,15 @@ void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
 
 void ui_event_set_settings_volume(int32_t volume);
 void ui_event_set_settings_brightness(int32_t brightness);
+
+void ui_event_set_ota_update(int available,
+                             const char *version,
+                             uint32_t size,
+                             int min_battery,
+                             int mandatory,
+                             const char *release_notes);
+void ui_event_ota_show(const char *message, int percent, int cancellable);
+void ui_event_ota_finish_recovery(const char *message);
 
 /**
  * @brief 注册设置页面视图对象。

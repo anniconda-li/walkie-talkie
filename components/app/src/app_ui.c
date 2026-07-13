@@ -371,3 +371,43 @@ int app_ui_settings_show_4g_select_result(ui_settings_4g_status_t status, int re
     service_screen_unlock();
     return 0;
 }
+
+int app_ui_set_ota_update(int available,
+                          const char *version,
+                          uint32_t size,
+                          int min_battery,
+                          int mandatory,
+                          const char *release_notes)
+{
+    if (!s_ui_created || service_screen_lock(500u) != 0) {
+        return -1;
+    }
+    ui_event_set_ota_update(available,
+                            version,
+                            size,
+                            min_battery,
+                            mandatory,
+                            release_notes);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_ota_show(const char *message, int percent, int cancellable)
+{
+    if (!s_ui_created || service_screen_lock(500u) != 0) {
+        return -1;
+    }
+    ui_event_ota_show(message, percent, cancellable);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_ota_finish_recovery(const char *message)
+{
+    if (!s_ui_created || service_screen_lock(1000u) != 0) {
+        return -1;
+    }
+    ui_event_ota_finish_recovery(message);
+    service_screen_unlock();
+    return 0;
+}

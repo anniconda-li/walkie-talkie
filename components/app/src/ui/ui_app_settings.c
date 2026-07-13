@@ -328,13 +328,21 @@ lv_obj_t * ui_app_settings_create(lv_obj_t * parent)
     lv_obj_set_style_text_align(g_settings_view.version_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_color(g_settings_view.version_label, lv_color_white(), 0);
 
-    lv_obj_t *ota_label = lv_label_create(firmware_box);
-    lv_label_set_text(ota_label, "已是最新版本");
-    lv_obj_set_pos(ota_label, 12, 42);
-    lv_obj_set_width(ota_label, 164);
-    lv_label_set_long_mode(ota_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_align(ota_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_color(ota_label, lv_color_make(0xB8, 0xF0, 0xD0), 0);
+    g_settings_view.ota_button = lv_button_create(firmware_box);
+    lv_obj_set_pos(g_settings_view.ota_button, 8, 34);
+    lv_obj_set_size(g_settings_view.ota_button, 172, 30);
+    lv_obj_set_style_radius(g_settings_view.ota_button, 6, 0);
+    lv_obj_set_style_bg_color(g_settings_view.ota_button, lv_color_make(0x18, 0x18, 0x18), 0);
+    lv_obj_set_style_shadow_width(g_settings_view.ota_button, 0, 0);
+    lv_obj_set_style_border_width(g_settings_view.ota_button, 0, 0);
+
+    g_settings_view.ota_label = lv_label_create(g_settings_view.ota_button);
+    lv_label_set_text(g_settings_view.ota_label, "当前已是最新版本");
+    lv_obj_set_width(g_settings_view.ota_label, 160);
+    lv_obj_center(g_settings_view.ota_label);
+    lv_label_set_long_mode(g_settings_view.ota_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(g_settings_view.ota_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(g_settings_view.ota_label, lv_color_make(0xB8, 0xF0, 0xD0), 0);
 
     if (service_screen_supports_brightness() != 0) {
         lv_obj_t *brightness_box = create_setting_box(g_settings_panel, 2, 152, 188, 68);

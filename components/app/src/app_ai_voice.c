@@ -2125,3 +2125,14 @@ esp_err_t app_ai_voice_cancel_current(void)
 
     return ESP_OK;
 }
+
+int app_ai_voice_is_busy(void)
+{
+    app_ai_voice_state_t state = s_ai_state;
+    return (s_ai_recording != 0 ||
+            s_reply_play_busy != 0 ||
+            (state != APP_AI_STATE_IDLE &&
+             state != APP_AI_STATE_AUDIO_READY &&
+             state != APP_AI_STATE_CANCELED &&
+             state != APP_AI_STATE_FAILED)) ? 1 : 0;
+}

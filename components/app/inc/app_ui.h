@@ -104,6 +104,15 @@ int app_ui_settings_show_wlan_scan_result(const ui_settings_wifi_ap_t *items,
 int app_ui_settings_show_wifi_connect_result(int ret);
 int app_ui_settings_show_4g_select_result(ui_settings_4g_status_t status, int ret);
 
+int app_ui_set_ota_update(int available,
+                          const char *version,
+                          uint32_t size,
+                          int min_battery,
+                          int mandatory,
+                          const char *release_notes);
+int app_ui_ota_show(const char *message, int percent, int cancellable);
+int app_ui_ota_finish_recovery(const char *message);
+
 #ifdef __cplusplus
 }
 #endif

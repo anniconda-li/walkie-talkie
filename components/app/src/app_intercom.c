@@ -409,6 +409,8 @@ static int32_t s_current_channel = APP_BUSINESS_DEFAULT_CHANNEL;
 static volatile int s_ws_connected = 0;
 /** @brief 网络切换时请求 WebSocket 任务关闭旧 socket 并重连。 */
 static volatile int s_ws_force_reconnect = 0;
+/** @brief OTA维护模式下暂停WebSocket连接和PTT。 */
+static volatile int s_ota_suspended = 0;
 /** @brief WebSocket 断线后请求 RX 任务清空旧播放缓存。 */
 static volatile int s_ws_reset_rx = 0;
 /** @brief WebSocket 当前 socket，握手成功后用于同一连接全双工收发。 */
@@ -990,7 +992,7 @@ static int app_intercom_send_control(uint8_t type)
 
 static int app_intercom_tx_ready(void)
 {
-    return (s_ws_connected != 0 && s_ws_force_reconnect == 0) ? 1 : 0;
+    return (s_ota_suspended == 0 && s_ws_connected != 0 && s_ws_force_reconnect == 0) ? 1 : 0;
 }
 
 static int app_intercom_wait_tx_ready(uint32_t timeout_ms)
@@ -1784,6 +1786,13 @@ static void app_intercom_ws_task(void *arg)
     uint32_t reconnect_delay_ms = APP_INTERCOM_WS_RECONNECT_MS;
 
     while (1) {
+        if (s_ota_suspended != 0) {
+            s_ws_connected = 0;
+            s_ws_force_reconnect = 0;
+            s_ws_reset_rx = 1;
+            (void)osal_task_notify_take(APP_INTERCOM_WS_NO_NET_RECHECK_MS);
+            continue;
+        }
         if (service_network_is_ready() != 1) {
             if (s_ws_connected != 0) {
                 s_ws_connected = 0;
@@ -1860,7 +1869,7 @@ static void app_intercom_ws_task(void *arg)
         (void)app_intercom_send_control(APP_INTERCOM_PKT_CHANNEL);
 
         uint32_t last_ping_ms = osal_get_tick_ms();
-        while (service_network_is_ready() == 1 && s_ws_force_reconnect == 0) {
+        while (service_network_is_ready() == 1 && s_ws_force_reconnect == 0 && s_ota_suspended == 0) {
             uint16_t packet_len = 0u;
             ret = app_intercom_ws_recv_frame(sock, packet, &packet_len);
             if (ret == 0) {
@@ -3711,6 +3720,9 @@ void app_intercom_set_channel(int32_t channel)
 void app_intercom_ptt_start(int32_t channel)
 {
     s_current_channel = channel > 0 ? channel : s_current_channel;
+    if (s_ota_suspended != 0) {
+        return;
+    }
 #if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
     app_intercom_opus_test_ptt_start();
     return;
@@ -3771,4 +3783,34 @@ void app_intercom_network_changed(void)
     if (s_heartbeat_task != NULL) {
         (void)osal_task_notify_give(s_heartbeat_task);
     }
+}
+
+void app_intercom_suspend(void)
+{
+    s_ota_suspended = 1;
+    s_ptt_active = 0;
+    s_ws_connected = 0;
+    s_ws_force_reconnect = 1;
+    s_ws_reset_rx = 1;
+    app_intercom_ws_rx_clear();
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
+    if (s_heartbeat_task != NULL) {
+        (void)osal_task_notify_give(s_heartbeat_task);
+    }
+}
+
+void app_intercom_resume(void)
+{
+    s_ota_suspended = 0;
+    s_ws_force_reconnect = 0;
+    if (s_ws_task != NULL) {
+        (void)osal_task_notify_give(s_ws_task);
+    }
+}
+
+int app_intercom_is_busy(void)
+{
+    return app_intercom_audio_busy();
 }

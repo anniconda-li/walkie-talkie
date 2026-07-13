@@ -33,6 +33,7 @@
 #include "app_config.h"
 #include "app_intercom.h"
 #include "app_network.h"
+#include "app_ota.h"
 #include "app_status_monitor.h"
 #include "app_ui.h"
 #include "d_power_control.h"
@@ -60,6 +61,7 @@ static const char *TAG = "app_business";
 
 /** @brief 业务启动是否已完成（防重复初始化）。 */
 static volatile int s_started = 0;
+static volatile int s_ota_mode = 0;
 
 /**
  * @brief 音频会话互斥锁。
@@ -213,6 +215,9 @@ static void app_business_on_channel_changed(int32_t channel)
 /** @brief PTT 按下 → 启动对讲发送流程。 */
 static void app_business_on_ptt_started(int32_t channel)
 {
+    if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
+        return;
+    }
     app_intercom_ptt_start(channel);
 }
 
@@ -226,6 +231,9 @@ static void app_business_on_ptt_stopped(int32_t channel)
 /** @brief AI 按钮按下 → 开始 AI 录音。 */
 static void app_business_on_ai_started(void)
 {
+    if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
+        return;
+    }
     app_ai_voice_record_start();
 }
 
@@ -256,6 +264,9 @@ static void app_business_on_ai_cancel_requested(void)
 /** @brief 相机页进入 → 启动预览。 */
 static void app_business_on_camera_entered(void)
 {
+    if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
+        return;
+    }
     app_camera_enter();
 }
 
@@ -543,6 +554,9 @@ static int app_business_on_4g_select(void)
 static void app_business_on_power_key_long_press(void *user_data)
 {
     (void)user_data;
+    if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
+        return;
+    }
     (void)app_ui_set_screen_on(1);
     (void)app_ui_show_power_dialog();
 }
@@ -550,14 +564,30 @@ static void app_business_on_power_key_long_press(void *user_data)
 static void app_business_on_power_key_short_press(void *user_data)
 {
     (void)user_data;
+    if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
+        return;
+    }
     (void)app_ui_toggle_screen_on();
 }
 
 static void app_business_on_power_shutdown_confirmed(void)
 {
+    if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
+        return;
+    }
     (void)app_ui_prepare_shutdown_blackout();
     osal_delay_ms(120u);
     (void)d_power_control_shutdown();
+}
+
+static void app_business_on_ota_install_requested(void)
+{
+    (void)app_ota_request_install();
+}
+
+static void app_business_on_ota_cancel_requested(void)
+{
+    (void)app_ota_request_cancel();
 }
 
 /**
@@ -592,6 +622,8 @@ static void app_business_register_ui_callbacks(void)
         .settings_4g_select_requested = app_business_on_4g_select,
         .settings_wifi_ssid_get = app_business_get_wifi_ssid,
         .power_shutdown_confirmed = app_business_on_power_shutdown_confirmed,
+        .ota_install_requested = app_business_on_ota_install_requested,
+        .ota_cancel_requested = app_business_on_ota_cancel_requested,
     };
 
     ui_event_set_callbacks(&callbacks);
@@ -677,6 +709,12 @@ int app_business_start(void)
         return ret;
     }
 
+    ret = app_ota_start();
+    if (ret != 0) {
+        APP_LOGE(TAG, "OTA后台任务启动失败, ret=%d", ret);
+        return ret;
+    }
+
     s_started = 1;
     APP_LOGI(TAG, "业务启动完成, device=%s, ai=%s, intercom_ws=%s:%d, channel=%d",
              APP_DEVICE_ID,
@@ -685,4 +723,48 @@ int app_business_start(void)
              APP_BUSINESS_WS_PORT,
              APP_BUSINESS_DEFAULT_CHANNEL);
     return 0;
+}
+
+int app_business_enter_ota_mode(unsigned int timeout_ms)
+{
+    s_ota_mode = 1;
+    app_intercom_ptt_stop();
+    app_intercom_suspend();
+    (void)app_ai_voice_cancel_current();
+    (void)app_camera_cancel_current();
+    app_camera_exit();
+
+    uint32_t start_ms = osal_get_tick_ms();
+    while (app_business_audio_session_is_busy() != 0 ||
+           app_intercom_is_busy() != 0 ||
+           app_ai_voice_is_busy() != 0 ||
+           app_camera_is_busy() != 0) {
+        if (app_ota_cancel_is_requested() != 0) {
+            return -2;
+        }
+        if ((uint32_t)(osal_get_tick_ms() - start_ms) >= timeout_ms) {
+            APP_LOGW(TAG,
+                     "OTA维护模式等待业务停止超时, audio=%d intercom=%d ai=%d camera=%d",
+                     app_business_audio_session_is_busy(),
+                     app_intercom_is_busy(),
+                     app_ai_voice_is_busy(),
+                     app_camera_is_busy());
+            return -1;
+        }
+        osal_delay_ms(100u);
+    }
+    APP_LOGI(TAG, "OTA维护模式已就绪");
+    return 0;
+}
+
+void app_business_exit_ota_mode(void)
+{
+    app_intercom_resume();
+    s_ota_mode = 0;
+    APP_LOGI(TAG, "OTA维护模式已解除");
+}
+
+int app_business_is_ota_mode(void)
+{
+    return s_ota_mode;
 }
