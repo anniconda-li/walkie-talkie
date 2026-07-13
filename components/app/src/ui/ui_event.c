@@ -19,6 +19,7 @@
  * - 设置：音量滑块变化
  */
 #include "ui_event.h"
+#include "ui.h"
 #include "ui_assets.h"
 #include "app_config.h"
 #include "ui_font.h"
