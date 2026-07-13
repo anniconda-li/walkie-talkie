@@ -33,13 +33,29 @@ ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、WebSocket 实�
 
 ## OTA 开发与发布
 
-OTA 固件版本只由项目根目录 `CMakeLists.txt` 中的 `PROJECT_VER` 管理，格式必须为严格的 `x.y.z`。在 ESP-IDF PowerShell 环境中执行：
+OTA 固件版本只由项目根目录 `CMakeLists.txt` 中的 `PROJECT_VER` 管理，格式必须为严格的 `x.y.z`。`device_id` 表示具体设备身份，`hardware` 表示电气兼容的固件类型；两者独立，运行时不得根据 `device_id` 推断 `hardware`。
+
+当前设备分支在源码中固定 OTA hardware：
+
+- `device/001`：`APP_DEVICE_ID=walkie-01`，`APP_OTA_HARDWARE=walkie-v1-rev-1`。
+- `device/002`：`APP_DEVICE_ID=walkie-02`，`APP_OTA_HARDWARE=walkie-v1-rev-2`。
+
+日常发布分两步。第一步，用户在 ESP-IDF 环境中手动构建当前设备分支，生成：
+
+```powershell
+build\walkie-talkiev1.bin
+build\project_description.json
+```
+
+第二步，运行发布脚本：
 
 ```powershell
 .\scripts\publish_ota.ps1 -Notes "本次更新说明"
 ```
 
-先使用 ESP-IDF 完成构建，再运行发布脚本。脚本不会调用 `idf.py build`，只会校验现有 `build\walkie-talkiev1.bin`、`build\project_description.json` 与 `PROJECT_VER` 一致，然后计算文件大小和 SHA-256、上传 application bin，并调用 OTA 容器的发布 CLI。默认目标为 `root@139.129.17.67`，可用 `-Server` 和 `-User` 覆盖；脚本不保存密码、私钥或其他凭据。真实发布需要系统可用的 OpenSSH `scp`/`ssh`，并提前配置 SSH key 或 agent；脚本使用 `BatchMode=yes`，不会交互式索取密码。
+脚本只校验、上传和发布，绝不执行构建。它从 `components/app/inc/app_config.h` 读取唯一且受支持的 `APP_OTA_HARDWARE`，校验 `project_description.json` 的版本和 application bin，并确认现有 bin 内含同一个 hardware 标识。源码、构建元数据或 bin 不一致时会在上传前退出，并提示返回 ESP-IDF 环境手动重新构建。上传文件名为 `{hardware}-{version}.bin`，服务器 `publish --hardware` 使用同一解析值。
+
+默认目标为 `root@139.129.17.67`，可用 `-Server` 和 `-User` 覆盖。脚本不保存密码、私钥或其他凭据；真实发布需要系统可用的 OpenSSH `scp`/`ssh`，并提前配置 SSH key 或 agent。脚本使用 `BatchMode=yes`，不会交互式索取密码。
 
 发布前可完全离线检查现有构建产物和操作计划：
 
@@ -47,7 +63,14 @@ OTA 固件版本只由项目根目录 `CMakeLists.txt` 中的 `PROJECT_VER` 管�
 .\scripts\publish_ota.ps1 -DryRun -Notes "OTA 测试版本，包含 `"双引号`" 和 '单引号'"
 ```
 
-`-DryRun` 不执行 `scp` 或 `ssh`，也不会修改服务器。发布说明使用 UTF-8 Base64 传输，原始 Notes 不会直接拼入远程 shell 命令。服务器若拒绝重复的 `hardware/version`，脚本会保留原始失败并立即以非零状态退出，不会尝试覆盖发布记录，也不会删除本地固件或服务器 incoming 文件。
+`-DryRun` 显示当前 Git 分支、独立的 device_id、hardware、version、本地 bin、远程文件名和 bin hardware 标识检查结果，不执行 `scp` 或 `ssh`，也不会修改服务器。发布说明使用 UTF-8 Base64 传输，原始 Notes 不会直接拼入远程 shell 命令。服务器若拒绝重复的 `hardware/version`，脚本会保留原始失败并立即以非零状态退出，不会尝试覆盖发布记录，也不会删除本地固件或服务器 incoming 文件。
+
+### 从旧 OTA hardware 迁移
+
+- 旧 `walkie-v1` 不能自动猜测并迁移到 `walkie-v1-rev-1` 或 `walkie-v1-rev-2`。
+- `device/001` 首次需要通过 USB 烧录一次内置 `walkie-v1-rev-1` 的完整固件。
+- `device/002` 首次需要通过 USB 烧录一次内置 `walkie-v1-rev-2` 的完整固件。
+- 完成首次 USB 迁移并确认启动后，才分别使用对应 hardware 的 OTA。
 
 ## AI 语音链路
 
