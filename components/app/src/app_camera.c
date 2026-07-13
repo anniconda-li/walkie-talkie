@@ -451,14 +451,11 @@ static int app_camera_prepare_upload_identity(app_camera_upload_job_t *job)
     s_upload_sequence++;
     int written = snprintf(job->request_id,
                            sizeof(job->request_id),
-                           "%s-camera-%08x-%08x-%02x%02x%02x%02x",
+                           "%s-camera-%08x-%08x-%.8s",
                            APP_DEVICE_ID,
                            (unsigned int)job->queued_at_ms,
                            (unsigned int)s_upload_sequence,
-                           (unsigned int)job->jpeg_buf[0],
-                           (unsigned int)(job->jpeg_len > 1u ? job->jpeg_buf[1] : 0u),
-                           (unsigned int)(job->jpeg_len > 2u ? job->jpeg_buf[2] : 0u),
-                           (unsigned int)(job->jpeg_len > 3u ? job->jpeg_buf[3] : 0u));
+                           job->content_sha256);
     if (written <= 0 || (size_t)written >= sizeof(job->request_id)) {
         return -3;
     }
