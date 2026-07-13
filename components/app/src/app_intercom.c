@@ -1807,14 +1807,17 @@ static void app_intercom_ws_task(void *arg)
         }
 
         s_ws_force_reconnect = 0;
+        uint32_t connect_start_ms = osal_get_tick_ms();
         int sock = app_intercom_ws_connect_socket();
+        uint32_t connect_ms = (uint32_t)(osal_get_tick_ms() - connect_start_ms);
         if (sock < 0) {
             APP_LOGW(TAG,
-                     "intercom_ws event=connect_fail device=%s host=%s port=%d ret=%d retry_ms=%u",
+                     "intercom_ws event=connect_fail device=%s host=%s port=%d ret=%d connect_ms=%u retry_ms=%u",
                      APP_DEVICE_ID,
                      APP_BUSINESS_SERVER_HOST,
                      APP_BUSINESS_WS_PORT,
                      sock,
+                     (unsigned int)connect_ms,
                      (unsigned int)reconnect_delay_ms);
             (void)osal_task_notify_take(reconnect_delay_ms);
             reconnect_delay_ms = reconnect_delay_ms < APP_INTERCOM_WS_RECONNECT_MAX_MS / 2u ?
@@ -1851,12 +1854,13 @@ static void app_intercom_ws_task(void *arg)
         s_ws_reset_rx = 0;
         app_intercom_ws_rx_clear();
         APP_LOGI(TAG,
-                 "intercom_ws event=connected device=%s host=%s port=%d route=%s ch=%d",
+                 "intercom_ws event=connected device=%s host=%s port=%d route=%s ch=%d connect_ms=%u",
                  APP_DEVICE_ID,
                  APP_BUSINESS_SERVER_HOST,
                  APP_BUSINESS_WS_PORT,
                  APP_BUSINESS_WS_ROUTE_INTERCOM,
-                 (int)s_current_channel);
+                 (int)s_current_channel,
+                 (unsigned int)connect_ms);
         if (s_rx_ui_reconnecting != 0u && s_ptt_active == 0) {
             s_rx_ui_reconnecting = 0u;
             (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
