@@ -10,8 +10,6 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$User = "root",
 
-    [switch]$SkipBuild,
-
     [switch]$DryRun
 )
 
@@ -154,33 +152,9 @@ cd __DEPLOY_DIR__ && NOTES_B64='__NOTES_B64__' && NOTES="$(printf '%s' "$NOTES_B
     Write-Host ("Notes        : {0}" -f $Notes)
     Write-Host "Notes transport: UTF-8 Base64 (raw notes are not inserted into the remote shell command)"
 
-    if ($SkipBuild) {
-        Write-Step "Build skipped by -SkipBuild"
-    }
-    elseif ($DryRun) {
-        Write-Step "DryRun build plan"
-        Write-Host ("[DryRun] cd {0}" -f $projectRoot)
-        Write-Host "[DryRun] idf.py build"
-    }
-    else {
-        Write-Step "Building firmware"
-        Push-Location $projectRoot
-        try {
-            Invoke-NativeChecked -Command "idf.py" -Arguments @("build") -Operation "idf.py build"
-        }
-        finally {
-            Pop-Location
-        }
-    }
-
     $firmwareExists = Test-Path -LiteralPath $firmwarePath -PathType Leaf
     if (-not $firmwareExists) {
-        if ($DryRun -and -not $SkipBuild) {
-            Write-Warning "Firmware does not exist yet because DryRun did not execute the planned build."
-        }
-        else {
-            throw "Firmware not found: $firmwarePath"
-        }
+        throw "Firmware not found: $firmwarePath. Build it with ESP-IDF before publishing."
     }
 
     $buildDescription = Get-BuildDescription -DescriptionPath $descriptionPath
@@ -189,16 +163,10 @@ cd __DEPLOY_DIR__ && NOTES_B64='__NOTES_B64__' && NOTES="$(printf '%s' "$NOTES_B
         $builtAppBin = [string]$buildDescription.app_bin
         $metadataMatches = ($builtVersion -eq $version -and $builtAppBin -eq "walkie-talkiev1.bin")
         if (-not $metadataMatches) {
-            $message = "Build metadata mismatch: PROJECT_VER=$version, built version=$builtVersion, app_bin=$builtAppBin."
-            if ($DryRun) {
-                Write-Warning $message
-            }
-            else {
-                throw $message
-            }
+            throw "Build metadata mismatch: PROJECT_VER=$version, built version=$builtVersion, app_bin=$builtAppBin. Rebuild with ESP-IDF before publishing."
         }
     }
-    elseif (-not $DryRun) {
+    else {
         throw "Build metadata not found: $descriptionPath"
     }
 
