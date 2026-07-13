@@ -168,6 +168,9 @@ static int service_init_network_wifi_http_post_ex(
     if (options != NULL) {
         wifi_options.request_id = options->request_id;
         wifi_options.content_sha256 = options->content_sha256;
+        wifi_options.image_sha256 = options->image_sha256;
+        wifi_options.chunk_sha256 = options->chunk_sha256;
+        wifi_options.status_code = options->status_code;
         wifi_options.upload_idle_timeout_ms = options->upload_idle_timeout_ms;
         wifi_options.upload_total_timeout_ms = options->upload_total_timeout_ms;
         wifi_options.response_timeout_ms = options->response_timeout_ms;

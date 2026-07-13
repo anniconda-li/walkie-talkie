@@ -43,6 +43,9 @@ typedef struct {
 typedef struct {
     const char *request_id;       /**< 可选幂等请求 ID。 */
     const char *content_sha256;   /**< 可选请求体 SHA-256。 */
+    const char *image_sha256;     /**< 可选完整图像 SHA-256。 */
+    const char *chunk_sha256;     /**< 可选当前分片 SHA-256。 */
+    int *status_code;             /**< 可选 HTTP 响应状态码输出，包括非 2xx。 */
     uint32_t upload_idle_timeout_ms;  /**< 上传单次写入无进展超时。 */
     uint32_t upload_total_timeout_ms; /**< 请求体整体上传上限。 */
     uint32_t response_timeout_ms;     /**< 请求体发完后的响应等待超时。 */
