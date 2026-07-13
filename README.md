@@ -31,6 +31,30 @@ ESP-IDF 对讲机固件项目，当前覆盖 WiFi/ML307C 网络、WebSocket 实�
 
 网络后端由 service 装配层选择并暴露为统一接口。WiFi 和 ML307C 都通过 `service_network` 向 app 层提供 TCP、HTTP POST 和兼容 UDP 能力；当前对讲业务固定走 WebSocket。
 
+## OTA 开发与发布
+
+OTA 固件版本只由项目根目录 `CMakeLists.txt` 中的 `PROJECT_VER` 管理，格式必须为严格的 `x.y.z`。在 ESP-IDF PowerShell 环境中执行：
+
+```powershell
+.\scripts\publish_ota.ps1 -Notes "本次更新说明"
+```
+
+脚本会构建 `build\walkie-talkiev1.bin`、计算文件大小和 SHA-256、上传 application bin，并调用 OTA 容器的发布 CLI。默认目标为 `root@139.129.17.67`，可用 `-Server` 和 `-User` 覆盖；脚本不保存密码、私钥或其他凭据。真实发布需要系统可用的 OpenSSH `scp`/`ssh`，并提前配置 SSH key 或 agent；脚本使用 `BatchMode=yes`，不会交互式索取密码。
+
+已经完成构建时可跳过构建步骤：
+
+```powershell
+.\scripts\publish_ota.ps1 -SkipBuild -Notes "本次更新说明"
+```
+
+真实发布使用 `-SkipBuild` 时，脚本会校验 `build\project_description.json` 中的版本和 application bin 名称，防止把旧构建误发成新版本。发布前可完全离线检查操作计划：
+
+```powershell
+.\scripts\publish_ota.ps1 -DryRun -SkipBuild -Notes "OTA 测试版本，包含 `"双引号`" 和 '单引号'"
+```
+
+`-DryRun` 不执行构建、`scp` 或 `ssh`，也不会修改服务器。发布说明使用 UTF-8 Base64 传输，原始 Notes 不会直接拼入远程 shell 命令。服务器若拒绝重复的 `hardware/version`，脚本会保留原始失败并立即以非零状态退出，不会尝试覆盖发布记录，也不会删除本地固件或服务器 incoming 文件。
+
 ## AI 语音链路
 
 AI 问答采用半双工流程：
