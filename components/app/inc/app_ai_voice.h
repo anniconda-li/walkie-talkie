@@ -55,6 +55,9 @@ void app_ai_voice_request_reply_stop(void);
  */
 esp_err_t app_ai_voice_cancel_current(void);
 
+/** @brief 查询AI是否仍在录音、请求、下载或播放。 */
+int app_ai_voice_is_busy(void);
+
 #ifdef __cplusplus
 }
 #endif

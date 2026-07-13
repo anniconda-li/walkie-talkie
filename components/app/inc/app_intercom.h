@@ -56,6 +56,15 @@ void app_intercom_ptt_stop(void);
  */
 void app_intercom_network_changed(void);
 
+/** @brief OTA维护模式暂停对讲收发并关闭当前WebSocket。 */
+void app_intercom_suspend(void);
+
+/** @brief OTA失败或停止后恢复WebSocket连接。 */
+void app_intercom_resume(void);
+
+/** @brief 查询PTT、接收播放或功放是否仍在使用。 */
+int app_intercom_is_busy(void);
+
 #ifdef __cplusplus
 }
 #endif

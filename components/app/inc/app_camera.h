@@ -57,6 +57,9 @@ int app_camera_upload(void);
  */
 int app_camera_cancel_current(void);
 
+/** @brief 查询相机预览、拍照或上传是否仍在运行。 */
+int app_camera_is_busy(void);
+
 /**
  * @brief 请求重拍。
  *

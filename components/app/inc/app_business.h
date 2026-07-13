@@ -46,6 +46,15 @@ void app_business_audio_session_end(void);
  */
 int app_business_audio_session_is_busy(void);
 
+/** @brief 进入OTA维护模式并等待现有音视频业务停止。 */
+int app_business_enter_ota_mode(unsigned int timeout_ms);
+
+/** @brief OTA失败或停止后解除维护门禁并恢复对讲。 */
+void app_business_exit_ota_mode(void);
+
+/** @brief 查询是否处于OTA维护模式。 */
+int app_business_is_ota_mode(void);
+
 #ifdef __cplusplus
 }
 #endif

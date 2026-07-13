@@ -67,6 +67,12 @@ extern "C" {
 #define APP_INTERCOM_OPUS_LOCAL_TEST_MAX_MS 20000u
 /** @brief FastAPI 业务服务根地址，AI 和相机路由由各业务模块追加。 */
 #define APP_BUSINESS_HTTP_BASE_URL      "http://139.129.17.67:18080"
+/** @brief WiFi OTA 服务固定根地址。 */
+#define APP_OTA_BASE_URL                 "http://139.129.17.67:18082"
+/** @brief OTA 服务识别的硬件型号。 */
+#define APP_OTA_HARDWARE                 "walkie-v1"
+/** @brief OTA 仅使用稳定发布通道。 */
+#define APP_OTA_CHANNEL                  "stable"
 /** @brief AI 创建会话路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_START        "/ai/start"
 /** @brief AI 上传请求 WAV 分片路由。 */

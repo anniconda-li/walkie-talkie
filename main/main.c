@@ -5,6 +5,7 @@
 
 #include "app_boot_status.h"
 #include "app_business.h"
+#include "app_ota.h"
 #include "app_ui.h"
 #include "d_config.h"
 #include "d_init.h"
@@ -15,6 +16,7 @@
 #include "service_screen.h"
 #include "ui_splash.h"
 #include "wdriver.h"
+#include "esp_ota_ops.h"
 
 static const char *TAG = "main";
 
@@ -56,7 +58,14 @@ void app_main(void)
 {
     OSAL_LOGI(TAG, "业务固件启动开始");
 
-    int ret = d_power_control_init();
+    int ret = app_ota_boot_guard_start();
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "OTA回滚守护任务启动失败, ret=%d", ret);
+        (void)esp_ota_mark_app_invalid_rollback_and_reboot();
+        main_fatal("OTA回滚守护任务启动", ret);
+    }
+
+    ret = d_power_control_init();
     uint32_t splash_started_ms = 0u;
     if (ret != 0) {
         main_fatal("电源保持初始化", ret);
@@ -143,6 +152,12 @@ void app_main(void)
         service_screen_unlock();
     } else {
         OSAL_LOGW(TAG, "启动页结束失败: LVGL 加锁超时");
+    }
+
+    ret = app_ota_boot_confirm();
+    if (ret != 0) {
+        OSAL_LOGE(TAG, "OTA新固件确认失败, ret=%d", ret);
+        (void)esp_ota_mark_app_invalid_rollback_and_reboot();
     }
 
     OSAL_LOGI(TAG, "业务固件启动完成");

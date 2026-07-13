@@ -1363,6 +1363,15 @@ int app_camera_cancel_current(void)
     return 0;
 }
 
+int app_camera_is_busy(void)
+{
+    return (s_preview_active != 0 ||
+            s_capture_req != 0 ||
+            s_upload_req != 0 ||
+            s_upload_in_progress != 0 ||
+            s_upload_task_running != 0) ? 1 : 0;
+}
+
 void app_camera_retake(void)
 {
     if (!s_started || service_camera_is_initialized() != 1) {
