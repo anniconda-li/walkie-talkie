@@ -28,6 +28,7 @@
  */
 #include "app_business.h"
 
+#include "app_ai_ws.h"
 #include "app_ai_voice.h"
 #include "app_camera.h"
 #include "app_config.h"
@@ -282,7 +283,7 @@ static void app_business_on_camera_capture(void)
     app_camera_capture();
 }
 
-/** @brief 相机上传按钮 → HTTP POST 上传暂存 JPEG。 */
+/** @brief 相机上传按钮 → AI WebSocket 上传暂存 JPEG。 */
 static int app_business_on_camera_upload(void)
 {
     return app_camera_upload();
@@ -699,6 +700,12 @@ int app_business_start(void)
         return ret;
     }
 
+    ret = app_ai_ws_start();
+    if (ret != 0) {
+        APP_LOGE(TAG, "AI WebSocket 任务启动失败, ret=%d", ret);
+        return ret;
+    }
+
     ret = app_ai_voice_start();
     if (ret != 0) {
         return ret;
@@ -716,9 +723,10 @@ int app_business_start(void)
     }
 
     s_started = 1;
-    APP_LOGI(TAG, "业务启动完成, device=%s, ai=%s, intercom_ws=%s:%d, channel=%d",
+    APP_LOGI(TAG, "业务启动完成, device=%s, ai_ws=%s:%d, intercom_ws=%s:%d, channel=%d",
              APP_DEVICE_ID,
-             APP_BUSINESS_HTTP_BASE_URL,
+             APP_BUSINESS_SERVER_HOST,
+             APP_BUSINESS_AI_WS_PORT,
              APP_BUSINESS_SERVER_HOST,
              APP_BUSINESS_WS_PORT,
              APP_BUSINESS_DEFAULT_CHANNEL);
@@ -732,6 +740,7 @@ int app_business_enter_ota_mode(unsigned int timeout_ms)
     app_intercom_suspend();
     (void)app_ai_voice_cancel_current();
     (void)app_camera_cancel_current();
+    app_ai_ws_suspend();
     app_camera_exit();
 
     uint32_t start_ms = osal_get_tick_ms();
@@ -759,6 +768,7 @@ int app_business_enter_ota_mode(unsigned int timeout_ms)
 
 void app_business_exit_ota_mode(void)
 {
+    app_ai_ws_resume();
     app_intercom_resume();
     s_ota_mode = 0;
     APP_LOGI(TAG, "OTA维护模式已解除");
