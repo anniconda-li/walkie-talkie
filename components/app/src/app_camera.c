@@ -10,6 +10,7 @@
  */
 #include "app_camera.h"
 
+#include "app_ai_ws.h"
 #include "app_ui.h"
 #include "app_config.h"
 #include "osal_heap.h"
@@ -310,6 +311,25 @@ static int app_camera_json_has_key(const uint8_t *json, uint32_t len, const char
     return start != NULL && start < (const char *)json + len;
 }
 
+static int app_camera_json_has_non_null_value(const uint8_t *json, uint32_t len, const char *key)
+{
+    if (json == NULL || key == NULL) {
+        return 0;
+    }
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *end = (const char *)json + len;
+    const char *value = strstr((const char *)json, pattern);
+    if (value == NULL || value >= end || (value = strchr(value, ':')) == NULL) {
+        return 0;
+    }
+    value++;
+    while (value < end && (*value == ' ' || *value == '\t')) {
+        value++;
+    }
+    return value < end && strncmp(value, "null", 4u) != 0;
+}
+
 static int app_camera_upload_response_is_error(const uint8_t *json, uint32_t len)
 {
     char status[24];
@@ -318,8 +338,8 @@ static int app_camera_upload_response_is_error(const uint8_t *json, uint32_t len
 
     return strcmp(status, "error") == 0 ||
            strcmp(status, "failed") == 0 ||
-           app_camera_json_has_key(json, len, "error") ||
-           app_camera_json_has_key(json, len, "detail");
+           app_camera_json_has_non_null_value(json, len, "error") ||
+           app_camera_json_has_non_null_value(json, len, "detail");
 }
 
 static int app_camera_upload_response_is_ready(const uint8_t *json, uint32_t len)
@@ -330,6 +350,9 @@ static int app_camera_upload_response_is_ready(const uint8_t *json, uint32_t len
     latest_artifact_id[0] = '\0';
 
     (void)app_camera_json_get_string(json, len, "status", status, sizeof(status));
+    if (strcmp(status, "text_ready") == 0) {
+        (void)app_camera_json_get_string(json, len, "camera_status", status, sizeof(status));
+    }
     (void)app_camera_json_get_string(json,
                                      len,
                                      "latest_artifact_id",
@@ -1239,13 +1262,11 @@ static void app_camera_cancel_chunk_upload(const app_camera_upload_job_t *job)
     APP_LOGI(TAG, "相机分片会话取消, request_id=%s, ret=%d", job->request_id, ret);
 }
 
-/** @brief 分片上传 JPEG，并在 finish 请求中同步等待图像分析结果。 */
+/** @brief 通过持久 AI WebSocket 上传 JPEG，并同步等待图像分析结果。 */
 static void app_camera_do_upload(app_camera_upload_job_t *job)
 {
     int ret = -1;
-    int session_started = 0;
     uint32_t resp_len = 0u;
-    uint32_t offset = 0u;
 
     if (job == NULL || job->jpeg_buf == NULL || job->jpeg_len == 0u) {
         APP_LOGW(TAG, "相机上传失败: 没有可上传的 JPEG");
@@ -1257,10 +1278,10 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
 
     uint32_t task_start_ms = osal_get_tick_ms();
     APP_LOGI(TAG,
-             "相机 JPEG 分片任务启动, len=%u, chunks=%u, queued_delay=%u",
+             "相机 JPEG WebSocket 任务启动, len=%u, chunks=%u, queued_delay=%u",
              (unsigned int)job->jpeg_len,
-             (unsigned int)((job->jpeg_len + APP_CAMERA_UPLOAD_CHUNK_BYTES - 1u) /
-                            APP_CAMERA_UPLOAD_CHUNK_BYTES),
+             (unsigned int)((job->jpeg_len + APP_AI_WS_MAX_PAYLOAD_BYTES - 1u) /
+                            APP_AI_WS_MAX_PAYLOAD_BYTES),
              (unsigned int)(task_start_ms - job->queued_at_ms));
 
     if (app_camera_is_upload_cancel_requested()) {
@@ -1280,41 +1301,17 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
     }
 
     APP_LOGI(TAG,
-             "相机分片会话开始, request_id=%s, sha256=%.12s..., total=%u",
+             "相机 WebSocket 会话开始, request_id=%s, sha256=%.12s..., total=%u",
              job->request_id,
              job->content_sha256,
              (unsigned int)job->jpeg_len);
-    while (offset < job->jpeg_len) {
-        uint32_t next_offset = offset;
-        ret = app_camera_post_chunk(job, offset, &next_offset);
-        session_started = 1;
-        if (ret < 0) {
-            break;
-        }
-        if (next_offset == offset || next_offset > job->jpeg_len) {
-            ret = -22;
-            break;
-        }
-        offset = next_offset;
-        if (offset == job->jpeg_len ||
-            (offset % (APP_CAMERA_UPLOAD_CHUNK_BYTES * 4u)) == 0u) {
-            APP_LOGI(TAG,
-                     "相机分片上传进度, received=%u/%u",
-                     (unsigned int)offset,
-                     (unsigned int)job->jpeg_len);
-        }
-    }
-
-    if (app_camera_is_upload_cancel_requested()) {
-        ret = -7;
-        goto cleanup;
-    }
-    if (ret < 0 || offset != job->jpeg_len) {
-        goto failed;
-    }
-
-    APP_LOGI(TAG, "相机分片上传完成，等待图像分析, request_id=%s", job->request_id);
-    ret = app_camera_finish_chunk_upload(job, &resp_len);
+    ret = app_ai_ws_camera_request(job->request_id,
+                                   job->jpeg_buf,
+                                   job->jpeg_len,
+                                   job->content_sha256,
+                                   s_upload_resp,
+                                   sizeof(s_upload_resp),
+                                   &resp_len);
     if (app_camera_is_upload_cancel_requested()) {
         ret = -7;
         goto cleanup;
@@ -1325,7 +1322,7 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
 
     s_upload_resp[resp_len < sizeof(s_upload_resp) ? resp_len : (sizeof(s_upload_resp) - 1u)] = '\0';
     APP_LOGI(TAG,
-             "相机分片上传与分析成功, len=%u, resp_len=%u, total_ms=%u",
+             "相机 WebSocket 上传与分析成功, len=%u, resp_len=%u, total_ms=%u",
              (unsigned int)job->jpeg_len,
              (unsigned int)resp_len,
              (unsigned int)(osal_get_tick_ms() - job->queued_at_ms));
@@ -1334,9 +1331,8 @@ static void app_camera_do_upload(app_camera_upload_job_t *job)
 
 failed:
     APP_LOGW(TAG,
-             "相机分片上传失败, ret=%d, offset=%u/%u, total_ms=%u, request_id=%s",
+             "相机 WebSocket 上传失败, ret=%d, total=%u, total_ms=%u, request_id=%s",
              ret,
-             (unsigned int)offset,
              (unsigned int)job->jpeg_len,
              (unsigned int)(osal_get_tick_ms() - job->queued_at_ms),
              job->request_id);
@@ -1344,11 +1340,8 @@ failed:
     (void)app_ui_set_ai_message(UI_TEXT_AI_IMAGE_UPLOAD_FAILED);
 
 cleanup:
-    if (ret != 0 && session_started) {
-        app_camera_cancel_chunk_upload(job);
-    }
     if (ret == -7) {
-        APP_LOGI(TAG, "相机分片上传已由用户中止, request_id=%s", job->request_id);
+        APP_LOGI(TAG, "相机 WebSocket 上传已由用户中止, request_id=%s", job->request_id);
     }
     app_camera_free_upload_job(job);
     app_camera_finish_upload_request();
@@ -1656,16 +1649,16 @@ int app_camera_cancel_current(void)
         return -2;
     }
 
-    int http_cancel_ret = service_network_http_cancel();
+    int ws_cancel_ret = app_ai_ws_cancel_active();
     if (queued) {
         app_camera_clear_jpeg();
         app_camera_finish_upload_request();
     }
     APP_LOGI(TAG,
-             "相机上传取消请求已接收, queued=%d, task_running=%d, http_cancel_ret=%d",
+             "相机上传取消请求已接收, queued=%d, task_running=%d, ws_cancel_ret=%d",
              queued,
              s_upload_task_running,
-             http_cancel_ret);
+             ws_cancel_ret);
     app_camera_notify_task();
     return 0;
 }

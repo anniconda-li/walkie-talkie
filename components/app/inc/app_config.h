@@ -40,8 +40,12 @@ extern "C" {
 #define APP_DEVICE_ID                   "walkie-02"
 /** @brief 兼容旧业务命名，统一指向 APP_DEVICE_ID。 */
 #define APP_BUSINESS_DEVICE_NAME        APP_DEVICE_ID
-/** @brief 业务服务器地址，AI HTTP 和对讲 WebSocket 使用同一公网主机。 */
+/** @brief 业务服务器地址，AI 与对讲 WebSocket 使用同一公网主机、不同端口。 */
 #define APP_BUSINESS_SERVER_HOST        "139.129.17.67"
+/** @brief AI 语音/相机 WebSocket 端口，独立于对讲服务。 */
+#define APP_BUSINESS_AI_WS_PORT         18080
+/** @brief AI 语音/相机 WebSocket 路由。 */
+#define APP_BUSINESS_AI_WS_ROUTE        "/ai/ws"
 /** @brief WebSocket 对讲端口，独立于 AI/相机 HTTP 18080。 */
 #define APP_BUSINESS_WS_PORT            18081
 /** @brief WebSocket 对讲下行路由，设备会追加 device query。 */
@@ -134,6 +138,18 @@ extern "C" {
 #define APP_AI_HTTP_CHUNK_TIMEOUT_MS    60000u
 /** @brief AI 服务器处理等待总超时时间，单位 ms。 */
 #define APP_AI_PROCESS_TIMEOUT_MS       300000u
+/** @brief WAI1 单个 WebSocket binary frame 的最大业务载荷。 */
+#define APP_AI_WS_MAX_PAYLOAD_BYTES     4096u
+/** @brief AI WebSocket 首次建连和握手超时。 */
+#define APP_AI_WS_CONNECT_TIMEOUT_MS    8000u
+/** @brief AI WebSocket 单次收发无进展超时。 */
+#define APP_AI_WS_IO_TIMEOUT_MS         10000u
+/** @brief AI WebSocket 失去任何有效消息后判定死连接的时间。 */
+#define APP_AI_WS_IDLE_TIMEOUT_MS       30000u
+/** @brief AI WebSocket 首次重连等待。 */
+#define APP_AI_WS_RECONNECT_MS          2000u
+/** @brief AI WebSocket 最大重连等待。 */
+#define APP_AI_WS_RECONNECT_MAX_MS      15000u
 /** @brief AI 结果轮询间隔，单位 ms。 */
 #define APP_AI_RESULT_POLL_MS           1000u
 /** @brief AI 回复语音是否默认自动播放；0 表示需要用户点击播放按钮。 */
@@ -170,6 +186,8 @@ extern "C" {
     (APP_BUSINESS_WAV_HEADER_LEN + (APP_BUSINESS_AI_REPLY_MAX_SAMPLES * sizeof(int16_t)))
 /** @brief AI 请求 AOP1 裸 Opus 帧容器缓冲区字节数。 */
 #define APP_BUSINESS_AI_OPUS_BUF_BYTES  (256u * 1024u)
+/** @brief AI 回复 ROP1/Opus 最大缓存；20 kbps 下可容纳至少 120 秒回复。 */
+#define APP_BUSINESS_AI_REPLY_OPUS_MAX_BYTES (384u * 1024u)
 
 #ifdef __cplusplus
 }

@@ -3,7 +3,7 @@
  * @brief 相机业务模块接口。
  *
  * 本模块组合 service_camera、service_screen 和 service_network 完成相机页业务：
- * 实时预览、拍照定格、JPEG 暂存和 HTTP 上传。UI 层只通过 app_business 注册
+ * 实时预览、拍照定格、JPEG 暂存和 AI WebSocket 上传。UI 层只通过 app_business 注册
  * 的回调触发这些接口，不直接接触摄像头、LCD 或网络细节。
  */
 #ifndef APP_CAMERA_H
@@ -50,8 +50,7 @@ int app_camera_upload(void);
 /**
  * @brief 取消当前相机上传流程。
  *
- * 若 JPEG 上传已经进入 HTTP 调用，底层请求会在返回后被忽略；若仍在队列中，
- * 上传请求会被直接清除。
+ * 已进入 WebSocket 传输时会中断当前命令；若仍在队列中，上传请求会被直接清除。
  *
  * @return 成功发起取消返回 0；当前没有相机上传返回负值。
  */

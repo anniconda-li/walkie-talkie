@@ -4,6 +4,7 @@
  */
 #include "app_network.h"
 
+#include "app_ai_ws.h"
 #include "app_config.h"
 #include "app_intercom.h"
 #include "d_wifi.h"
@@ -41,6 +42,12 @@ static volatile int s_auto_connecting = 0;
 static volatile int s_auto_connect_cancel = 0;
 static app_network_mode_t s_mode = APP_NETWORK_MODE_NONE;
 static osal_mutex_t s_lock = NULL;
+
+static void app_network_notify_transport_changed(void)
+{
+    app_intercom_network_changed();
+    app_ai_ws_network_changed();
+}
 
 static int app_network_lock(void)
 {
@@ -108,7 +115,7 @@ static void app_network_enter_user_mode(app_network_mode_t mode)
 {
     (void)service_network_deinit();
     app_network_set_mode(mode);
-    app_intercom_network_changed();
+    app_network_notify_transport_changed();
 }
 
 static int app_network_ensure_wifi_service(void)
@@ -293,7 +300,7 @@ int app_network_connect_wifi(const char *ssid, const char *password)
     }
 
     app_network_save_wifi(ssid, password);
-    app_intercom_network_changed();
+    app_network_notify_transport_changed();
     APP_LOGI(TAG, "已切换到 WLAN");
     app_network_end_switch();
     return 0;
@@ -312,7 +319,7 @@ int app_network_enter_wifi_scan_mode(void)
     ret = service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
     if (ret == 0) {
         app_network_set_mode(APP_NETWORK_MODE_WIFI);
-        app_intercom_network_changed();
+        app_network_notify_transport_changed();
         APP_LOGI(TAG, "已切换到 WLAN 扫描模式");
     } else {
         APP_LOGW(TAG, "WLAN 扫描模式切换失败, ret=%d", ret);
@@ -339,7 +346,7 @@ int app_network_select_4g(void)
 
     if (app_network_is_connected_to(APP_NETWORK_FAKE_4G_SSID)) {
         app_network_set_mode(APP_NETWORK_MODE_4G);
-        app_intercom_network_changed();
+        app_network_notify_transport_changed();
         app_network_end_switch();
         APP_LOGI(TAG, "伪 4G WiFi 已连接, ssid=%s", APP_NETWORK_FAKE_4G_SSID);
         return 0;
@@ -360,7 +367,7 @@ int app_network_select_4g(void)
     }
 
     app_network_set_mode(APP_NETWORK_MODE_4G);
-    app_intercom_network_changed();
+    app_network_notify_transport_changed();
     app_network_end_switch();
     APP_LOGI(TAG, "已切换到伪 4G WiFi, ssid=%s", APP_NETWORK_FAKE_4G_SSID);
     return 0;
@@ -461,7 +468,7 @@ static void app_network_task(void *arg)
                 ret = service_init_network_for(SERVICE_NETWORK_BACKEND_WIFI);
                 if (ret == 0) {
                     app_network_set_mode(APP_NETWORK_MODE_WIFI);
-                    app_intercom_network_changed();
+                    app_network_notify_transport_changed();
                     APP_LOGI(TAG, "开机自动连接上次 WLAN 成功, ssid=%s", ssid);
                 }
             }
