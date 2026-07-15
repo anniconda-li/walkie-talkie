@@ -72,13 +72,14 @@ static lv_obj_t *create_button(lv_obj_t *parent, int32_t x, int32_t y, int32_t w
     return btn;
 }
 
-static void add_button_icon(lv_obj_t *btn, const lv_image_dsc_t *src, int32_t scale)
+static lv_obj_t *add_button_icon(lv_obj_t *btn, const lv_image_dsc_t *src, int32_t scale)
 {
     lv_obj_t *icon = lv_image_create(btn);
     lv_image_set_src(icon, src);
     lv_image_set_scale(icon, scale);
     lv_obj_center(icon);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    return icon;
 }
 
 lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
@@ -132,7 +133,14 @@ lv_obj_t * ui_app_intercom_create(lv_obj_t * parent)
     lv_obj_set_style_radius(g_control_panel, 20, 0);
     g_intercom_view.channel_dec_button = create_button(g_control_panel, 10, 14, 42, 42, "-");
     g_intercom_view.ptt_button = create_button(g_control_panel, 66, 8, 76, 54, "");
-    add_button_icon(g_intercom_view.ptt_button, &icon_ptt_mic, 160);
+    lv_obj_set_style_bg_color(g_intercom_view.ptt_button,
+                              lv_color_make(0x24, 0x24, 0x24),
+                              LV_STATE_DISABLED);
+    lv_obj_set_style_border_color(g_intercom_view.ptt_button,
+                                  lv_color_make(0x44, 0x44, 0x44),
+                                  LV_STATE_DISABLED);
+    lv_obj_set_style_opa(g_intercom_view.ptt_button, LV_OPA_50, LV_STATE_DISABLED);
+    g_intercom_view.ptt_icon = add_button_icon(g_intercom_view.ptt_button, &icon_ptt_mic, 160);
     g_intercom_view.channel_inc_button = create_button(g_control_panel, 156, 14, 42, 42, "+");
 
     ui_event_register_intercom(&g_intercom_view);
@@ -150,6 +158,7 @@ void ui_app_intercom_enter(lv_obj_t * root)
 
 void ui_app_intercom_exit(lv_obj_t * root, lv_anim_completed_cb_t done_cb)
 {
+    ui_event_unregister_intercom(&g_intercom_view);
     lv_anim_del(g_display_panel, anim_set_y);
     lv_anim_del(g_control_panel, anim_set_y);
     lv_obj_delete(root);

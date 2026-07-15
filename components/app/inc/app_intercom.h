@@ -14,6 +14,12 @@
 extern "C" {
 #endif
 
+typedef enum {
+    APP_INTERCOM_RECEIVE_AUTO = 0,
+    APP_INTERCOM_RECEIVE_PROMPT,
+    APP_INTERCOM_RECEIVE_SILENT,
+} app_intercom_receive_mode_t;
+
 /**
  * @brief 启动 WebSocket 对讲后台任务。
  *
@@ -40,8 +46,9 @@ void app_intercom_set_channel(int32_t channel);
  * 20ms PCM 帧并发送 WebSocket binary 音频包。
  *
  * @param[in] channel UI 当前频道号；小于等于 0 时沿用当前频道。
+ * @return 0 表示已接受发送请求；负值表示当前被远端对讲、音频业务或 OTA 阻止。
  */
-void app_intercom_ptt_start(int32_t channel);
+int app_intercom_ptt_start(int32_t channel);
 
 /**
  * @brief 停止 PTT 对讲发送。
@@ -50,6 +57,20 @@ void app_intercom_ptt_start(int32_t channel);
  * 当前帧发送结束后退出循环并发送 PTT_STOP。
  */
 void app_intercom_ptt_stop(void);
+
+/**
+ * @brief 设置当前页面对应的远端对讲接收策略。
+ *
+ * AUTO 自动缓存并播放；PROMPT 只缓存并提示用户；SILENT 只保留滚动起播窗口。
+ */
+void app_intercom_set_receive_mode(app_intercom_receive_mode_t mode);
+
+/**
+ * @brief 接受当前正在缓存的远端对讲流。
+ *
+ * @return 0 表示已接受；负值表示当前没有可接听的远端流。
+ */
+int app_intercom_accept_current_rx(void);
 
 /**
  * @brief 通知对讲模块网络后端已切换，需要重建 WebSocket 通道。

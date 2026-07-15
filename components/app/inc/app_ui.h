@@ -58,6 +58,10 @@ int app_ui_set_battery_level(int percent);
  */
 int app_ui_set_intercom_state(int state);
 
+int app_ui_set_intercom_ptt_enabled(int enabled);
+
+int app_ui_set_ai_intercom_offer(int visible);
+
 /**
  * @brief 更新录音状态显示。
  *

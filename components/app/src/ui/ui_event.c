@@ -34,6 +34,9 @@
 #define PTT_RING_BASE_SIZE 48
 #define PTT_RING_MAX_SIZE 132
 #define AI_BAR_BASE_H 12
+#define AI_INTERCOM_BTN_X 192
+#define AI_INTERCOM_BTN_HIDDEN_X UI_SCREEN_WIDTH
+#define AI_INTERCOM_ANIM_MS 150u
 #define VOLUME_OVERLAY_HIDE_MS 1200u
 
 /**
@@ -52,6 +55,8 @@ static uint8_t g_ai_waiting = 0u;
 static uint8_t g_ai_wait_dot_count = 0u;
 static ui_text_id_t g_ai_message_id = UI_TEXT_AI_IDLE;
 static ui_ai_audio_btn_state_t g_ai_audio_btn_state = UI_AI_AUDIO_BTN_HIDDEN;
+static bool g_intercom_ptt_enabled = true;
+static bool g_ai_intercom_offer_visible = false;
 static lv_obj_t *g_ai_cancel_label = NULL;
 static int32_t g_settings_volume = 80;
 static uint8_t g_settings_volume_syncing = 0u;
@@ -362,6 +367,11 @@ static void anim_set_opa(void *obj, int32_t opa)
     lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)opa, 0);
 }
 
+static void anim_set_x(void *obj, int32_t x)
+{
+    lv_obj_set_x((lv_obj_t *)obj, x);
+}
+
 /** @brief LVGL 动画回调：设置 AI 录音柱高度（用于录音动效）。 */
 static void anim_set_ai_bar_h(void *obj, int32_t h)
 {
@@ -456,6 +466,27 @@ static void set_intercom_talking(ui_intercom_view_t *view, bool talking)
         lv_obj_set_style_bg_color(view->ptt_button,
                                   talking ? UI_COLOR_INTERCOM : lv_color_make(0x3A, 0x3A, 0x3A),
                                   0);
+    }
+}
+
+static void apply_intercom_ptt_enabled(ui_intercom_view_t *view)
+{
+    if(view == NULL || view->ptt_button == NULL) {
+        return;
+    }
+
+    if(g_intercom_ptt_enabled) {
+        lv_obj_remove_state(view->ptt_button, LV_STATE_DISABLED);
+    }
+    else {
+        set_intercom_talking(view, false);
+        lv_obj_add_state(view->ptt_button, LV_STATE_DISABLED);
+    }
+
+    if(view->ptt_icon != NULL) {
+        lv_obj_set_style_opa(view->ptt_icon,
+                             g_intercom_ptt_enabled ? LV_OPA_COVER : LV_OPA_40,
+                             0);
     }
 }
 
@@ -599,11 +630,16 @@ static void intercom_ptt_event_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     ui_intercom_view_t *view = (ui_intercom_view_t *)lv_event_get_user_data(e);
 
+    if(!g_intercom_ptt_enabled) {
+        return;
+    }
+
     if(code == LV_EVENT_LONG_PRESSED) {
-        set_intercom_talking(view, true);
+        int accepted = -1;
         if(g_callbacks.intercom_ptt_started != NULL && view != NULL) {
-            g_callbacks.intercom_ptt_started(view->channel);
+            accepted = g_callbacks.intercom_ptt_started(view->channel);
         }
+        set_intercom_talking(view, accepted == 0);
     }
     else if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         set_intercom_talking(view, false);
@@ -840,6 +876,51 @@ static void ai_answer_scroll_top(ui_ai_view_t *view)
 {
     if(view != NULL && view->answer_panel != NULL) {
         lv_obj_scroll_to_y(view->answer_panel, 0, LV_ANIM_OFF);
+    }
+}
+
+static void ai_apply_intercom_offer(ui_ai_view_t *view, bool animate)
+{
+    if(view == NULL || view->intercom_button == NULL) {
+        return;
+    }
+
+    lv_anim_del(view->intercom_button, anim_set_x);
+    if(!g_ai_intercom_offer_visible) {
+        lv_obj_add_flag(view->intercom_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_x(view->intercom_button, AI_INTERCOM_BTN_X);
+        return;
+    }
+
+    lv_obj_remove_flag(view->intercom_button, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(view->intercom_button);
+    if(!animate) {
+        lv_obj_set_x(view->intercom_button, AI_INTERCOM_BTN_X);
+        return;
+    }
+
+    lv_obj_set_x(view->intercom_button, AI_INTERCOM_BTN_HIDDEN_X);
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, view->intercom_button);
+    lv_anim_set_exec_cb(&anim, anim_set_x);
+    lv_anim_set_values(&anim, AI_INTERCOM_BTN_HIDDEN_X, AI_INTERCOM_BTN_X);
+    lv_anim_set_duration(&anim, AI_INTERCOM_ANIM_MS);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_start(&anim);
+}
+
+static void ai_intercom_offer_event_cb(lv_event_t *e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED || !g_ai_intercom_offer_visible) {
+        return;
+    }
+
+    int ret = g_callbacks.intercom_listen_requested != NULL ?
+              g_callbacks.intercom_listen_requested() : -1;
+    ui_event_set_ai_intercom_offer(false);
+    if(ret == 0) {
+        ui_shell_switch_to(UI_APP_ID_INTERCOM);
     }
 }
 
@@ -1504,6 +1585,13 @@ void ui_event_notify_power_shutdown_confirmed(void)
     }
 }
 
+void ui_event_notify_app_changed(int32_t app_id)
+{
+    if(g_callbacks.app_changed != NULL) {
+        g_callbacks.app_changed(app_id);
+    }
+}
+
 /**
  * @brief 注册对讲页面的 LVGL 控件事件。
  *
@@ -1524,10 +1612,32 @@ void ui_event_register_intercom(ui_intercom_view_t *view)
     g_intercom_view = view;
     refresh_intercom_channel(view);
     set_intercom_talking(view, false);
+    apply_intercom_ptt_enabled(view);
 
     lv_obj_add_event_cb(view->channel_dec_button, intercom_dec_event_cb, LV_EVENT_ALL, view);
     lv_obj_add_event_cb(view->channel_inc_button, intercom_inc_event_cb, LV_EVENT_ALL, view);
     lv_obj_add_event_cb(view->ptt_button, intercom_ptt_event_cb, LV_EVENT_ALL, view);
+}
+
+void ui_event_unregister_intercom(ui_intercom_view_t *view)
+{
+    if(g_intercom_view != view) {
+        return;
+    }
+
+    for(int32_t i = 0; i < 3; i++) {
+        if(view->broadcast_rings[i] != NULL) {
+            lv_anim_del(view->broadcast_rings[i], anim_set_ring_size);
+            lv_anim_del(view->broadcast_rings[i], anim_set_opa);
+        }
+    }
+    g_intercom_view = NULL;
+}
+
+void ui_event_set_intercom_ptt_enabled(bool enabled)
+{
+    g_intercom_ptt_enabled = enabled;
+    apply_intercom_ptt_enabled(g_intercom_view);
 }
 
 void ui_event_set_intercom_state(int state)
@@ -1599,8 +1709,15 @@ void ui_event_register_ai(ui_ai_view_t *view)
     if(view->audio_button != NULL) {
         lv_obj_add_event_cb(view->audio_button, ai_audio_play_event_cb, LV_EVENT_CLICKED, view);
     }
+    if(view->intercom_button != NULL) {
+        lv_obj_add_event_cb(view->intercom_button,
+                            ai_intercom_offer_event_cb,
+                            LV_EVENT_CLICKED,
+                            view);
+    }
     lv_obj_add_event_cb(view->ask_button, ai_ask_event_cb, LV_EVENT_ALL, view);
     ai_apply_audio_button_state(view, g_ai_audio_btn_state);
+    ai_apply_intercom_offer(view, false);
     if(view->answer_label != NULL) {
         lv_label_set_text(view->answer_label, ui_i18n_text(g_ai_message_id));
         lv_obj_set_style_text_font(view->answer_label, ui_font_normal(), 0);
@@ -1621,8 +1738,18 @@ void ui_event_unregister_ai(ui_ai_view_t *view)
         lv_timer_delete(g_ai_wait_timer);
         g_ai_wait_timer = NULL;
     }
+    if(view->intercom_button != NULL) {
+        lv_anim_del(view->intercom_button, anim_set_x);
+    }
     g_ai_view = NULL;
     g_ai_cancel_label = NULL;
+}
+
+void ui_event_set_ai_intercom_offer(bool visible)
+{
+    bool animate = visible && !g_ai_intercom_offer_visible;
+    g_ai_intercom_offer_visible = visible;
+    ai_apply_intercom_offer(g_ai_view, animate);
 }
 
 void ui_event_set_ai_waiting(bool waiting)

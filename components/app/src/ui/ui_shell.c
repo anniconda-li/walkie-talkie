@@ -460,6 +460,7 @@ static void app_switch_done_cb(lv_anim_t *a)
     if(g_current_app_root) {
         enter_app(g_current_app, g_current_app_root);
     }
+    ui_event_notify_app_changed((int32_t)g_current_app);
     refresh_menu_visibility();
 }
 
@@ -680,6 +681,7 @@ void ui_shell_init(void)
     if(g_current_app_root) {
         enter_app(g_current_app, g_current_app_root);
     }
+    ui_event_notify_app_changed((int32_t)g_current_app);
 
     g_menu_expanded = false;
     g_switch_requested = false;

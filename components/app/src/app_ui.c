@@ -198,6 +198,37 @@ int app_ui_set_intercom_state(int state)
     return 0;
 }
 
+int app_ui_set_intercom_ptt_enabled(int enabled)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    /* 实时播放任务只做非阻塞 UI 尝试，失败后由对讲状态机重试。 */
+    if (service_screen_lock(1u) != 0) {
+        return -2;
+    }
+
+    ui_event_set_intercom_ptt_enabled(enabled != 0);
+    service_screen_unlock();
+    return 0;
+}
+
+int app_ui_set_ai_intercom_offer(int visible)
+{
+    if (!s_ui_created) {
+        return -1;
+    }
+
+    if (service_screen_lock(1u) != 0) {
+        return -2;
+    }
+
+    ui_event_set_ai_intercom_offer(visible != 0);
+    service_screen_unlock();
+    return 0;
+}
+
 int app_ui_set_record_state(int state)
 {
     if (!s_ui_created) {
