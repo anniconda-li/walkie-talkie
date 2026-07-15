@@ -48,8 +48,10 @@ typedef struct {
  */
 typedef struct {
     void (*intercom_channel_changed)(int32_t channel); /**< 对讲频道变化回调。 */
-    void (*intercom_ptt_started)(int32_t channel);     /**< PTT 按下回调。 */
+    int (*intercom_ptt_started)(int32_t channel);      /**< PTT 按下回调。 */
     void (*intercom_ptt_stopped)(int32_t channel);     /**< PTT 松开回调。 */
+    int (*intercom_listen_requested)(void);            /**< 接听当前远端对讲回调。 */
+    void (*app_changed)(int32_t app_id);               /**< 当前应用页面变化回调。 */
     void (*camera_entered)(void);                      /**< 相机页面进入回调。 */
     void (*camera_exited)(void);                       /**< 相机页面退出回调。 */
     void (*camera_capture_requested)(void);            /**< 相机拍照请求回调。 */
@@ -84,6 +86,7 @@ typedef struct {
     lv_obj_t *channel_hint_label;  /**< 频道提示标签。 */
     lv_obj_t *status_label;        /**< 对讲链路状态提示。 */
     lv_obj_t *ptt_button;          /**< PTT 按钮。 */
+    lv_obj_t *ptt_icon;            /**< PTT 麦克风图标。 */
     lv_obj_t *broadcast_rings[3];  /**< PTT 波纹动画对象。 */
     int32_t channel;               /**< 当前 UI 频道号。 */
 } ui_intercom_view_t;
@@ -109,6 +112,8 @@ typedef struct {
     lv_obj_t *answer_label;  /**< AI 回答显示标签。 */
     lv_obj_t *audio_button;  /**< AI 回复语音播放按钮。 */
     lv_obj_t *audio_label;   /**< AI 回复语音播放图标/文字。 */
+    lv_obj_t *intercom_button; /**< 来自对讲的实时接听按钮。 */
+    lv_obj_t *intercom_label;  /**< 接听按钮扬声器图标。 */
     lv_obj_t *camera_button; /**< 拍照按钮。 */
     lv_obj_t *camera_icon;   /**< 拍照按钮图标。 */
     lv_obj_t *ask_button;    /**< AI 问答按钮。 */
@@ -164,7 +169,13 @@ void ui_event_notify_power_shutdown_confirmed(void);
  */
 void ui_event_register_intercom(ui_intercom_view_t *view);
 
+void ui_event_unregister_intercom(ui_intercom_view_t *view);
+
 void ui_event_set_intercom_state(int state);
+
+void ui_event_set_intercom_ptt_enabled(bool enabled);
+
+void ui_event_notify_app_changed(int32_t app_id);
 
 /**
  * @brief 注册相机页面视图对象。
@@ -214,6 +225,8 @@ void ui_event_set_ai_message(ui_text_id_t text_id);
 void ui_event_set_ai_answer_text(const char *text);
 
 void ui_event_set_ai_audio_button_state(ui_ai_audio_btn_state_t state);
+
+void ui_event_set_ai_intercom_offer(bool visible);
 
 void ui_event_set_settings_volume(int32_t volume);
 void ui_event_set_settings_brightness(int32_t brightness);

@@ -118,8 +118,6 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_HEARTBEAT_IDLE_MS  3000u
 /** @brief 音频忙时不发心跳，只用该间隔继续检查状态。 */
 #define APP_INTERCOM_HEARTBEAT_BUSY_MS  500u
-/** @brief 接收播放空闲关闭时间，延长以避免弱网短断流导致功放反复开关。 */
-#define APP_INTERCOM_RX_PLAYBACK_IDLE_MS 500u
 /** @brief 单个对讲 AUDIO 包时长。 */
 #define APP_INTERCOM_AUDIO_FRAME_MS      (20u * APP_INTERCOM_PACKET_FRAMES)
 #define APP_INTERCOM_MS_TO_FRAMES(ms)    (((ms) + APP_INTERCOM_AUDIO_FRAME_MS - 1u) / APP_INTERCOM_AUDIO_FRAME_MS)
@@ -147,6 +145,10 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_JITTER_MAX_MISSING  APP_INTERCOM_MS_TO_FRAMES(800u)
 /** @brief 起播前等待后续帧的最长时间，超过后丢弃残留短流。 */
 #define APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS 1200u
+/** @brief 音频资源暂被 AI 占用时，接收任务再次尝试起播的间隔。 */
+#define APP_INTERCOM_RX_AUDIO_RETRY_MS 20u
+/** @brief LVGL 锁繁忙时重要对讲状态再次同步到 UI 的间隔。 */
+#define APP_INTERCOM_RX_UI_RETRY_MS    100u
 /** @brief 播放中 buffer 为空且持续无新包时，认为远端语音流已断尾。 */
 #define APP_INTERCOM_JITTER_EMPTY_TIMEOUT_MS 500u
 /** @brief 接收端允许的最大突发迟到时间，超过后认为是 TCP 旧包并丢弃。 */
@@ -189,6 +191,8 @@ static const char *TAG = "app_intercom";
 #define APP_INTERCOM_WS_RX_QUEUE_LEN     APP_INTERCOM_MS_TO_FRAMES(2560u)
 /** @brief WebSocket 下行队列丢包日志节流。 */
 #define APP_INTERCOM_WS_DROP_LOG_MS      1000u
+/** @brief 非当前讲话设备音频丢弃日志节流。 */
+#define APP_INTERCOM_RX_FOREIGN_LOG_MS   1000u
 /** @brief WebSocket 下行本地队列统计日志周期。 */
 #define APP_INTERCOM_WS_STAT_LOG_MS      1000u
 /** @brief WebSocket 上行统计日志周期。 */
@@ -270,6 +274,16 @@ typedef struct {
     uint8_t data[APP_INTERCOM_PACKET_MAX_BYTES];   /**< 完整 WTK1 包字节。 */
 } app_intercom_ws_rx_frame_t;
 
+typedef struct {
+    app_intercom_receive_mode_t mode;
+    uint8_t stream_active;
+    uint8_t user_accepted;
+    uint8_t tx_running;
+    uint8_t policy_dirty;
+    uint8_t ui_dirty;
+    uint32_t stream_start_ms;
+} app_intercom_rx_policy_snapshot_t;
+
 /* ==========================================================================
  * 全局状态变量
  * ========================================================================== */
@@ -283,6 +297,9 @@ static osal_task_t s_heartbeat_task = NULL;
 
 /** @brief WebSocket 下行长连接任务句柄。 */
 static osal_task_t s_ws_task = NULL;
+
+/** @brief 对讲下行解析和节拍播放任务句柄。 */
+static osal_task_t s_rx_task = NULL;
 
 /** @brief 对讲模块是否已启动。 */
 static volatile int s_started = 0;
@@ -397,6 +414,33 @@ static uint8_t s_rx_play_stat_has_buf = 0u;
 static uint8_t s_rx_play_stat_buf_min = APP_INTERCOM_JITTER_FRAME_COUNT;
 static uint8_t s_rx_play_stat_buf_max = 0u;
 
+/** @brief 页面接收策略、本地发送和远端流占用状态的短临界区。 */
+static osal_mutex_t s_rx_policy_mutex = NULL;
+/** @brief 当前页面对应的远端对讲接收策略。 */
+static app_intercom_receive_mode_t s_rx_receive_mode = APP_INTERCOM_RECEIVE_AUTO;
+/** @brief 首个远端讲话设备是否已占用本次接收流。 */
+static uint8_t s_rx_stream_active = 0u;
+/** @brief PROMPT 模式下用户是否已接受当前实时流。 */
+static uint8_t s_rx_user_accepted = 0u;
+/** @brief 页面策略变化等待 biz_ws_play 串行应用。 */
+static uint8_t s_rx_policy_dirty = 0u;
+/** @brief PTT可用性和AI接听提示等待同步到LVGL。 */
+static uint8_t s_rx_ui_dirty = 0u;
+/** @brief UI 状态同步失败后的下一次允许重试时间。 */
+static uint32_t s_rx_policy_retry_at_ms = 0u;
+/** @brief 当前远端流开始的本机时间。 */
+static uint32_t s_rx_stream_start_ms = 0u;
+/** @brief 本地 PTT 任务是否已取得音频资源并正在收尾或发送。 */
+static uint8_t s_tx_running = 0u;
+/** @brief 对讲下行播放是否持有统一音频会话。 */
+static uint8_t s_rx_audio_session_owned = 0u;
+/** @brief 丢弃旧 Opus 包后，恢复播放前需要重置解码器状态。 */
+static uint8_t s_rx_decoder_needs_reset = 0u;
+/** @brief 非当前讲话设备丢包日志节流时间。 */
+static uint32_t s_rx_foreign_log_ms = 0u;
+/** @brief 非当前讲话设备累计丢包数。 */
+static uint32_t s_rx_foreign_drop_count = 0u;
+
 /** @brief 当前是否处于 PTT 按下状态。
  *  PTT 任务在 while(s_ptt_active) 循环中采集+发送，此标志为 0 时退出循环。 */
 static volatile int s_ptt_active = 0;
@@ -469,6 +513,71 @@ static uint64_t s_opus_tx_frame_total_us = 0u;
 static uint32_t s_opus_tx_frame_max_us = 0u;
 static uint32_t s_opus_tx_frame_late = 0u;
 #endif
+
+static void app_intercom_rx_notify(void)
+{
+    if (s_rx_task != NULL) {
+        (void)osal_task_notify_give(s_rx_task);
+    }
+}
+
+static void app_intercom_request_rx_reset(void)
+{
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_ws_reset_rx = 1;
+        osal_mutex_unlock(s_rx_policy_mutex);
+    } else {
+        s_ws_reset_rx = 1;
+    }
+    app_intercom_rx_notify();
+}
+
+static int app_intercom_take_rx_reset(void)
+{
+    int reset = 0;
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        reset = s_ws_reset_rx;
+        s_ws_reset_rx = 0;
+        osal_mutex_unlock(s_rx_policy_mutex);
+        return reset;
+    }
+
+    reset = s_ws_reset_rx;
+    s_ws_reset_rx = 0;
+    return reset;
+}
+
+static void app_intercom_rx_policy_snapshot(app_intercom_rx_policy_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->mode = s_rx_receive_mode;
+    if (s_rx_policy_mutex == NULL ||
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return;
+    }
+
+    snapshot->mode = s_rx_receive_mode;
+    snapshot->stream_active = s_rx_stream_active;
+    snapshot->user_accepted = s_rx_user_accepted;
+    snapshot->tx_running = s_tx_running;
+    snapshot->policy_dirty = s_rx_policy_dirty;
+    snapshot->ui_dirty = s_rx_ui_dirty;
+    snapshot->stream_start_ms = s_rx_stream_start_ms;
+    osal_mutex_unlock(s_rx_policy_mutex);
+}
+
+static int app_intercom_rx_policy_should_play(const app_intercom_rx_policy_snapshot_t *snapshot)
+{
+    return snapshot != NULL && snapshot->stream_active != 0u &&
+           (snapshot->mode == APP_INTERCOM_RECEIVE_AUTO ||
+            snapshot->user_accepted != 0u);
+}
 
 #if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
 /** @brief Opus 裸 payload 下行测试使用的常驻解码器，仅由播放任务访问。 */
@@ -1238,6 +1347,7 @@ static int app_intercom_ws_rx_push(const uint8_t *data, uint16_t len)
     }
 
     osal_mutex_unlock(s_ws_rx_mutex);
+    app_intercom_rx_notify();
     app_intercom_ws_rx_stats_log(osal_get_tick_ms());
     return dropped_full == 0 ? 0 : 1;
 }
@@ -1266,6 +1376,18 @@ static int app_intercom_ws_rx_pop(uint8_t *out, uint16_t *out_len)
 
     osal_mutex_unlock(s_ws_rx_mutex);
     return 0;
+}
+
+static int app_intercom_ws_rx_has_pending(void)
+{
+    if (s_ws_rx_mutex == NULL ||
+        osal_mutex_lock(s_ws_rx_mutex, OSAL_WAIT_NONE) != 0) {
+        return 1;
+    }
+
+    int pending = s_ws_rx_count != 0u ? 1 : 0;
+    osal_mutex_unlock(s_ws_rx_mutex);
+    return pending;
 }
 
 static int app_intercom_ws_wait_writable(int sock, uint32_t timeout_ms)
@@ -1785,7 +1907,7 @@ static void app_intercom_ws_task(void *arg)
         if (s_ota_suspended != 0) {
             s_ws_connected = 0;
             s_ws_force_reconnect = 0;
-            s_ws_reset_rx = 1;
+            app_intercom_request_rx_reset();
             (void)osal_task_notify_take(APP_INTERCOM_WS_NO_NET_RECHECK_MS);
             continue;
         }
@@ -1797,7 +1919,7 @@ static void app_intercom_ws_task(void *arg)
                     s_ws_sock = -1;
                     osal_mutex_unlock(s_ws_tx_mutex);
                 }
-                s_ws_reset_rx = 1;
+                app_intercom_request_rx_reset();
                 app_intercom_ws_rx_clear();
             }
             s_ws_force_reconnect = 0;
@@ -1851,7 +1973,6 @@ static void app_intercom_ws_task(void *arg)
             osal_mutex_unlock(s_ws_tx_mutex);
         }
         s_ws_connected = 1;
-        s_ws_reset_rx = 0;
         app_intercom_ws_rx_clear();
         APP_LOGI(TAG,
                  "intercom_ws event=connected device=%s host=%s port=%d route=%s ch=%d connect_ms=%u",
@@ -1912,7 +2033,7 @@ static void app_intercom_ws_task(void *arg)
         }
         close(sock);
         s_ws_force_reconnect = 0;
-        s_ws_reset_rx = 1;
+        app_intercom_request_rx_reset();
         app_intercom_ws_rx_clear();
         APP_LOGW(TAG,
                  "intercom_ws event=disconnected device=%s ret=%d retry_ms=%u",
@@ -1962,12 +2083,15 @@ static int app_intercom_start_ws_downlink_task(void)
 
 static void app_intercom_rx_stop_playback(void)
 {
-    if (!s_rx_playback_active) {
-        return;
+    if (s_rx_playback_active) {
+        (void)service_audio_stop_playback();
+        s_rx_playback_active = 0;
     }
 
-    (void)service_audio_stop_playback();
-    s_rx_playback_active = 0;
+    if (s_rx_audio_session_owned != 0u) {
+        s_rx_audio_session_owned = 0u;
+        app_business_audio_session_end();
+    }
 }
 
 static void app_intercom_rx_play_end_tail(void)
@@ -1997,11 +2121,10 @@ static void app_intercom_rx_play_end_tail(void)
 
 static void app_intercom_rx_stop_playback_smooth(void)
 {
-    if (!s_rx_playback_active) {
-        return;
+    if (s_rx_playback_active) {
+        app_intercom_rx_play_end_tail();
     }
 
-    app_intercom_rx_play_end_tail();
     app_intercom_rx_stop_playback();
 }
 
@@ -2011,8 +2134,17 @@ static int app_intercom_rx_start_playback(void)
         return 0;
     }
 
+    if (s_rx_audio_session_owned == 0u) {
+        if (app_business_audio_session_try_begin() != 0) {
+            return 1;
+        }
+        s_rx_audio_session_owned = 1u;
+    }
+
     int ret = service_audio_start_playback();
     if (ret != 0) {
+        s_rx_audio_session_owned = 0u;
+        app_business_audio_session_end();
         return ret;
     }
 
@@ -2020,23 +2152,37 @@ static int app_intercom_rx_start_playback(void)
     return 0;
 }
 
-static void app_intercom_rx_stop_if_idle(void)
+static int app_intercom_audio_busy(void)
 {
-    if (!s_rx_playback_active) {
-        return;
-    }
+    app_intercom_rx_policy_snapshot_t snapshot;
+    app_intercom_rx_policy_snapshot(&snapshot);
+    return (s_ptt_active != 0 ||
+            snapshot.tx_running != 0u ||
+            snapshot.stream_active != 0u ||
+            s_rx_jitter_playing != 0u ||
+            s_rx_playback_active != 0) ? 1 : 0;
+}
 
-    uint32_t now = osal_get_tick_ms();
-    if ((uint32_t)(now - s_rx_last_audio_ms) >= APP_INTERCOM_RX_PLAYBACK_IDLE_MS) {
-        app_intercom_rx_stop_playback();
+static void app_intercom_tx_set_running(uint8_t running)
+{
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_tx_running = running;
+        osal_mutex_unlock(s_rx_policy_mutex);
+    } else {
+        s_tx_running = running;
     }
 }
 
-static int app_intercom_audio_busy(void)
+static void app_intercom_ptt_clear_active(void)
 {
-    return (s_ptt_active != 0 ||
-            s_rx_jitter_playing != 0u ||
-            s_rx_playback_active != 0) ? 1 : 0;
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_ptt_active = 0;
+        osal_mutex_unlock(s_rx_policy_mutex);
+    } else {
+        s_ptt_active = 0;
+    }
 }
 
 static int app_intercom_seq_before(uint32_t a, uint32_t b)
@@ -2421,6 +2567,7 @@ static void app_intercom_jitter_clear(void)
     s_rx_jitter_playing = 0u;
     s_rx_jitter_missing = 0u;
     s_rx_jitter_ending = 0u;
+    s_rx_decoder_needs_reset = 0u;
 }
 
 static uint8_t app_intercom_jitter_count_ready(void)
@@ -2568,6 +2715,205 @@ static void app_intercom_jitter_reset_for_source(const char *device, uint32_t se
     app_intercom_play_stats_reset(osal_get_tick_ms());
 }
 
+static int app_intercom_rx_source_matches(const char *device)
+{
+    return device != NULL && s_rx_jitter_device[0] != '\0' &&
+           strncmp(s_rx_jitter_device,
+                   device,
+                   APP_INTERCOM_DEVICE_FIELD_LEN) == 0;
+}
+
+static void app_intercom_rx_note_foreign(const app_intercom_packet_view_t *view)
+{
+    uint32_t now = osal_get_tick_ms();
+    s_rx_foreign_drop_count++;
+    if ((uint32_t)(now - s_rx_foreign_log_ms) < APP_INTERCOM_RX_FOREIGN_LOG_MS) {
+        return;
+    }
+
+    APP_LOGW(TAG,
+             "intercom_rx event=drop_other_source source=%s locked=%s type=%u drop_total=%u",
+             view != NULL ? view->device : "-",
+             s_rx_jitter_device[0] != '\0' ? s_rx_jitter_device : "-",
+             view != NULL ? (unsigned int)view->type : 0u,
+             (unsigned int)s_rx_foreign_drop_count);
+    s_rx_foreign_log_ms = now;
+}
+
+static void app_intercom_jitter_trim_deferred(void)
+{
+    uint8_t ready = app_intercom_jitter_count_ready();
+    uint8_t keep = app_intercom_jitter_start_frames();
+    uint32_t dropped = 0u;
+
+    while (ready > keep) {
+        uint32_t oldest_seq = 0u;
+        if (app_intercom_jitter_find_next_seq(s_rx_jitter_expected_seq, &oldest_seq) == 0) {
+            break;
+        }
+        app_intercom_jitter_frame_t *frame = app_intercom_jitter_find(oldest_seq);
+        if (frame == NULL) {
+            break;
+        }
+
+        frame->valid = 0u;
+        s_rx_jitter_expected_seq = oldest_seq + 1u;
+        app_intercom_jitter_drop_before(s_rx_jitter_expected_seq);
+        ready--;
+        dropped++;
+    }
+
+    if (dropped != 0u) {
+        s_rx_decoder_needs_reset = 1u;
+    }
+}
+
+static int app_intercom_rx_claim_stream(const app_intercom_packet_view_t *view,
+                                         uint32_t expected_seq,
+                                         const char *reason)
+{
+    if (view == NULL || s_rx_policy_mutex == NULL ||
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return -1;
+    }
+
+    if (s_ota_suspended != 0 || s_ptt_active != 0 || s_tx_running != 0u) {
+        osal_mutex_unlock(s_rx_policy_mutex);
+        return -2;
+    }
+    if (s_rx_stream_active != 0u) {
+        int same_source = app_intercom_rx_source_matches(view->device);
+        osal_mutex_unlock(s_rx_policy_mutex);
+        return same_source ? 1 : -3;
+    }
+
+    s_rx_stream_active = 1u;
+    s_rx_user_accepted = s_rx_receive_mode == APP_INTERCOM_RECEIVE_AUTO ? 1u : 0u;
+    s_rx_stream_start_ms = osal_get_tick_ms();
+    s_rx_policy_dirty = 1u;
+    s_rx_ui_dirty = 1u;
+    osal_mutex_unlock(s_rx_policy_mutex);
+    s_rx_policy_retry_at_ms = 0u;
+
+    app_intercom_jitter_reset_for_source(view->device, expected_seq);
+    APP_LOGI(TAG,
+             "intercom_rx event=claim source=%s ch=%u seq=%u mode=%d reason=%s",
+             view->device,
+             (unsigned int)view->channel,
+             (unsigned int)view->seq,
+             (int)s_rx_receive_mode,
+             reason != NULL ? reason : "unknown");
+    return 0;
+}
+
+static void app_intercom_rx_release_stream(const char *reason, int smooth)
+{
+    char device[APP_INTERCOM_DEVICE_FIELD_LEN + 1u];
+    uint8_t was_active = 0u;
+    strncpy(device, s_rx_jitter_device, sizeof(device) - 1u);
+    device[sizeof(device) - 1u] = '\0';
+
+    if (smooth != 0) {
+        app_intercom_rx_stop_playback_smooth();
+    } else {
+        app_intercom_rx_stop_playback();
+    }
+    app_intercom_jitter_clear();
+
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        was_active = s_rx_stream_active;
+        s_rx_stream_active = 0u;
+        s_rx_user_accepted = 0u;
+        s_rx_stream_start_ms = 0u;
+        s_rx_policy_dirty = 1u;
+        s_rx_ui_dirty = 1u;
+        osal_mutex_unlock(s_rx_policy_mutex);
+    }
+    s_rx_policy_retry_at_ms = 0u;
+    app_intercom_rx_notify();
+
+    if (was_active != 0u) {
+        APP_LOGI(TAG,
+                 "intercom_rx event=release source=%s reason=%s",
+                 device[0] != '\0' ? device : "-",
+                 reason != NULL ? reason : "unknown");
+    }
+}
+
+static void app_intercom_rx_apply_policy(void)
+{
+    app_intercom_rx_policy_snapshot_t snapshot;
+    int apply_policy = 0;
+    int apply_ui = 0;
+    uint32_t now = osal_get_tick_ms();
+    int ui_retry_ready = s_rx_policy_retry_at_ms == 0u ||
+                         !app_intercom_seq_before(now, s_rx_policy_retry_at_ms);
+    memset(&snapshot, 0, sizeof(snapshot));
+
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        if (s_rx_policy_dirty != 0u || s_rx_ui_dirty != 0u) {
+            snapshot.mode = s_rx_receive_mode;
+            snapshot.stream_active = s_rx_stream_active;
+            snapshot.user_accepted = s_rx_user_accepted;
+            snapshot.tx_running = s_tx_running;
+            snapshot.policy_dirty = s_rx_policy_dirty;
+            snapshot.ui_dirty = s_rx_ui_dirty;
+            snapshot.stream_start_ms = s_rx_stream_start_ms;
+            apply_policy = s_rx_policy_dirty != 0u ? 1 : 0;
+            s_rx_policy_dirty = 0u;
+            if (s_rx_ui_dirty != 0u && ui_retry_ready != 0) {
+                apply_ui = 1;
+                s_rx_ui_dirty = 0u;
+            }
+        }
+        osal_mutex_unlock(s_rx_policy_mutex);
+    }
+    if (apply_policy == 0 && apply_ui == 0) {
+        return;
+    }
+
+    if (apply_policy != 0) {
+        int should_play = app_intercom_rx_policy_should_play(&snapshot);
+        if (snapshot.stream_active == 0u) {
+            if (s_rx_jitter_ready != 0u || s_rx_playback_active != 0) {
+                app_intercom_rx_stop_playback();
+                app_intercom_jitter_clear();
+            }
+        } else if (should_play == 0) {
+            if (s_rx_jitter_playing != 0u || s_rx_playback_active != 0) {
+                app_intercom_rx_stop_playback();
+                s_rx_jitter_playing = 0u;
+                s_rx_jitter_next_play_ms = 0u;
+                s_rx_jitter_missing = 0u;
+                s_rx_decoder_needs_reset = 1u;
+            }
+            app_intercom_jitter_trim_deferred();
+        }
+    }
+    if (apply_ui == 0) {
+        return;
+    }
+
+    int ptt_enabled = snapshot.stream_active == 0u && s_ota_suspended == 0;
+    int offer_visible = snapshot.stream_active != 0u &&
+                        snapshot.mode == APP_INTERCOM_RECEIVE_PROMPT &&
+                        snapshot.user_accepted == 0u;
+    int ui_ret = app_ui_set_intercom_ptt_enabled(ptt_enabled);
+    if (ui_ret == 0) {
+        ui_ret = app_ui_set_ai_intercom_offer(offer_visible);
+    }
+    if (ui_ret != 0 && s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_rx_ui_dirty = 1u;
+        osal_mutex_unlock(s_rx_policy_mutex);
+        s_rx_policy_retry_at_ms = now + APP_INTERCOM_RX_UI_RETRY_MS;
+    } else if (ui_ret == 0) {
+        s_rx_policy_retry_at_ms = 0u;
+    }
+}
+
 static int app_intercom_jitter_drop_stale_audio(const app_intercom_packet_view_t *view,
                                                 uint32_t now)
 {
@@ -2609,7 +2955,18 @@ static void app_intercom_jitter_mark_start(const app_intercom_packet_view_t *vie
         return;
     }
 
-    app_intercom_jitter_reset_for_source(view->device, view->seq + 1u);
+    int claim_ret = app_intercom_rx_claim_stream(view, view->seq + 1u, "ptt_start");
+    if (claim_ret == 1 && s_rx_jitter_ending != 0u) {
+        app_intercom_rx_release_stream("next_ptt_start", 0);
+        claim_ret = app_intercom_rx_claim_stream(view, view->seq + 1u, "ptt_restart");
+    }
+    if (claim_ret == -3) {
+        app_intercom_rx_note_foreign(view);
+    }
+    if (claim_ret != 0) {
+        return;
+    }
+
     APP_LOGI(TAG,
              "intercom_ptt event=remote_start device=%s ch=%u seq=%u expected=%u",
              view->device,
@@ -2623,7 +2980,15 @@ static void app_intercom_jitter_mark_stop(const app_intercom_packet_view_t *view
     if (view == NULL || s_rx_jitter_ready == 0u) {
         return;
     }
-    if (strncmp(s_rx_jitter_device, view->device, APP_INTERCOM_DEVICE_FIELD_LEN) != 0) {
+    if (app_intercom_rx_source_matches(view->device) == 0) {
+        app_intercom_rx_note_foreign(view);
+        return;
+    }
+
+    app_intercom_rx_policy_snapshot_t snapshot;
+    app_intercom_rx_policy_snapshot(&snapshot);
+    if (app_intercom_rx_policy_should_play(&snapshot) == 0) {
+        app_intercom_rx_release_stream("remote_stop_deferred", 0);
         return;
     }
 
@@ -2654,11 +3019,6 @@ static void app_intercom_jitter_enqueue_frame(const app_intercom_packet_view_t *
         data_len = APP_INTERCOM_AUDIO_PAYLOAD_BYTES;
     }
 #endif
-
-    if (s_rx_jitter_ready == 0u ||
-        strncmp(s_rx_jitter_device, view->device, APP_INTERCOM_DEVICE_FIELD_LEN) != 0) {
-        app_intercom_jitter_reset_for_source(view->device, view->seq);
-    }
 
     uint32_t now = osal_get_tick_ms();
     app_intercom_rx_stats_note_audio(view->seq, view->payload_len, now);
@@ -2817,7 +3177,24 @@ static void app_intercom_jitter_play_tick(void)
 {
     uint32_t now = osal_get_tick_ms();
 
+    app_intercom_rx_policy_snapshot_t policy;
+    app_intercom_rx_policy_snapshot(&policy);
+    if (policy.stream_active == 0u) {
+        return;
+    }
+
     if (s_rx_jitter_ready == 0u) {
+        return;
+    }
+
+    if (app_intercom_rx_policy_should_play(&policy) == 0) {
+        uint32_t activity_ms = s_rx_jitter_last_enqueue_ms != 0u ?
+                               s_rx_jitter_last_enqueue_ms :
+                               policy.stream_start_ms;
+        if (activity_ms != 0u &&
+            (uint32_t)(now - activity_ms) >= APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS) {
+            app_intercom_rx_release_stream("deferred_timeout", 0);
+        }
         return;
     }
 
@@ -2827,19 +3204,45 @@ static void app_intercom_jitter_play_tick(void)
         if (ready_frames < start_frames) {
             if (s_rx_jitter_ending != 0u) {
                 if (ready_frames == 0u) {
-                    app_intercom_jitter_clear();
+                    app_intercom_rx_release_stream("remote_stop_empty", 0);
                     return;
                 }
             } else {
-                if (s_rx_jitter_last_enqueue_ms != 0u &&
-                    (uint32_t)(now - s_rx_jitter_last_enqueue_ms) >= APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS) {
-                    app_intercom_jitter_clear();
+                uint32_t activity_ms = s_rx_jitter_last_enqueue_ms != 0u ?
+                                       s_rx_jitter_last_enqueue_ms :
+                                       policy.stream_start_ms;
+                if (activity_ms != 0u &&
+                    (uint32_t)(now - activity_ms) >= APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS) {
+                    app_intercom_rx_release_stream("prime_timeout", 0);
                 }
                 return;
             }
         }
-        if (app_intercom_rx_start_playback() != 0) {
-            app_intercom_jitter_clear();
+#if APP_INTERCOM_OPUS_DOWNLINK_TEST_ENABLE
+        if (s_rx_decoder_needs_reset != 0u) {
+            if (app_intercom_opus_rx_reset() != 0) {
+                APP_LOGW(TAG, "intercom_opus_rx event=decoder_reset_fail reason=deferred_drop");
+                app_intercom_rx_release_stream("decoder_reset_fail", 0);
+                return;
+            }
+            s_rx_decoder_needs_reset = 0u;
+        }
+#else
+        s_rx_decoder_needs_reset = 0u;
+#endif
+        int start_ret = app_intercom_rx_start_playback();
+        if (start_ret == 1) {
+            uint32_t activity_ms = s_rx_jitter_last_enqueue_ms != 0u ?
+                                   s_rx_jitter_last_enqueue_ms :
+                                   policy.stream_start_ms;
+            if (activity_ms != 0u &&
+                (uint32_t)(now - activity_ms) >= APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS) {
+                app_intercom_rx_release_stream("audio_resource_timeout", 0);
+            }
+            return;
+        }
+        if (start_ret != 0) {
+            app_intercom_rx_release_stream("playback_start_fail", 0);
             return;
         }
         s_rx_jitter_playing = 1u;
@@ -2887,8 +3290,7 @@ static void app_intercom_jitter_play_tick(void)
     } else {
         uint8_t ready_frames = app_intercom_jitter_count_ready();
         if (s_rx_jitter_ending != 0u && ready_frames == 0u) {
-            app_intercom_rx_stop_playback_smooth();
-            app_intercom_jitter_clear();
+            app_intercom_rx_release_stream("remote_stop_drained", 1);
             return;
         }
         if (ready_frames == 0u &&
@@ -2902,8 +3304,7 @@ static void app_intercom_jitter_play_tick(void)
                      (int)s_current_channel,
                      (unsigned int)s_rx_jitter_expected_seq,
                      (unsigned int)(now - s_rx_jitter_last_enqueue_ms));
-            app_intercom_rx_stop_playback_smooth();
-            app_intercom_jitter_clear();
+            app_intercom_rx_release_stream("empty_timeout", 1);
             return;
         }
         s_rx_jitter_missing++;
@@ -2966,8 +3367,7 @@ static void app_intercom_jitter_play_tick(void)
                  (int)s_current_channel,
                  (unsigned int)s_rx_jitter_expected_seq,
                  (unsigned int)s_rx_jitter_missing);
-        app_intercom_rx_stop_playback();
-        app_intercom_jitter_clear();
+        app_intercom_rx_release_stream("stream_break", 1);
         return;
     }
 
@@ -2986,8 +3386,7 @@ static void app_intercom_jitter_play_tick(void)
                  (unsigned int)s_rx_jitter_expected_seq,
                  played,
                  (unsigned int)write_ms);
-        app_intercom_rx_stop_playback();
-        app_intercom_jitter_clear();
+        app_intercom_rx_release_stream("write_fail", 0);
         return;
     }
 
@@ -3010,8 +3409,7 @@ static void app_intercom_jitter_play_tick(void)
     s_rx_jitter_expected_seq++;
     uint8_t buffered_after = app_intercom_jitter_count_ready();
     if (s_rx_jitter_ending != 0u && buffered_after == 0u) {
-        app_intercom_rx_stop_playback_smooth();
-        app_intercom_jitter_clear();
+        app_intercom_rx_release_stream("remote_stop_drained", 1);
         return;
     }
     if (buffered_after >= APP_INTERCOM_JITTER_HIGH_WATER) {
@@ -3181,7 +3579,35 @@ static int app_intercom_handle_packet(const uint8_t *packet, uint16_t len)
     }
 
     if (view.type == APP_INTERCOM_PKT_AUDIO && view.payload_len > 0u) {
+        app_intercom_rx_policy_snapshot_t snapshot;
+        app_intercom_rx_policy_snapshot(&snapshot);
+        if (s_ptt_active != 0 || snapshot.tx_running != 0u) {
+            return 0;
+        }
+
+        if (snapshot.stream_active == 0u) {
+            int claim_ret = app_intercom_rx_claim_stream(&view, view.seq, "audio_fallback");
+            if (claim_ret != 0) {
+                if (claim_ret == -3) {
+                    app_intercom_rx_note_foreign(&view);
+                }
+                return 0;
+            }
+        } else if (app_intercom_rx_source_matches(view.device) == 0) {
+            app_intercom_rx_note_foreign(&view);
+            return 0;
+        } else if (s_rx_jitter_ending != 0u) {
+            app_intercom_rx_release_stream("audio_after_stop", 0);
+            if (app_intercom_rx_claim_stream(&view, view.seq, "audio_restart") != 0) {
+                return 0;
+            }
+        }
+
         app_intercom_jitter_enqueue(&view);
+        app_intercom_rx_policy_snapshot(&snapshot);
+        if (app_intercom_rx_policy_should_play(&snapshot) == 0) {
+            app_intercom_jitter_trim_deferred();
+        }
         return 1;
     } else if (view.type == APP_INTERCOM_PKT_PTT_STOP) {
         app_intercom_jitter_mark_stop(&view);
@@ -3192,6 +3618,57 @@ static int app_intercom_handle_packet(const uint8_t *packet, uint16_t len)
     }
 
     return 0;
+}
+
+static uint32_t app_intercom_rx_next_wait_ms(void)
+{
+    uint32_t now = osal_get_tick_ms();
+    uint32_t wait_ms = OSAL_WAIT_FOREVER;
+    app_intercom_rx_policy_snapshot_t policy;
+    app_intercom_rx_policy_snapshot(&policy);
+
+    if (app_intercom_ws_rx_has_pending() != 0) {
+        return OSAL_WAIT_NONE;
+    }
+    if (policy.policy_dirty != 0u || s_ws_reset_rx != 0) {
+        return OSAL_WAIT_NONE;
+    }
+
+    if (s_rx_jitter_playing != 0u) {
+        if (!app_intercom_seq_before(now, s_rx_jitter_next_play_ms)) {
+            wait_ms = OSAL_WAIT_NONE;
+        } else {
+            wait_ms = s_rx_jitter_next_play_ms - now;
+        }
+    } else if (policy.stream_active != 0u) {
+        uint8_t ready = app_intercom_jitter_count_ready();
+        if (s_rx_jitter_ending != 0u ||
+            (app_intercom_rx_policy_should_play(&policy) != 0 &&
+             ready >= app_intercom_jitter_start_frames())) {
+            wait_ms = APP_INTERCOM_RX_AUDIO_RETRY_MS;
+        } else {
+            uint32_t activity_ms = s_rx_jitter_last_enqueue_ms != 0u ?
+                                   s_rx_jitter_last_enqueue_ms :
+                                   policy.stream_start_ms;
+            uint32_t deadline_ms = activity_ms + APP_INTERCOM_JITTER_PRIME_TIMEOUT_MS;
+            wait_ms = activity_ms == 0u || !app_intercom_seq_before(now, deadline_ms) ?
+                      OSAL_WAIT_NONE :
+                      deadline_ms - now;
+        }
+    }
+
+    if (policy.ui_dirty != 0u) {
+        uint32_t ui_wait_ms = OSAL_WAIT_NONE;
+        if (s_rx_policy_retry_at_ms != 0u &&
+            app_intercom_seq_before(now, s_rx_policy_retry_at_ms)) {
+            ui_wait_ms = s_rx_policy_retry_at_ms - now;
+        }
+        if (wait_ms == OSAL_WAIT_FOREVER || ui_wait_ms < wait_ms) {
+            wait_ms = ui_wait_ms;
+        }
+    }
+
+    return wait_ms;
 }
 
 /**
@@ -3207,16 +3684,12 @@ static void app_intercom_rx_task(void *arg)
     (void)arg;
 
     while (1) {
-        app_intercom_jitter_play_tick();
-
-        if (s_ws_reset_rx != 0) {
-            s_ws_reset_rx = 0;
-            app_intercom_rx_stop_playback();
-            app_intercom_jitter_clear();
+        if (app_intercom_take_rx_reset() != 0) {
+            app_intercom_rx_release_stream("ws_reset", 0);
         }
+        app_intercom_rx_apply_policy();
 
         uint16_t ws_packet_len = 0u;
-        uint8_t ws_drained = 0u;
         uint8_t drain_count = 0u;
         while (drain_count < APP_INTERCOM_RX_DRAIN_LIMIT &&
                app_intercom_ws_rx_pop(s_ws_rx_packet_buf, &ws_packet_len) == 0) {
@@ -3226,16 +3699,19 @@ static void app_intercom_rx_task(void *arg)
             } else if (handled == 3) {
                 s_ws_rx_stat_control++;
             }
-            ws_drained = 1u;
+            app_intercom_rx_apply_policy();
             drain_count++;
         }
+
+        app_intercom_rx_apply_policy();
+        app_intercom_jitter_play_tick();
         app_intercom_ws_rx_stats_log(osal_get_tick_ms());
 
-        if (ws_drained == 0u) {
-            osal_delay_ms(s_rx_jitter_playing != 0u ? 1u : 5u);
+        if (drain_count >= APP_INTERCOM_RX_DRAIN_LIMIT) {
+            osal_delay_ms(0u);
+            continue;
         }
-        app_intercom_jitter_play_tick();
-        app_intercom_rx_stop_if_idle();
+        (void)osal_task_notify_take(app_intercom_rx_next_wait_ms());
     }
 }
 
@@ -3290,12 +3766,19 @@ static void app_intercom_ptt_task(void *arg)
             if (s_ptt_active) {
                 (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_FAILED);
             }
+            app_intercom_ptt_clear_active();
             continue;
         }
 
-        if (!s_ptt_active || app_business_audio_session_try_begin() != 0) {
+        if (!s_ptt_active) {
             continue;
         }
+        if (app_business_audio_session_try_begin() != 0) {
+            app_intercom_ptt_clear_active();
+            (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
+            continue;
+        }
+        app_intercom_tx_set_running(1u);
 
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
         app_intercom_opus_tx_stats_reset();
@@ -3303,9 +3786,17 @@ static void app_intercom_ptt_task(void *arg)
             APP_LOGE(TAG, "intercom_opus_tx event=encoder_reset_fail");
             (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_FAILED);
             app_business_audio_session_end();
+            app_intercom_tx_set_running(0u);
+            app_intercom_ptt_clear_active();
             continue;
         }
 #endif
+
+        if (!s_ptt_active) {
+            app_business_audio_session_end();
+            app_intercom_tx_set_running(0u);
+            continue;
+        }
 
         uint16_t tx_samples = 0u;
         uint32_t read_ok = 0u;
@@ -3329,6 +3820,8 @@ static void app_intercom_ptt_task(void *arg)
                                                 APP_UI_INTERCOM_STATE_FAILED :
                                                 APP_UI_INTERCOM_STATE_IDLE);
                 app_business_audio_session_end();
+                app_intercom_tx_set_running(0u);
+                app_intercom_ptt_clear_active();
                 continue;
             }
         }
@@ -3435,6 +3928,7 @@ static void app_intercom_ptt_task(void *arg)
 #endif
         (void)app_ui_set_intercom_state(APP_UI_INTERCOM_STATE_IDLE);
         app_business_audio_session_end();
+        app_intercom_tx_set_running(0u);
     }
 }
 
@@ -3469,6 +3963,14 @@ int app_intercom_start(void)
     s_started = 1;
     return 0;
 #endif
+
+    if (s_rx_policy_mutex == NULL) {
+        s_rx_policy_mutex = osal_mutex_create();
+        if (s_rx_policy_mutex == NULL) {
+            APP_LOGE(TAG, "intercom_task event=start_fail reason=policy_mutex");
+            return -1;
+        }
+    }
 
 #if APP_INTERCOM_OPUS_UPLINK_TEST_ENABLE
     ret = app_audio_opus_encoder_init();
@@ -3554,13 +4056,14 @@ int app_intercom_start(void)
                  (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         return -1;
     }
+    s_rx_task = (osal_task_t)play_handle;
 #else
     ret = osal_task_create("biz_ws_play",
                            app_intercom_rx_task,
                            NULL,
                            APP_INTERCOM_RX_TASK_STACK,
                            5u,
-                           NULL);
+                           &s_rx_task);
     if (ret != 0) {
         APP_LOGE(TAG, "intercom_task event=start_fail name=biz_ws_play ret=%d", ret);
         return ret;
@@ -3595,7 +4098,15 @@ void app_intercom_set_channel(int32_t channel)
     if (channel <= 0) {
         channel = APP_BUSINESS_DEFAULT_CHANNEL;
     }
-    s_current_channel = channel;
+    int changed = s_current_channel != channel ? 1 : 0;
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        changed = s_current_channel != channel ? 1 : 0;
+        s_current_channel = channel;
+        osal_mutex_unlock(s_rx_policy_mutex);
+    } else {
+        s_current_channel = channel;
+    }
 #if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
     APP_LOGI(TAG, "opus_local event=channel_ignored ch=%d", (int)s_current_channel);
     return;
@@ -3606,6 +4117,10 @@ void app_intercom_set_channel(int32_t channel)
              APP_DEVICE_ID,
              (int)s_current_channel,
              s_ws_connected);
+    if (changed != 0) {
+        app_intercom_ws_rx_clear();
+        app_intercom_request_rx_reset();
+    }
 }
 
 /**
@@ -3623,31 +4138,48 @@ void app_intercom_set_channel(int32_t channel)
  *
  * @param channel 当前对讲频道号。
  */
-void app_intercom_ptt_start(int32_t channel)
+int app_intercom_ptt_start(int32_t channel)
 {
-    s_current_channel = channel > 0 ? channel : s_current_channel;
     if (s_ota_suspended != 0) {
-        return;
+        return -1;
     }
 #if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
     app_intercom_opus_test_ptt_start();
-    return;
+    return 0;
 #endif
     if (app_business_audio_session_is_busy()) {
         APP_LOGW(TAG,
                  "intercom_ptt event=ignored reason=audio_busy device=%s ch=%d",
                  APP_DEVICE_ID,
                  (int)s_current_channel);
-        return;
+        return -2;
     }
+
+    if (s_rx_policy_mutex == NULL ||
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_NONE) != 0) {
+        return -3;
+    }
+    s_current_channel = channel > 0 ? channel : s_current_channel;
+    if (s_rx_stream_active != 0u || s_tx_running != 0u || s_ptt_active != 0) {
+        osal_mutex_unlock(s_rx_policy_mutex);
+        APP_LOGW(TAG,
+                 "intercom_ptt event=ignored reason=rx_or_tx_busy device=%s ch=%d",
+                 APP_DEVICE_ID,
+                 (int)s_current_channel);
+        return -4;
+    }
+    s_ptt_active = 1;
+    osal_mutex_unlock(s_rx_policy_mutex);
 
     if (s_ws_task != NULL) {
         (void)osal_task_notify_give(s_ws_task);
     }
-    s_ptt_active = 1;
-    if (s_ptt_task != NULL) {
-        (void)osal_task_notify_give(s_ptt_task);
+    if (s_ptt_task == NULL) {
+        app_intercom_ptt_clear_active();
+        return -5;
     }
+    (void)osal_task_notify_give(s_ptt_task);
+    return 0;
 }
 
 /**
@@ -3662,7 +4194,59 @@ void app_intercom_ptt_stop(void)
     app_intercom_opus_test_ptt_stop();
     return;
 #endif
-    s_ptt_active = 0;
+    app_intercom_ptt_clear_active();
+}
+
+void app_intercom_set_receive_mode(app_intercom_receive_mode_t mode)
+{
+    if (mode < APP_INTERCOM_RECEIVE_AUTO || mode > APP_INTERCOM_RECEIVE_SILENT) {
+        mode = APP_INTERCOM_RECEIVE_SILENT;
+    }
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    (void)mode;
+    return;
+#endif
+
+    if (s_rx_policy_mutex == NULL) {
+        s_rx_receive_mode = mode;
+        return;
+    }
+    if (osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return;
+    }
+
+    s_rx_receive_mode = mode;
+    if (s_rx_stream_active != 0u) {
+        s_rx_user_accepted = mode == APP_INTERCOM_RECEIVE_AUTO ? 1u : 0u;
+    }
+    s_rx_policy_dirty = 1u;
+    s_rx_ui_dirty = 1u;
+    osal_mutex_unlock(s_rx_policy_mutex);
+    s_rx_policy_retry_at_ms = 0u;
+    app_intercom_rx_notify();
+}
+
+int app_intercom_accept_current_rx(void)
+{
+#if APP_INTERCOM_OPUS_LOCAL_TEST_ENABLE
+    return -1;
+#endif
+    if (s_ota_suspended != 0 || s_rx_policy_mutex == NULL ||
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) != 0) {
+        return -1;
+    }
+    if (s_rx_stream_active == 0u || s_rx_jitter_ending != 0u) {
+        osal_mutex_unlock(s_rx_policy_mutex);
+        return -2;
+    }
+
+    s_rx_user_accepted = 1u;
+    s_rx_policy_dirty = 1u;
+    s_rx_ui_dirty = 1u;
+    osal_mutex_unlock(s_rx_policy_mutex);
+    s_rx_policy_retry_at_ms = 0u;
+    app_intercom_rx_notify();
+    return 0;
 }
 
 void app_intercom_network_changed(void)
@@ -3681,7 +4265,7 @@ void app_intercom_network_changed(void)
         osal_mutex_unlock(s_ws_tx_mutex);
     }
     s_ws_force_reconnect = 1;
-    s_ws_reset_rx = 1;
+    app_intercom_request_rx_reset();
     app_intercom_ws_rx_clear();
     if (s_ws_task != NULL) {
         (void)osal_task_notify_give(s_ws_task);
@@ -3694,10 +4278,10 @@ void app_intercom_network_changed(void)
 void app_intercom_suspend(void)
 {
     s_ota_suspended = 1;
-    s_ptt_active = 0;
+    app_intercom_ptt_clear_active();
     s_ws_connected = 0;
     s_ws_force_reconnect = 1;
-    s_ws_reset_rx = 1;
+    app_intercom_request_rx_reset();
     app_intercom_ws_rx_clear();
     if (s_ws_task != NULL) {
         (void)osal_task_notify_give(s_ws_task);
@@ -3711,6 +4295,14 @@ void app_intercom_resume(void)
 {
     s_ota_suspended = 0;
     s_ws_force_reconnect = 0;
+    if (s_rx_policy_mutex != NULL &&
+        osal_mutex_lock(s_rx_policy_mutex, OSAL_WAIT_FOREVER) == 0) {
+        s_rx_policy_dirty = 1u;
+        s_rx_ui_dirty = 1u;
+        osal_mutex_unlock(s_rx_policy_mutex);
+    }
+    s_rx_policy_retry_at_ms = 0u;
+    app_intercom_rx_notify();
     if (s_ws_task != NULL) {
         (void)osal_task_notify_give(s_ws_task);
     }

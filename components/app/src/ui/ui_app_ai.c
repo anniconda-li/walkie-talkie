@@ -48,6 +48,9 @@ static lv_obj_t *g_answer_panel;
 #define AI_ASK_BTN_X         124
 #define AI_ACTION_BTN_RADIUS 24
 #define AI_AUDIO_BTN_SIZE    40
+#define AI_INTERCOM_BTN_X    192
+#define AI_INTERCOM_BTN_Y    206
+#define AI_INTERCOM_BTN_SIZE 44
 
 /* ---- LVGL 动画回调函数 ---- */
 
@@ -165,6 +168,25 @@ lv_obj_t * ui_app_ai_create(lv_obj_t * parent)
     lv_obj_center(g_ai_view.audio_label);
     lv_obj_remove_flag(g_ai_view.audio_label, LV_OBJ_FLAG_CLICKABLE);
 
+    g_ai_view.intercom_button = lv_button_create(root);
+    lv_obj_set_pos(g_ai_view.intercom_button, AI_INTERCOM_BTN_X, AI_INTERCOM_BTN_Y);
+    lv_obj_set_size(g_ai_view.intercom_button, AI_INTERCOM_BTN_SIZE, AI_INTERCOM_BTN_SIZE);
+    lv_obj_set_style_radius(g_ai_view.intercom_button, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(g_ai_view.intercom_button, UI_COLOR_INTERCOM, 0);
+    lv_obj_set_style_bg_color(g_ai_view.intercom_button,
+                              lv_color_hex(0xCC4F00),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(g_ai_view.intercom_button, 0, 0);
+    lv_obj_set_style_shadow_width(g_ai_view.intercom_button, 0, 0);
+    lv_obj_add_flag(g_ai_view.intercom_button, LV_OBJ_FLAG_HIDDEN);
+
+    g_ai_view.intercom_label = lv_label_create(g_ai_view.intercom_button);
+    lv_label_set_text(g_ai_view.intercom_label, LV_SYMBOL_VOLUME_MAX);
+    lv_obj_set_style_text_color(g_ai_view.intercom_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(g_ai_view.intercom_label, ui_font_normal(), 0);
+    lv_obj_center(g_ai_view.intercom_label);
+    lv_obj_remove_flag(g_ai_view.intercom_label, LV_OBJ_FLAG_CLICKABLE);
+
     /* 4 根录音动画柱（初始隐藏，录音时才显示） */
     for(int32_t i = 0; i < 4; i++) {
         g_ai_view.voice_bars[i] = lv_obj_create(root);
@@ -226,6 +248,7 @@ void ui_app_ai_enter(lv_obj_t * root)
 
     lv_obj_set_y(g_answer_panel, -180);
     lv_obj_set_y(g_ai_view.audio_button, 210);
+    lv_obj_set_y(g_ai_view.intercom_button, AI_INTERCOM_BTN_Y);
     lv_obj_set_y(g_ai_view.camera_button, AI_ACTION_BTN_Y);
     lv_obj_set_y(g_ai_view.ask_button, AI_ACTION_BTN_Y);
     for(int32_t i = 0; i < 4; i++) {

@@ -45,6 +45,7 @@
 #include "service_buttons.h"
 #include "service_screen.h"
 #include "ui_event.h"
+#include "ui_shell.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -214,12 +215,12 @@ static void app_business_on_channel_changed(int32_t channel)
 }
 
 /** @brief PTT 按下 → 启动对讲发送流程。 */
-static void app_business_on_ptt_started(int32_t channel)
+static int app_business_on_ptt_started(int32_t channel)
 {
     if (s_ota_mode != 0 || app_ota_is_maintenance() != 0) {
-        return;
+        return -1;
     }
-    app_intercom_ptt_start(channel);
+    return app_intercom_ptt_start(channel);
 }
 
 /** @brief PTT 松开 → 停止对讲发送。 */
@@ -260,6 +261,35 @@ static void app_business_on_ai_cancel_requested(void)
         return;
     }
     (void)app_ai_voice_cancel_current();
+}
+
+static int app_business_on_intercom_listen_requested(void)
+{
+    int ret = app_intercom_accept_current_rx();
+    if (ret != 0) {
+        return ret;
+    }
+
+    (void)app_camera_cancel_current();
+    (void)app_ai_voice_cancel_current();
+    return 0;
+}
+
+static void app_business_on_app_changed(int32_t app_id)
+{
+    switch ((ui_app_id_t)app_id) {
+        case UI_APP_ID_INTERCOM:
+        case UI_APP_ID_SETTINGS:
+            app_intercom_set_receive_mode(APP_INTERCOM_RECEIVE_AUTO);
+            break;
+        case UI_APP_ID_AI:
+            app_intercom_set_receive_mode(APP_INTERCOM_RECEIVE_PROMPT);
+            break;
+        case UI_APP_ID_CAMERA:
+        default:
+            app_intercom_set_receive_mode(APP_INTERCOM_RECEIVE_SILENT);
+            break;
+    }
 }
 
 /** @brief 相机页进入 → 启动预览。 */
@@ -604,6 +634,8 @@ static void app_business_register_ui_callbacks(void)
         .intercom_channel_changed = app_business_on_channel_changed,
         .intercom_ptt_started = app_business_on_ptt_started,
         .intercom_ptt_stopped = app_business_on_ptt_stopped,
+        .intercom_listen_requested = app_business_on_intercom_listen_requested,
+        .app_changed = app_business_on_app_changed,
         .camera_entered = app_business_on_camera_entered,
         .camera_exited = app_business_on_camera_exited,
         .camera_capture_requested = app_business_on_camera_capture,
