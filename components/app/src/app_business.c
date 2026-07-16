@@ -277,7 +277,15 @@ static int app_business_on_intercom_listen_requested(void)
 
 static void app_business_on_app_changed(int32_t app_id)
 {
-    switch ((ui_app_id_t)app_id) {
+    ui_app_id_t current_app = (ui_app_id_t)app_id;
+
+    /* AI 问答和图片上传只允许在 AI 页面继续，离页立即请求后台取消。 */
+    if (current_app != UI_APP_ID_AI) {
+        (void)app_camera_cancel_current();
+        (void)app_ai_voice_cancel_current();
+    }
+
+    switch (current_app) {
         case UI_APP_ID_INTERCOM:
         case UI_APP_ID_SETTINGS:
             app_intercom_set_receive_mode(APP_INTERCOM_RECEIVE_AUTO);
