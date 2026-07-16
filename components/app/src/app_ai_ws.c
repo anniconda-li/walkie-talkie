@@ -72,6 +72,8 @@ typedef struct {
     uint32_t input_len;
     uint8_t *reply;
     uint32_t reply_capacity;
+    app_ai_ws_text_ready_cb_t text_ready_cb;
+    void *text_ready_ctx;
     char request_id[APP_AI_WS_REQUEST_ID_BYTES];
     char sha256[APP_AI_WS_SHA256_TEXT_BYTES];
     char session[APP_AI_WS_SESSION_BYTES];
@@ -1309,6 +1311,12 @@ static int app_ai_ws_wait_result(app_ai_ws_command_t *command, uint32_t deadline
                 app_ai_ws_copy_text(command->voice_result.answer_text,
                                     sizeof(command->voice_result.answer_text),
                                     event.answer_text);
+                if (command->voice_result.text_delivered == 0u &&
+                    command->text_ready_cb != NULL &&
+                    command->text_ready_cb(command->voice_result.answer_text,
+                                           command->text_ready_ctx) == 0) {
+                    command->voice_result.text_delivered = 1u;
+                }
             }
             if (strcmp(event.status, "no_speech") == 0) {
                 command->voice_result.no_speech = 1u;
@@ -1609,6 +1617,8 @@ int app_ai_ws_voice_request(const char *request_id,
                             const char sha256[APP_AI_WS_SHA256_TEXT_BYTES],
                             uint8_t *reply,
                             uint32_t reply_capacity,
+                            app_ai_ws_text_ready_cb_t text_ready_cb,
+                            void *text_ready_ctx,
                             app_ai_ws_voice_result_t *result)
 {
     if (!app_ai_ws_identifier_is_safe(request_id) || audio == NULL || audio_len == 0u ||
@@ -1627,6 +1637,8 @@ int app_ai_ws_voice_request(const char *request_id,
     command->input_len = audio_len;
     command->reply = reply;
     command->reply_capacity = reply_capacity;
+    command->text_ready_cb = text_ready_cb;
+    command->text_ready_ctx = text_ready_ctx;
     app_ai_ws_copy_text(command->request_id, sizeof(command->request_id), request_id);
     app_ai_ws_copy_text(command->sha256, sizeof(command->sha256), sha256);
     int ret = app_ai_ws_submit(command);

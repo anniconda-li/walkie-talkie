@@ -202,6 +202,36 @@ static int app_ai_voice_can_start_recording_now(void)
            state == APP_AI_STATE_FAILED;
 }
 
+static int app_ai_voice_state_has_backend_work(app_ai_voice_state_t state)
+{
+    return state == APP_AI_STATE_UPLOADING ||
+           state == APP_AI_STATE_FINISHING ||
+           state == APP_AI_STATE_WAITING_TEXT ||
+           state == APP_AI_STATE_WAITING_AUDIO ||
+           state == APP_AI_STATE_DOWNLOADING_AUDIO;
+}
+
+static int app_ai_voice_on_ws_text_ready(const char *answer_text, void *ctx)
+{
+    const char *request_id = (const char *)ctx;
+    if (answer_text == NULL || answer_text[0] == '\0' ||
+        app_ai_voice_is_cancel_requested() ||
+        !app_ai_voice_state_has_backend_work(s_ai_state)) {
+        return -1;
+    }
+
+    APP_LOGI("AI-UI",
+             "text_ready request_id=%s answer_len=%u",
+             request_id != NULL ? request_id : "-",
+             (unsigned int)strlen(answer_text));
+    app_ai_voice_set_state(APP_AI_STATE_WAITING_AUDIO);
+    int ret = app_ui_set_ai_answer_text(answer_text);
+    if (ret == 0) {
+        (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_WAITING);
+    }
+    return ret;
+}
+
 /* ==========================================================================
  * 小端字段与 AOP1 格式辅助函数
  * ========================================================================== */
@@ -2142,6 +2172,8 @@ static void app_ai_voice_task(void *arg)
                                                   request_sha256,
                                                   s_ai_reply_chunk_buf,
                                                   APP_BUSINESS_AI_REPLY_OPUS_MAX_BYTES,
+                                                  app_ai_voice_on_ws_text_ready,
+                                                  request_id,
                                                   &result);
                 }
             }
@@ -2158,13 +2190,22 @@ static void app_ai_voice_task(void *arg)
                          request_id,
                          ret);
                 (void)app_ui_set_ai_waiting(0);
-                (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+                if (result.answer_text[0] != '\0') {
+                    if (result.text_delivered == 0u) {
+                        (void)app_ui_set_ai_answer_text(result.answer_text);
+                    }
+                    APP_LOGW(TAG,
+                             "AI 文本已保留但回复语音不可用, request_id=%s",
+                             request_id);
+                } else {
+                    (void)app_ui_set_ai_message(UI_TEXT_AI_QUESTION_FAILED);
+                }
                 (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_FAILED);
                 app_ai_voice_set_state(APP_AI_STATE_FAILED);
             } else {
                 app_ai_voice_set_current_session(result.session);
                 (void)app_ui_set_ai_waiting(0);
-                if (result.answer_text[0] != '\0') {
+                if (result.answer_text[0] != '\0' && result.text_delivered == 0u) {
                     (void)app_ui_set_ai_answer_text(result.answer_text);
                 }
 
@@ -2442,15 +2483,6 @@ void app_ai_voice_request_reply_stop(void)
     /* ROP1 已完整下载并校验到 PSRAM；此处只停止本地解码播放。 */
     s_reply_stop_requested = 1;
     (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
-}
-
-static int app_ai_voice_state_has_backend_work(app_ai_voice_state_t state)
-{
-    return state == APP_AI_STATE_UPLOADING ||
-           state == APP_AI_STATE_FINISHING ||
-           state == APP_AI_STATE_WAITING_TEXT ||
-           state == APP_AI_STATE_WAITING_AUDIO ||
-           state == APP_AI_STATE_DOWNLOADING_AUDIO;
 }
 
 esp_err_t app_ai_voice_cancel_current(void)
