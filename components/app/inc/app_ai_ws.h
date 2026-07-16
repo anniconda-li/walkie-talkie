@@ -19,6 +19,9 @@ extern "C" {
 #define APP_AI_WS_STATUS_BYTES        24u
 #define APP_AI_WS_ERR_CANCELLED       (-900)
 
+/** @brief AI 文本结果提前就绪时的通知；返回 0 表示已经交付给上层。 */
+typedef int (*app_ai_ws_text_ready_cb_t)(const char *answer_text, void *ctx);
+
 typedef struct {
     char session[APP_AI_WS_SESSION_BYTES];
     char status[APP_AI_WS_STATUS_BYTES];
@@ -30,6 +33,7 @@ typedef struct {
     uint32_t bitrate;
     uint8_t channels;
     uint8_t no_speech;
+    uint8_t text_delivered;
 } app_ai_ws_voice_result_t;
 
 /** @brief 创建 AI WebSocket 唯一读写任务；网络未连接时只等待，不主动猛连。 */
@@ -46,6 +50,8 @@ int app_ai_ws_voice_request(const char *request_id,
                             const char sha256[APP_AI_WS_SHA256_TEXT_BYTES],
                             uint8_t *reply,
                             uint32_t reply_capacity,
+                            app_ai_ws_text_ready_cb_t text_ready_cb,
+                            void *text_ready_ctx,
                             app_ai_ws_voice_result_t *result);
 
 /** @brief 上传 JPEG 并等待服务器返回最终图像分析 JSON。 */
