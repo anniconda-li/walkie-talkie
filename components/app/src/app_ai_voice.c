@@ -2189,7 +2189,6 @@ static void app_ai_voice_task(void *arg)
                          "AI WebSocket 问答失败, request_id=%s, ret=%d",
                          request_id,
                          ret);
-                (void)app_ui_set_ai_waiting(0);
                 if (result.answer_text[0] != '\0') {
                     if (result.text_delivered == 0u) {
                         (void)app_ui_set_ai_answer_text(result.answer_text);
@@ -2204,9 +2203,10 @@ static void app_ai_voice_task(void *arg)
                 app_ai_voice_set_state(APP_AI_STATE_FAILED);
             } else {
                 app_ai_voice_set_current_session(result.session);
-                (void)app_ui_set_ai_waiting(0);
                 if (result.answer_text[0] != '\0' && result.text_delivered == 0u) {
                     (void)app_ui_set_ai_answer_text(result.answer_text);
+                } else if (result.answer_text[0] == '\0' && !result.no_speech) {
+                    (void)app_ui_set_ai_waiting(0);
                 }
 
                 if (result.no_speech) {
