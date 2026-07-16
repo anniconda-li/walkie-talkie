@@ -131,12 +131,11 @@ static osal_task_t s_task = NULL;
 static osal_queue_t s_command_queue = NULL;
 static osal_mutex_t s_state_mutex = NULL;
 static app_ai_ws_command_t *s_active_command = NULL;
+static app_ai_ws_command_t *s_claimed_command = NULL;
 static volatile int s_operation_claimed = 0;
-static char s_active_request_id[APP_AI_WS_REQUEST_ID_BYTES];
 static char s_active_session[APP_AI_WS_SESSION_BYTES];
 static char s_pending_cancel_request[APP_AI_WS_REQUEST_ID_BYTES];
 static char s_pending_cancel_session[APP_AI_WS_SESSION_BYTES];
-static char s_pending_stop_session[APP_AI_WS_SESSION_BYTES];
 static uint8_t *s_rx_buffer = NULL;
 static uint8_t *s_tx_buffer = NULL;
 static uint8_t *s_wai_buffer = NULL;
@@ -798,9 +797,6 @@ static void app_ai_ws_set_active_identity(const app_ai_ws_command_t *command)
     if (s_state_mutex == NULL || osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) != 0) {
         return;
     }
-    app_ai_ws_copy_text(s_active_request_id,
-                        sizeof(s_active_request_id),
-                        command != NULL ? command->request_id : NULL);
     app_ai_ws_copy_text(s_active_session,
                         sizeof(s_active_session),
                         command != NULL ? command->session : NULL);
@@ -938,6 +934,9 @@ static int app_ai_ws_upload(app_ai_ws_command_t *command, uint32_t deadline_ms)
     uint32_t sequence = 0u;
     uint32_t last_log_offset = 0u;
     while (offset < command->input_len) {
+        if (app_ai_ws_command_cancelled(command)) {
+            return APP_AI_WS_ERR_CANCELLED;
+        }
         int ret = app_ai_ws_ensure_connected(command, deadline_ms);
         if (ret != 0) {
             return ret;
@@ -1378,8 +1377,7 @@ static int app_ai_ws_has_pending_control(void)
     int pending = 0;
     if (s_state_mutex != NULL && osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) == 0) {
         pending = s_pending_cancel_request[0] != '\0' ||
-                  s_pending_cancel_session[0] != '\0' ||
-                  s_pending_stop_session[0] != '\0';
+                  s_pending_cancel_session[0] != '\0';
         osal_mutex_unlock(s_state_mutex);
     }
     return pending;
@@ -1389,14 +1387,11 @@ static int app_ai_ws_send_pending_control(void)
 {
     char cancel_request[APP_AI_WS_REQUEST_ID_BYTES];
     char cancel_session[APP_AI_WS_SESSION_BYTES];
-    char stop_session[APP_AI_WS_SESSION_BYTES];
     cancel_request[0] = '\0';
     cancel_session[0] = '\0';
-    stop_session[0] = '\0';
     if (s_state_mutex != NULL && osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) == 0) {
         app_ai_ws_copy_text(cancel_request, sizeof(cancel_request), s_pending_cancel_request);
         app_ai_ws_copy_text(cancel_session, sizeof(cancel_session), s_pending_cancel_session);
-        app_ai_ws_copy_text(stop_session, sizeof(stop_session), s_pending_stop_session);
         osal_mutex_unlock(s_state_mutex);
     }
 
@@ -1415,20 +1410,6 @@ static int app_ai_ws_send_pending_control(void)
                 strcmp(s_pending_cancel_session, cancel_session) == 0) {
                 s_pending_cancel_request[0] = '\0';
                 s_pending_cancel_session[0] = '\0';
-            }
-            osal_mutex_unlock(s_state_mutex);
-        }
-    }
-    if (ret == 0 && stop_session[0] != '\0') {
-        int len = snprintf(json,
-                           sizeof(json),
-                           "{\"type\":\"stop_audio\",\"session\":\"%s\"}",
-                           stop_session);
-        ret = len > 0 && (size_t)len < sizeof(json) ? app_ai_ws_send_json(json) : -1;
-        if (ret == 0 && s_state_mutex != NULL &&
-            osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) == 0) {
-            if (strcmp(s_pending_stop_session, stop_session) == 0) {
-                s_pending_stop_session[0] = '\0';
             }
             osal_mutex_unlock(s_state_mutex);
         }
@@ -1455,7 +1436,6 @@ static void app_ai_ws_task(void *arg)
                 if (s_active_command == command) {
                     s_active_command = NULL;
                 }
-                s_active_request_id[0] = '\0';
                 s_active_session[0] = '\0';
                 osal_mutex_unlock(s_state_mutex);
             }
@@ -1513,11 +1493,15 @@ static int app_ai_ws_submit(app_ai_ws_command_t *command)
         return -3;
     }
     s_operation_claimed = 1;
+    s_claimed_command = command;
     osal_mutex_unlock(s_state_mutex);
 
     app_ai_ws_command_t *queued = command;
     if (osal_queue_send(s_command_queue, &queued, 1000u) != 0) {
         if (osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) == 0) {
+            if (s_claimed_command == command) {
+                s_claimed_command = NULL;
+            }
             s_operation_claimed = 0;
             osal_mutex_unlock(s_state_mutex);
         }
@@ -1530,6 +1514,9 @@ static int app_ai_ws_submit(app_ai_ws_command_t *command)
         osal_delay_ms(APP_AI_WS_WAIT_STEP_MS);
     }
     if (osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) == 0) {
+        if (s_claimed_command == command) {
+            s_claimed_command = NULL;
+        }
         s_operation_claimed = 0;
         osal_mutex_unlock(s_state_mutex);
     }
@@ -1690,14 +1677,16 @@ int app_ai_ws_cancel_active(void)
         osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) != 0) {
         return -1;
     }
-    if (s_active_command != NULL) {
-        s_active_command->cancel = 1;
+    app_ai_ws_command_t *command = s_active_command != NULL ?
+                                   s_active_command : s_claimed_command;
+    if (command != NULL && command->done == 0) {
+        command->cancel = 1;
         app_ai_ws_copy_text(s_pending_cancel_request,
                             sizeof(s_pending_cancel_request),
-                            s_active_request_id);
+                            command->request_id);
         app_ai_ws_copy_text(s_pending_cancel_session,
                             sizeof(s_pending_cancel_session),
-                            s_active_session);
+                            command == s_active_command ? s_active_session : "");
         found = 1;
     }
     osal_mutex_unlock(s_state_mutex);
@@ -1706,19 +1695,6 @@ int app_ai_ws_cancel_active(void)
         return 0;
     }
     return -2;
-}
-
-void app_ai_ws_stop_audio(const char *session)
-{
-    if (!s_started || !app_ai_ws_identifier_is_safe(session) || s_state_mutex == NULL ||
-        osal_mutex_lock(s_state_mutex, OSAL_WAIT_FOREVER) != 0) {
-        return;
-    }
-    app_ai_ws_copy_text(s_pending_stop_session, sizeof(s_pending_stop_session), session);
-    osal_mutex_unlock(s_state_mutex);
-    if (s_task != NULL) {
-        (void)osal_task_notify_give(s_task);
-    }
 }
 
 void app_ai_ws_network_changed(void)

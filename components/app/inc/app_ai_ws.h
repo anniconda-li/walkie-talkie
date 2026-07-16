@@ -60,9 +60,6 @@ int app_ai_ws_camera_request(const char *request_id,
 /** @brief 中止当前 AI WebSocket 业务；网络不可用时取消消息会在重连后补发。 */
 int app_ai_ws_cancel_active(void);
 
-/** @brief 异步通知后端停止当前回复语音，设备本地播放会立即由上层停止。 */
-void app_ai_ws_stop_audio(const char *session);
-
 /** @brief 网络模式或地址变化，关闭旧 socket 并让任务按新网络状态重建。 */
 void app_ai_ws_network_changed(void);
 

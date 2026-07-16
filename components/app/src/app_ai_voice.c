@@ -1213,49 +1213,6 @@ static void app_ai_voice_request_backend_cancel_async(const char *session)
 }
 #endif
 
-typedef struct {
-    char session[64];
-} app_ai_voice_stop_audio_req_t;
-
-static int app_ai_voice_send_backend_stop_audio(const char *session)
-{
-    char query[128];
-    char url[256];
-    uint32_t resp_len = 0u;
-
-    if (session == NULL || session[0] == '\0') {
-        return -1;
-    }
-
-    snprintf(query, sizeof(query), "session=%s&device=%s", session, APP_DEVICE_ID);
-    if (app_ai_voice_build_url(url, sizeof(url), APP_BUSINESS_HTTP_ROUTE_AI_STOP_AUDIO, query) != 0) {
-        return -2;
-    }
-
-    int ret = app_ai_voice_post_json(url, &resp_len);
-    if (ret == 0) {
-        APP_LOGI("AI-UI", "backend stop-audio request sent, session=%s", session);
-    } else {
-        APP_LOGW("AI-UI", "backend stop-audio failed but local playback stopped, session=%s, ret=%d", session, ret);
-    }
-    return ret;
-}
-
-static void app_ai_voice_stop_audio_task(void *arg)
-{
-    app_ai_voice_stop_audio_req_t *req = (app_ai_voice_stop_audio_req_t *)arg;
-    if (req != NULL) {
-        (void)app_ai_voice_send_backend_stop_audio(req->session);
-        osal_heap_free(req);
-    }
-    osal_task_delete_current();
-}
-
-static void app_ai_voice_request_backend_stop_audio_async(const char *session)
-{
-    app_ai_ws_stop_audio(session);
-}
-
 /** @brief 请求服务器创建一次 AI 会话。 */
 static int app_ai_voice_start_session(char *session, size_t session_size)
 {
@@ -2176,13 +2133,17 @@ static void app_ai_voice_task(void *arg)
                                                             request_sha256);
             if (ret == 0) {
                 app_ai_voice_set_state(APP_AI_STATE_UPLOADING);
-                ret = app_ai_ws_voice_request(request_id,
-                                              s_ai_request_audio_buf,
-                                              request_audio_len,
-                                              request_sha256,
-                                              s_ai_reply_chunk_buf,
-                                              APP_BUSINESS_AI_REPLY_OPUS_MAX_BYTES,
-                                              &result);
+                if (app_ai_voice_is_cancel_requested()) {
+                    ret = APP_AI_WS_ERR_CANCELLED;
+                } else {
+                    ret = app_ai_ws_voice_request(request_id,
+                                                  s_ai_request_audio_buf,
+                                                  request_audio_len,
+                                                  request_sha256,
+                                                  s_ai_reply_chunk_buf,
+                                                  APP_BUSINESS_AI_REPLY_OPUS_MAX_BYTES,
+                                                  &result);
+                }
             }
             if (ret == APP_AI_WS_ERR_CANCELLED || app_ai_voice_is_cancel_requested()) {
                 (void)app_ui_set_ai_waiting(0);
@@ -2473,20 +2434,23 @@ void app_ai_voice_request_reply_play(void)
 
 void app_ai_voice_request_reply_stop(void)
 {
-    char session[64];
-
     if (!s_started || !s_reply_play_busy) {
         return;
     }
 
     APP_LOGI("AI-UI", "stop playback requested");
+    /* ROP1 已完整下载并校验到 PSRAM；此处只停止本地解码播放。 */
     s_reply_stop_requested = 1;
-    strncpy(session, s_reply_session, sizeof(session) - 1u);
-    session[sizeof(session) - 1u] = '\0';
-    if (session[0] != '\0') {
-        app_ai_voice_request_backend_stop_audio_async(session);
-    }
     (void)app_ui_set_ai_audio_button_state(UI_AI_AUDIO_BTN_READY);
+}
+
+static int app_ai_voice_state_has_backend_work(app_ai_voice_state_t state)
+{
+    return state == APP_AI_STATE_UPLOADING ||
+           state == APP_AI_STATE_FINISHING ||
+           state == APP_AI_STATE_WAITING_TEXT ||
+           state == APP_AI_STATE_WAITING_AUDIO ||
+           state == APP_AI_STATE_DOWNLOADING_AUDIO;
 }
 
 esp_err_t app_ai_voice_cancel_current(void)
@@ -2501,8 +2465,11 @@ esp_err_t app_ai_voice_cancel_current(void)
         old_state == APP_AI_STATE_FAILED) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (old_state == APP_AI_STATE_CANCELING) {
+        return ESP_OK;
+    }
 
-    APP_LOGI(CANCEL_TAG, "user requested cancel");
+    APP_LOGI(CANCEL_TAG, "user requested cancel, state=%d", (int)old_state);
     s_ai_cancel_requested = 1;
     app_ai_voice_set_state(APP_AI_STATE_CANCELING);
 
@@ -2514,10 +2481,11 @@ esp_err_t app_ai_voice_cancel_current(void)
         APP_LOGI(CANCEL_TAG, "cancel during playback");
     }
 
-    char session[64];
-    strncpy(session, s_ai_current_session, sizeof(session) - 1u);
-    session[sizeof(session) - 1u] = '\0';
-    if (session[0] != '\0') {
+    if (app_ai_voice_state_has_backend_work(old_state)) {
+        char session[64];
+        strncpy(session, s_ai_current_session, sizeof(session) - 1u);
+        session[sizeof(session) - 1u] = '\0';
+        /* WebSocket 活动命令持有 request_id/session，早期 session 为空也必须中止。 */
         app_ai_voice_request_backend_cancel_async(session);
     }
 
