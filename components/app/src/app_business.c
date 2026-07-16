@@ -279,10 +279,13 @@ static void app_business_on_app_changed(int32_t app_id)
 {
     ui_app_id_t current_app = (ui_app_id_t)app_id;
 
-    /* AI 问答和图片上传只允许在 AI 页面继续，离页立即请求后台取消。 */
+    /* 语音问答只允许在 AI 页继续；进入相机页也要终止当前语音任务。 */
     if (current_app != UI_APP_ID_AI) {
-        (void)app_camera_cancel_current();
         (void)app_ai_voice_cancel_current();
+    }
+    /* 图片识别允许从相机页返回 AI 页继续，其余页面都立即取消。 */
+    if (current_app != UI_APP_ID_AI && current_app != UI_APP_ID_CAMERA) {
+        (void)app_camera_cancel_current();
     }
 
     switch (current_app) {

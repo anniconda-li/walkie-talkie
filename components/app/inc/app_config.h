@@ -89,8 +89,6 @@ extern "C" {
 #define APP_BUSINESS_HTTP_ROUTE_AI_RESULT_CHUNK "/ai/result_chunk"
 /** @brief AI 问答取消路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_AI_CANCEL       "/ai/cancel"
-/** @brief AI 回复语音停止播放路由。 */
-#define APP_BUSINESS_HTTP_ROUTE_AI_STOP_AUDIO   "/ai/stop_audio"
 /** @brief 相机 JPEG 分片上传路由。 */
 #define APP_BUSINESS_HTTP_ROUTE_CAMERA_CHUNK    "/camera/upload/chunk"
 /** @brief 相机 JPEG 分片完成并同步识别路由。 */
