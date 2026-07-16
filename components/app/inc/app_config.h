@@ -37,7 +37,7 @@ extern "C" {
 #endif
 
 /** @brief 全局设备 ID，AI、相机和对讲业务都使用同一个身份。 */
-#define APP_DEVICE_ID                   "walkie-02"
+#define APP_DEVICE_ID                   "walkie-03"
 /** @brief 兼容旧业务命名，统一指向 APP_DEVICE_ID。 */
 #define APP_BUSINESS_DEVICE_NAME        APP_DEVICE_ID
 /** @brief 业务服务器地址，AI 与对讲 WebSocket 使用同一公网主机、不同端口。 */
@@ -74,7 +74,7 @@ extern "C" {
 /** @brief WiFi OTA 服务固定根地址。 */
 #define APP_OTA_BASE_URL                 "http://139.129.17.67:18082"
 /** @brief OTA 服务识别的硬件型号；由当前设备分支在编译时固定。 */
-#define APP_OTA_HARDWARE                 "walkie-v1-rev-2"
+#define APP_OTA_HARDWARE                 "walkie-v1-rev-3"
 /** @brief OTA 仅使用稳定发布通道。 */
 #define APP_OTA_CHANNEL                  "stable"
 /** @brief AI 创建会话路由。 */

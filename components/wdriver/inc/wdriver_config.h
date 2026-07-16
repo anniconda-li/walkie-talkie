@@ -65,7 +65,7 @@
 #define WDRIVER_LCD_DC_IO    GPIO_NUM_13 /**< 数据/命令选择。 */
 #define WDRIVER_LCD_CS_IO    GPIO_NUM_12 /**< SPI 片选。 */
 #define WDRIVER_LCD_RST_IO   GPIO_NUM_NC /**< 复位脚未接。 */
-#define WDRIVER_LCD_BL_IO    GPIO_NUM_NC /**< 背光控制。PCA拓展io4 */
+#define WDRIVER_LCD_BL_IO    GPIO_NUM_NC /**< 背光控制。PCA9557 IO3。 */
 
 /**
  * @brief FT6336/FT5x06 触摸引脚定义。
@@ -106,11 +106,11 @@
 #define WDRIVER_CAMERA_D1_IO    GPIO_NUM_47  /**< 数据 D1。 */
 #define WDRIVER_CAMERA_D2_IO    GPIO_NUM_48  /**< 数据 D2。 */
 #define WDRIVER_CAMERA_D3_IO    GPIO_NUM_4   /**< 数据 D3。 */
-#define WDRIVER_CAMERA_D4_IO    GPIO_NUM_42  /**< 数据 D4。 */
+#define WDRIVER_CAMERA_D4_IO    GPIO_NUM_0   /**< 数据 D4。 */
 #define WDRIVER_CAMERA_D5_IO    GPIO_NUM_38  /**< 数据 D5。 */
 #define WDRIVER_CAMERA_D6_IO    GPIO_NUM_39  /**< 数据 D6。 */
 #define WDRIVER_CAMERA_D7_IO    GPIO_NUM_40  /**< 数据 D7。 */
-#define WDRIVER_CAMERA_PWDN_IO  GPIO_NUM_NC  /**< 电源接拓展PCA9557 IO3 */
+#define WDRIVER_CAMERA_PWDN_IO  GPIO_NUM_42  /**< 电源控制。 */
 #define WDRIVER_CAMERA_RESET_IO GPIO_NUM_NC  /**< 复位脚未接。 */
 #define WDRIVER_CAMERA_XCLK_IO  GPIO_NUM_NC  /**< XCLK 未接。 */
 

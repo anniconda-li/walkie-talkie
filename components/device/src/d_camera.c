@@ -5,7 +5,6 @@
 #include "d_camera.h"
 
 #include "d_config.h"
-#include "d_pca9557.h"
 #include "wdriver_i2c.h"
 #include "driver/gpio.h"
 #include "osal_task.h"
@@ -67,9 +66,6 @@ static int d_camera_err_to_int(int ret)
 static int d_camera_set_pwdn_level(int level)
 {
     if (d_camera_PWDN_IO == GPIO_NUM_NC) {
-        if (d_pca9557_is_initialized() == 1) {
-            return d_pca9557_set_camera_pwdn(level != 0 ? PCA9557_LEVEL_HIGH : PCA9557_LEVEL_LOW);
-        }
         return 0;
     }
 

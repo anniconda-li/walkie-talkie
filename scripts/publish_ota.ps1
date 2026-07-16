@@ -81,8 +81,14 @@ function Get-BranchBinding {
                 Hardware = "walkie-v1-rev-2"
             }
         }
+        "device/003" {
+            return [PSCustomObject]@{
+                DeviceId = "walkie-03"
+                Hardware = "walkie-v1-rev-3"
+            }
+        }
         default {
-            throw "Current branch '$Branch' is not device/001 or device/002; refusing to guess OTA hardware."
+            throw "Current branch '$Branch' is not device/001, device/002, or device/003; refusing to guess OTA hardware."
         }
     }
 }
@@ -160,7 +166,7 @@ function Test-FirmwareHardwareMarker {
         [string]$ExpectedHardware
     )
 
-    $allowedHardware = @("walkie-v1-rev-1", "walkie-v1-rev-2")
+    $allowedHardware = @("walkie-v1-rev-1", "walkie-v1-rev-2", "walkie-v1-rev-3")
     if ($allowedHardware -cnotcontains $ExpectedHardware) {
         throw "Unsupported OTA hardware '$ExpectedHardware'."
     }
@@ -193,7 +199,7 @@ try {
     $binding = Get-BranchBinding -Branch $branch
     $deviceId = Get-SingleDefineString -HeaderPath $appConfigPath -DefineName "APP_DEVICE_ID"
     $hardware = Get-SingleDefineString -HeaderPath $appConfigPath -DefineName "APP_OTA_HARDWARE"
-    $allowedHardware = @("walkie-v1-rev-1", "walkie-v1-rev-2")
+    $allowedHardware = @("walkie-v1-rev-1", "walkie-v1-rev-2", "walkie-v1-rev-3")
     if ($allowedHardware -cnotcontains $hardware) {
         throw "APP_OTA_HARDWARE '$hardware' is not an allowed hardware value."
     }

@@ -14,10 +14,9 @@
  */
 static const char *TAG = "d_pca9557";
 
-#define D_PCA9557_I2C_ADDR        0x19u
-#define D_PCA9557_I2C_SPEED_HZ    100000u
-#define D_PCA9557_CAMERA_PWDN_PIN PCA9557_PIN_3
-#define D_PCA9557_LCD_BL_PIN      PCA9557_PIN_4
+#define D_PCA9557_I2C_ADDR     0x19u
+#define D_PCA9557_I2C_SPEED_HZ 100000u
+#define D_PCA9557_LCD_BL_PIN   PCA9557_PIN_3
 
 /**
  * @brief PCA9557 输入端口寄存器。
@@ -330,8 +329,7 @@ int d_pca9557_init(const d_pca9557_wdriver_ops_t *ops)
         /* LCD_BL 高有效，上电初始化时保持关闭。 */
         .output_init = 0x00u,
         .polarity_init = 0x00u,
-        .direction_init = (uint8_t)~((1u << D_PCA9557_CAMERA_PWDN_PIN) |
-                                     (1u << D_PCA9557_LCD_BL_PIN)),
+        .direction_init = (uint8_t)~(1u << D_PCA9557_LCD_BL_PIN),
     };
 
     if (pca9557_init(&config, &s_board_pca9557_itf) != 0) {
@@ -397,19 +395,7 @@ int d_pca9557_set_lcd_backlight(int on)
     if (ret != 0) {
         D_LOGE(TAG, "LCD 背光控制失败, ret=%d", ret);
     } else {
-        D_LOGI(TAG, "LCD 背光%s, pca_io=4", on != 0 ? "打开" : "关闭");
-    }
-
-    return ret;
-}
-
-int d_pca9557_set_camera_pwdn(pca9557_level_t level)
-{
-    int ret = d_pca9557_set_pin_level(D_PCA9557_CAMERA_PWDN_PIN, level);
-    if (ret == 0) {
-        D_LOGI(TAG, "Camera PWDN 设置成功, level=%d", level);
-    } else {
-        D_LOGE(TAG, "Camera PWDN 设置失败, ret=%d", ret);
+        D_LOGI(TAG, "LCD 背光%s, pca_io=3", on != 0 ? "打开" : "关闭");
     }
 
     return ret;

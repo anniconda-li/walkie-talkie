@@ -39,6 +39,7 @@ OTA 固件版本只由项目根目录 `CMakeLists.txt` 中的 `PROJECT_VER` 管�
 
 - `device/001`：`APP_DEVICE_ID=walkie-01`，`APP_OTA_HARDWARE=walkie-v1-rev-1`。
 - `device/002`：`APP_DEVICE_ID=walkie-02`，`APP_OTA_HARDWARE=walkie-v1-rev-2`。
+- `device/003`：`APP_DEVICE_ID=walkie-03`，`APP_OTA_HARDWARE=walkie-v1-rev-3`。
 
 日常发布分两步。第一步，用户在 ESP-IDF 环境中手动构建当前设备分支，生成：
 
@@ -67,9 +68,10 @@ build\project_description.json
 
 ### 从旧 OTA hardware 迁移
 
-- 旧 `walkie-v1` 不能自动猜测并迁移到 `walkie-v1-rev-1` 或 `walkie-v1-rev-2`。
+- 旧 `walkie-v1` 不能自动猜测并迁移到 `walkie-v1-rev-1`、`walkie-v1-rev-2` 或 `walkie-v1-rev-3`。
 - `device/001` 首次需要通过 USB 烧录一次内置 `walkie-v1-rev-1` 的完整固件。
 - `device/002` 首次需要通过 USB 烧录一次内置 `walkie-v1-rev-2` 的完整固件。
+- `device/003` 首次需要通过 USB 烧录一次内置 `walkie-v1-rev-3` 的完整固件。
 - 完成首次 USB 迁移并确认启动后，才分别使用对应 hardware 的 OTA。
 
 ## AI 语音链路

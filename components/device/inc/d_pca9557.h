@@ -114,20 +114,12 @@ int d_pca9557_is_initialized(void);
 /**
  * @brief 设置 LCD 背光。
  *
- * PCA9557 IO4 高电平打开背光，低电平关闭背光。
+ * PCA9557 IO3 高电平打开背光，低电平关闭背光。
  *
  * @param[in] on 0 关闭背光，非 0 打开背光。
  * @return 成功返回 0；失败返回负值。
  */
 int d_pca9557_set_lcd_backlight(int on);
-
-/**
- * @brief 设置 Camera PWDN 引脚电平。
- *
- * @param[in] level PCA9557 输出电平。
- * @return 成功返回 0；失败返回负值。
- */
-int d_pca9557_set_camera_pwdn(pca9557_level_t level);
 
 #ifdef __cplusplus
 }

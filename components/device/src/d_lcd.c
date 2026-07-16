@@ -171,7 +171,7 @@ static int d_lcd_err_to_int(int ret)
     return (ret == 0) ? 0 : ((ret < 0) ? ret : -ret);
 }
 
-/** @brief 控制 LCD 背光，高电平点亮；GPIO_NUM_NC 表示背光接在 PCA9557 IO4。 */
+/** @brief 控制 LCD 背光，高电平点亮；GPIO_NUM_NC 表示背光接在 PCA9557 IO3。 */
 static int d_lcd_set_backlight(int on)
 {
     int ret = 0;
@@ -179,7 +179,7 @@ static int d_lcd_set_backlight(int on)
     if (d_lcd_BL_IO == GPIO_NUM_NC) {
         ret = d_pca9557_set_lcd_backlight(on);
         if (ret != 0) {
-            D_LOGE(TAG, "LCD 背光控制失败, pca_io=4, ret=%d", ret);
+            D_LOGE(TAG, "LCD 背光控制失败, pca_io=3, ret=%d", ret);
         }
         return ret;
     }
