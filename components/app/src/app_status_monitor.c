@@ -1,18 +1,17 @@
 /**
  * @file app_status_monitor.c
- * @brief UI 状态监听业务——电池电量和网络信号周期性刷新。
+ * @brief UI 状态监听业务——固定电量显示和网络信号周期性刷新。
  *
  * ## 模块职责
- * - 周期性读取 battery service 给出的电量百分比，更新 UI 电池图标
+ * - 启动时按设备配置写入固定电量百分比
  * - 周期性查询 WiFi 网络状态（信号格数），更新 UI 信号图标
  * - 维护 s_network_ready 标志供心跳任务检测断线重连
  *
  * ## 任务列表
- * - biz_battery（优先级 5, 1s 周期）—— 读电量百分比 → 更新 UI
  * - biz_network（优先级 4, 3s 周期）—— 查网络信号 → 换算格数 → 更新 UI + s_network_ready
  *
  * ## 调度方式
- * 两个任务都使用时间轮询（osal_delay_ms），不依赖 Notification。
+ * 网络任务使用时间轮询（osal_delay_ms），不依赖 Notification。
  */
 #include "app_status_monitor.h"
 
@@ -20,7 +19,6 @@
 #include "app_network.h"
 #include "app_ui.h"
 #include "osal_task.h"
-#include "service_battery.h"
 #include "service_network.h"
 
 #include <stddef.h>
@@ -38,24 +36,8 @@ static volatile int s_started = 0;
  */
 static volatile int s_network_ready = 0;
 
-/**
- * @brief 电池电量轮询任务（1s 周期）。
- *
- * @param arg 未使用。
- */
-static void app_status_monitor_battery_task(void *arg)
-{
-    (void)arg;
-
-    while (1) {
-        int level = 0;
-        if (service_battery_get(&level) == 0) {
-            (void)app_ui_set_battery_level(level);
-        }
-
-        osal_delay_ms(1000u);
-    }
-}
+_Static_assert(APP_STATUS_BATTERY_PERCENT >= 0 && APP_STATUS_BATTERY_PERCENT <= 100,
+               "fixed battery display percent must be in range 0..100");
 
 /**
  * @brief 将网络状态转换为 0-4 格信号图标。
@@ -132,7 +114,7 @@ static void app_status_monitor_network_task(void *arg)
 /**
  * @brief 启动状态监控后台任务。
  *
- * 创建两个轮询任务：电池（1s）和网络信号（3s）。
+ * 写入固定电量显示，并创建网络信号轮询任务（3s）。
  * 开机后由 app_business_start() 调用。
  *
  * @return 成功返回 0；任务创建失败返回负值。
@@ -143,18 +125,9 @@ int app_status_monitor_start(void)
         return 0;
     }
 
-    int ret = osal_task_create("biz_battery",
-                               app_status_monitor_battery_task,
-                               NULL,
-                               4096u,
-                               5u,
-                               NULL);
-    if (ret != 0) {
-        APP_LOGE(TAG, "电池监听任务启动失败, ret=%d", ret);
-        return ret;
-    }
+    (void)app_ui_set_battery_level(APP_STATUS_BATTERY_PERCENT);
 
-    ret = osal_task_create("biz_network",
+    int ret = osal_task_create("biz_network",
                            app_status_monitor_network_task,
                            NULL,
                            4096u,
