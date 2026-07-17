@@ -150,13 +150,24 @@ static int es8311_play(const uint8_t *data,
 /**
  * @brief 将用户百分比音量映射为 ES8311 DAC 数字音量寄存器值。
  *
- * 低于原 50% 的 DAC 区间听感过小，非零音量整体上移到更高 DAC 区间。
- * 实际生效值固定吸附到 10% 档位，避免 1% 细分带来的无意义抖动。
+ * 使用按听感标定的 10% 档位查表。ES8311 寄存器每步为 0.5 dB，
+ * 因此不能把百分比直接线性映射到过宽的寄存器范围。
  */
 static uint8_t es8311_volume_to_dac_reg(uint8_t volume)
 {
-    const uint8_t min_reg = 0xD8u;
-    const uint8_t max_reg = 0xF8u;
+    static const uint8_t volume_regs[] = {
+        0x00u, /*   0%: mute */
+        0xC7u, /*  10%:  +4 dB */
+        0xCBu, /*  20%:  +6 dB */
+        0xCFu, /*  30%:  +8 dB */
+        0xD3u, /*  40%: +10 dB */
+        0xD7u, /*  50%: +12 dB */
+        0xDBu, /*  60%: +14 dB */
+        0xDFu, /*  70%: +16 dB */
+        0xE3u, /*  80%: +18 dB */
+        0xE9u, /*  90%: +21 dB */
+        0xEFu, /* 100%: +24 dB */
+    };
     uint8_t snapped_volume = 0u;
 
     if (volume == 0u) {
@@ -173,7 +184,7 @@ static uint8_t es8311_volume_to_dac_reg(uint8_t volume)
         snapped_volume = 100u;
     }
 
-    return (uint8_t)(min_reg + ((((uint16_t)(max_reg - min_reg) * snapped_volume) + 50u) / 100u));
+    return volume_regs[snapped_volume / 10u];
 }
 
 static int es8311_apply_volume(uint8_t volume)
