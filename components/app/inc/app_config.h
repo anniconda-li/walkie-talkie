@@ -38,6 +38,8 @@ extern "C" {
 
 /** @brief 全局设备 ID，AI、相机和对讲业务都使用同一个身份。 */
 #define APP_DEVICE_ID                   "walkie-03"
+/** @brief 状态栏固定显示电量；设备三演示配置。 */
+#define APP_STATUS_BATTERY_PERCENT      90
 /** @brief 兼容旧业务命名，统一指向 APP_DEVICE_ID。 */
 #define APP_BUSINESS_DEVICE_NAME        APP_DEVICE_ID
 /** @brief 业务服务器地址，AI 与对讲 WebSocket 使用同一公网主机、不同端口。 */
