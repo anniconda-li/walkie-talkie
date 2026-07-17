@@ -69,6 +69,11 @@ static const char *TAG = "d_lcd";
  */
 #define D_LCD_PREVIEW_SWAP_RGB565_BYTES 0
 
+/** @brief FT5x06 有效触摸阈值寄存器。 */
+#define D_LCD_TOUCH_THRESHOLD_REG       0x80u
+/** @brief 在组件默认值 70 基础上小幅降低，提高轻触识别率。 */
+#define D_LCD_TOUCH_THRESHOLD           55u
+
 /**
  * @brief LCD 显示面板 IO 句柄。
  */
@@ -339,7 +344,8 @@ int d_lcd_touch_init(void)
         .x_max = d_lcd_H_RES,
         .y_max = d_lcd_V_RES,
         .rst_gpio_num = d_lcd_TOUCH_RST_IO,
-        .int_gpio_num = d_lcd_TOUCH_INT_IO,
+        /* 使用 LVGL 定时轮询，避免短触摸因 INT 边沿遗漏而完全丢失。 */
+        .int_gpio_num = GPIO_NUM_NC,
         .levels = {
             .reset = 0,
             .interrupt = 0,
@@ -365,7 +371,22 @@ int d_lcd_touch_init(void)
         return ret;
     }
 
-    D_LOGI(TAG, "LCD 触摸初始化成功, int=%d", d_lcd_TOUCH_INT_IO);
+    const uint8_t threshold = D_LCD_TOUCH_THRESHOLD;
+    ret = d_lcd_err_to_int(esp_lcd_panel_io_tx_param(s_lcd_touch_io,
+                                                      D_LCD_TOUCH_THRESHOLD_REG,
+                                                      &threshold,
+                                                      sizeof(threshold)));
+    if (ret != 0) {
+        D_LOGE(TAG, "FT6336/FT5x06 触摸阈值设置失败, ret=%d", ret);
+        (void)esp_lcd_touch_del(s_lcd_touch);
+        s_lcd_touch = NULL;
+        (void)esp_lcd_panel_io_del(s_lcd_touch_io);
+        s_lcd_touch_io = NULL;
+        return ret;
+    }
+
+    D_LOGI(TAG, "LCD 触摸初始化成功, mode=polling, threshold=%u",
+           (unsigned int)D_LCD_TOUCH_THRESHOLD);
     return 0;
 }
 
